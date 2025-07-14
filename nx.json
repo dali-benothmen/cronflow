@@ -34,7 +34,8 @@
       "options": {
         "buildableProjectDepsInPackageJsonType": "dependencies"
       }
-    }
+    },
+    "@monodon/rust"
   ],
   "workspaceLayout": {
     "appsDir": "packages",

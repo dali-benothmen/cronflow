@@ -26,11 +26,20 @@
       "options": {
         "buildableProjectDepsInPackageJsonType": "dependencies"
       }
+    },
+    {
+      "name": "@monodon/rust",
+      "version": "^2.3.0"
     }
   ],
   "fileMap": {
+    "nonProjectFiles": [],
     "projectFileMap": {
       "node-cronflow": [
+        {
+          "file": ".cargo/config.toml",
+          "hash": "16334474086392874934"
+        },
         {
           "file": ".clippy.toml",
           "hash": "9740742986452108511"
@@ -41,7 +50,7 @@
         },
         {
           "file": ".github/workflows/ci.yml",
-          "hash": "14593544276665847794"
+          "hash": "10945510950042842679"
         },
         {
           "file": ".gitignore",
@@ -49,7 +58,7 @@
         },
         {
           "file": ".npmrc",
-          "hash": "18062052376101108704"
+          "hash": "16796171181786015923"
         },
         {
           "file": ".prettierignore",
@@ -58,6 +67,10 @@
         {
           "file": ".prettierrc",
           "hash": "2044758701524863286"
+        },
+        {
+          "file": "Cargo.toml",
+          "hash": "9042746868957388578"
         },
         {
           "file": "README.md",
@@ -73,7 +86,7 @@
         },
         {
           "file": "docs/development-tasks.md",
-          "hash": "17702912296572897890"
+          "hash": "5023693726535705411"
         },
         {
           "file": "docs/division-of-responsibilities-node-rust.md",
@@ -89,15 +102,36 @@
         },
         {
           "file": "nx.json",
-          "hash": "9749500779447611594"
+          "hash": "3034385346992704098"
+        },
+        {
+          "file": "package-lock.json",
+          "hash": "6936783563501101581"
         },
         {
           "file": "package.json",
-          "hash": "687836780920836613"
+          "hash": "7895751595249325310",
+          "deps": [
+            "npm:@monodon/rust",
+            "npm:@nx/js",
+            "npm:@typescript-eslint/eslint-plugin",
+            "npm:@typescript-eslint/parser",
+            "npm:@vitest/coverage-v8",
+            "npm:@vitest/ui",
+            "npm:eslint",
+            "npm:nx",
+            "npm:prettier",
+            "npm:typescript",
+            "npm:vitest",
+            "npm:@rollup/rollup-linux-x64-gnu"
+          ]
         },
         {
           "file": "packages/sdk/src/index.test.ts",
-          "hash": "4663457881146045583"
+          "hash": "4663457881146045583",
+          "deps": [
+            "npm:vitest"
+          ]
         },
         {
           "file": "packages/sdk/src/index.ts",
@@ -113,10 +147,55 @@
         },
         {
           "file": "vitest.config.ts",
-          "hash": "1331225060375385691"
+          "hash": "1331225060375385691",
+          "deps": [
+            "npm:vitest"
+          ]
+        }
+      ],
+      "core": [
+        {
+          "file": "packages/core/Cargo.toml",
+          "hash": "15329024734598651450",
+          "deps": [
+            "cargo:chrono",
+            "cargo:cron",
+            "cargo:env_logger",
+            "cargo:log",
+            "cargo:reqwest",
+            "cargo:rusqlite",
+            "cargo:serde",
+            "cargo:serde_json",
+            "cargo:thiserror",
+            "cargo:tokio",
+            "cargo:uuid"
+          ]
+        },
+        {
+          "file": "packages/core/src/bridge.rs",
+          "hash": "7778492569265840196"
+        },
+        {
+          "file": "packages/core/src/database.rs",
+          "hash": "11102390886935150057"
+        },
+        {
+          "file": "packages/core/src/error.rs",
+          "hash": "16390679533734710973"
+        },
+        {
+          "file": "packages/core/src/lib.rs",
+          "hash": "4724354212439697785"
+        },
+        {
+          "file": "packages/core/src/models.rs",
+          "hash": "5809674053650537830"
+        },
+        {
+          "file": "packages/core/src/state.rs",
+          "hash": "16747813237114169483"
         }
       ]
-    },
-    "nonProjectFiles": []
+    }
   }
 }

@@ -1,4 +1,38 @@
 {
+  "packages/core": {
+    "root": [
+      "packages/core/Cargo.toml",
+      "@monodon/rust"
+    ],
+    "name": [
+      "packages/core/Cargo.toml",
+      "@monodon/rust"
+    ],
+    "release": [
+      "packages/core/Cargo.toml",
+      "@monodon/rust"
+    ],
+    "targets": [
+      "packages/core/Cargo.toml",
+      "@monodon/rust"
+    ],
+    "targets.nx-release-publish": [
+      "packages/core/Cargo.toml",
+      "@monodon/rust"
+    ],
+    "targets.nx-release-publish.dependsOn": [
+      "packages/core/Cargo.toml",
+      "@monodon/rust"
+    ],
+    "targets.nx-release-publish.executor": [
+      "packages/core/Cargo.toml",
+      "@monodon/rust"
+    ],
+    "targets.nx-release-publish.options": [
+      "packages/core/Cargo.toml",
+      "@monodon/rust"
+    ]
+  },
   ".": {
     "root": [
       "package.json",
