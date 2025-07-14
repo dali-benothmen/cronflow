@@ -1,26 +1,35 @@
 {
   "name": "node-cronflow",
   "version": "0.1.0",
-  "description": "A sophisticated workflow automation engine built on Node.js + Rust",
+  "description": "A sophisticated workflow automation engine built on Node.js + Rust, providing a code-first alternative to tools like n8n",
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
+  "files": [
+    "dist/**/*",
+    "core/target/release/*.node",
+    "README.md",
+    "LICENSE"
+  ],
   "scripts": {
     "build": "npm run build:sdk && npm run build:services && npm run build:main",
     "build:sdk": "tsc -p sdk/tsconfig.json",
     "build:services": "tsc -p services/tsconfig.json",
     "build:main": "tsc -p tsconfig.json",
-    "build:core": "cd core && cargo build",
+    "build:core": "cd core && cargo build --release",
+    "build:all": "npm run build:core && npm run build",
+    "prepublishOnly": "npm run build:all && npm run test:package",
     "test": "vitest",
     "test:run": "vitest run",
     "test:ui": "vitest --ui",
     "test:coverage": "vitest run --coverage",
+    "test:package": "node scripts/test-package.js",
     "lint": "eslint src/**/*.ts sdk/**/*.ts services/**/*.ts",
     "lint:fix": "eslint src/**/*.ts sdk/**/*.ts services/**/*.ts --fix",
     "format": "prettier --write .",
     "format:check": "prettier --check .",
     "dev": "tsc --watch",
     "clean": "rm -rf dist node_modules packages",
-    "install:all": "npm install && npm run build"
+    "install:all": "npm install && npm run build:all"
   },
   "keywords": [
     "workflow",
@@ -29,10 +38,36 @@
     "rust",
     "cron",
     "scheduler",
-    "webhooks"
+    "webhooks",
+    "n8n-alternative",
+    "workflow-engine",
+    "api-automation"
   ],
-  "author": "",
+  "author": {
+    "name": "Node-Cronflow Team",
+    "email": "team@node-cronflow.com"
+  },
   "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/node-cronflow/node-cronflow.git"
+  },
+  "bugs": {
+    "url": "https://github.com/node-cronflow/node-cronflow/issues"
+  },
+  "homepage": "https://github.com/node-cronflow/node-cronflow#readme",
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "os": [
+    "linux",
+    "darwin",
+    "win32"
+  ],
+  "cpu": [
+    "x64",
+    "arm64"
+  ],
   "dependencies": {
     "zod": "^3.22.0"
   },
@@ -47,5 +82,8 @@
     "typescript": "^5.3.0",
     "vitest": "^2.0.0",
     "@rollup/rollup-linux-x64-gnu": "^4.40.0"
+  },
+  "publishConfig": {
+    "access": "public"
   }
 }
