@@ -4,8 +4,8 @@
     "module": "CommonJS",
     "moduleResolution": "node",
     "lib": ["ES2022", "DOM"],
-    "outDir": "./dist",
-    "rootDir": "./src",
+    "outDir": "../dist/sdk",
+    "rootDir": "./",
     "strict": true,
     "esModuleInterop": true,
     "skipLibCheck": true,
@@ -16,6 +16,6 @@
     "types": ["node"],
     "noEmit": false
   },
-  "include": ["src/**/*"],
-  "exclude": ["node_modules", "dist", "**/*.test.ts", "**/*.spec.ts"]
+  "include": ["./**/*"],
+  "exclude": ["node_modules", "**/*.test.ts", "**/*.spec.ts"]
 }

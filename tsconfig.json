@@ -1,9 +1,9 @@
 {
   "compilerOptions": {
     "target": "ES2022",
-    "module": "ESNext",
+    "module": "CommonJS",
     "moduleResolution": "node",
-    "lib": ["ES2022"],
+    "lib": ["ES2022", "DOM"],
     "outDir": "./dist",
     "rootDir": "./",
     "strict": true,
@@ -13,20 +13,22 @@
     "declaration": true,
     "declarationMap": true,
     "sourceMap": true,
-    "composite": true,
-    "incremental": true,
-    "resolveJsonModule": true,
-    "allowSyntheticDefaultImports": true,
-    "experimentalDecorators": true,
-    "emitDecoratorMetadata": true,
-    "noEmit": true,
+    "types": ["node"],
+    "noEmit": false,
     "baseUrl": ".",
     "paths": {
-      "@node-cronflow/core": ["packages/core/src/index.ts"],
-      "@node-cronflow/sdk": ["packages/sdk/src/index.ts"],
-      "@node-cronflow/services": ["packages/services/src/index.ts"]
+      "@node-cronflow/sdk": ["sdk"],
+      "@node-cronflow/services": ["services"],
+      "@node-cronflow/core": ["core"]
     }
   },
-  "include": ["packages/**/*", "scripts/**/*", "examples/**/*"],
-  "exclude": ["node_modules", "dist", "build", "target", "*.node"]
+  "include": ["src/**/*", "sdk/**/*", "services/**/*"],
+  "exclude": [
+    "node_modules",
+    "dist",
+    "**/*.test.ts",
+    "**/*.spec.ts",
+    "packages",
+    "core/**/*.rs"
+  ]
 }

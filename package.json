@@ -1,26 +1,26 @@
 {
   "name": "node-cronflow",
-  "version": "1.0.0",
+  "version": "0.1.0",
   "description": "A sophisticated workflow automation engine built on Node.js + Rust",
-  "main": "index.js",
-  "directories": {
-    "doc": "docs"
-  },
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
   "scripts": {
-    "build": "nx run-many --target=build",
+    "build": "npm run build:sdk && npm run build:services && npm run build:main",
+    "build:sdk": "tsc -p sdk/tsconfig.json",
+    "build:services": "tsc -p services/tsconfig.json",
+    "build:main": "tsc -p tsconfig.json",
+    "build:core": "cd core && cargo build",
     "test": "vitest",
     "test:run": "vitest run",
     "test:ui": "vitest --ui",
     "test:coverage": "vitest run --coverage",
-    "lint": "nx run-many --target=lint",
-    "lint:fix": "nx run-many --target=lint --fix",
+    "lint": "eslint src/**/*.ts sdk/**/*.ts services/**/*.ts",
+    "lint:fix": "eslint src/**/*.ts sdk/**/*.ts services/**/*.ts --fix",
     "format": "prettier --write .",
     "format:check": "prettier --check .",
-    "dev": "nx run-many --target=dev",
-    "clean": "nx reset",
-    "graph": "nx graph",
-    "affected:build": "nx affected:build",
-    "affected:test": "nx affected:test"
+    "dev": "tsc --watch",
+    "clean": "rm -rf dist node_modules packages",
+    "install:all": "npm install && npm run build"
   },
   "keywords": [
     "workflow",
@@ -33,31 +33,19 @@
   ],
   "author": "",
   "license": "MIT",
+  "dependencies": {
+    "zod": "^3.22.0"
+  },
   "devDependencies": {
-    "@monodon/rust": "^2.3.0",
-    "@nx/js": "^21.2.4",
-    "@nx/rollup": "^21.2.4",
+    "@types/node": "^20.0.0",
     "@typescript-eslint/eslint-plugin": "^7.0.0",
     "@typescript-eslint/parser": "^7.0.0",
     "@vitest/coverage-v8": "^2.0.0",
     "@vitest/ui": "^2.0.0",
     "eslint": "^8.57.0",
-    "nx": "21.2.4",
     "prettier": "^3.2.0",
     "typescript": "^5.3.0",
-    "vitest": "^2.0.0"
-  },
-  "workspaces": [
-    "packages/*"
-  ],
-  "nx": {
-    "workspaceLayout": {
-      "appsDir": "packages",
-      "libsDir": "packages"
-    }
-  },
-  "dependencies": {
-    "@esbuild/linux-x64": "^0.25.6",
+    "vitest": "^2.0.0",
     "@rollup/rollup-linux-x64-gnu": "^4.40.0"
   }
 }

@@ -1,88 +1,108 @@
 # Node-Cronflow
 
-A sophisticated workflow automation engine built on **Node.js + Rust** that combines the developer-friendly experience of Node.js with the rock-solid reliability and performance of Rust.
+A sophisticated workflow automation engine built on Node.js + Rust, providing a code-first alternative to tools like n8n.
 
-## Architecture
+## 🚀 Quick Start
 
-Node-cronflow follows a clear separation of concerns:
-
-- **Node.js (The SDK)**: Handles the **Developer Experience (DX)**. It's the friendly, flexible, and dynamic "frontend" for the developer.
-- **Rust (The Core Engine)**: Handles **Reliability and Performance**. It's the powerful, durable, and stateful "backend" that does the heavy lifting.
-
-## Project Structure
-
-```
-node-cronflow/
-├── packages/
-│   ├── core/          # Rust engine (state management, job execution)
-│   ├── sdk/           # Node.js SDK (workflow definition, developer API)
-│   └── services/      # Built-in service integrations
-├── examples/          # Example workflows
-├── docs/             # Documentation
-└── scripts/          # Build and deployment scripts
+```bash
+npm install node-cronflow
 ```
 
-## Development Setup
+```javascript
+import { cronflow, defineService } from 'node-cronflow';
 
-This project uses **Nx monorepo** for optimal Node.js + Rust development.
+// Define a service
+const stripeService = defineService('stripe', {
+  version: '1.0.0',
+  configSchema: z.object({ apiKey: z.string() }),
+  createInstance: (config) => ({ charge: (amount) => /* ... */ })
+});
 
-### Prerequisites
+// Create a workflow
+const workflow = cronflow
+  .define('payment-workflow')
+  .onWebhook('/webhook/payment')
+  .step('validate', (ctx) => {
+    // Validate payment data
+    return ctx.payload;
+  })
+  .step('charge', stripeService.charge)
+  .step('notify', (ctx) => {
+    // Send notification
+    return { success: true };
+  });
 
-- Node.js 18+
-- Rust 1.70+
-- Nx CLI (installed globally)
+// Start the engine
+cronflow.start();
+```
 
-### Quick Start
+## 🏗️ Architecture
+
+Node-Cronflow uses a **hybrid architecture** combining the best of both worlds:
+
+- **Node.js**: Developer experience, fluent API, integrations
+- **Rust**: Core engine, state management, reliability
+- **N-API**: High-performance communication bridge
+
+## 📦 Installation
+
+```bash
+npm install node-cronflow
+```
+
+That's it! No additional packages needed - everything is included in one package.
+
+## 🔧 Development
 
 ```bash
 # Install dependencies
 npm install
 
-# Build all packages
+# Build the project
 npm run build
 
 # Run tests
-npm run test
+npm test
 
-# Start development mode
+# Development mode
 npm run dev
-
-# View project graph
-npm run graph
 ```
 
-### Nx Commands
+## 📁 Project Structure
 
-```bash
-# Build all packages
-nx run-many --target=build
-
-# Build only affected packages
-nx affected:build
-
-# Test all packages
-nx run-many --target=test
-
-# View dependency graph
-nx graph
+```
+node-cronflow/
+├── core/             # Rust engine (Cargo.toml, src/)
+├── sdk/              # Node.js SDK (TypeScript)
+├── services/         # Built-in services (TypeScript)
+├── src/              # Main entry point (index.ts)
+├── examples/         # Example workflows
+├── docs/             # Documentation
+└── dist/             # Build output
 ```
 
-## Development Philosophy
+## 🎯 Features
 
-- **Micro-Tasks**: Each development task is a single, focused action
-- **Progressive Dependencies**: Each task builds on the previous one
-- **AI-Friendly**: Tasks are small enough that an AI can understand the current state
-- **Clear Context**: Each task includes the current state and what needs to be done next
-- **Monorepo Structure**: Using Nx for optimal Node.js + Rust development
+- **Code-first workflows** - Define workflows in TypeScript
+- **Built-in services** - Stripe, Slack, HTTP, and more
+- **High performance** - Rust core engine
+- **Type safety** - Full TypeScript support
+- **Simple installation** - One package, everything included
 
-## Key Features
+## 📚 Documentation
 
-- **Hybrid Architecture**: Node.js for DX, Rust for performance
-- **Workflow Definition**: Fluent API for defining complex workflows
-- **Service Integration**: Built-in integrations for popular services
-- **Testing Harness**: Comprehensive testing framework
-- **Production Ready**: Scalable from development to production
+- [API Reference](./docs/api-reference.md)
+- [Architecture](./docs/architecture.md)
+- [Examples](./examples/)
 
-## License
+## 🤝 Contributing
 
-MIT
+1. Fork the repository
+2. Create a feature branch
+3. Make your changes
+4. Add tests
+5. Submit a pull request
+
+## 📄 License
+
+MIT License - see [LICENSE](LICENSE) for details.
