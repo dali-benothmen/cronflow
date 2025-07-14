@@ -1,0 +1,14 @@
+{
+  "recommendations": [
+    "esbenp.prettier-vscode",
+    "dbaeumer.vscode-eslint",
+    "ms-vscode.vscode-typescript-next",
+    "rust-lang.rust-analyzer",
+    "bradlc.vscode-tailwindcss",
+    "ms-vscode.vscode-json",
+    "ms-vscode.vscode-yaml",
+    "ms-vscode.vscode-markdown",
+    "ms-vscode.vscode-git",
+    "ms-vscode.vscode-git-graph"
+  ]
+} 
