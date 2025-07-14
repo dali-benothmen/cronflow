@@ -7,7 +7,14 @@ edition = "2021"
 name = "core"
 crate-type = ["cdylib", "rlib"]
 
+[build-dependencies]
+napi-build = "2.0"
+
 [dependencies]
+# N-API for Node.js communication
+napi = { version = "2.15", default-features = false, features = ["napi4"] }
+napi-derive = "2.15"
+
 # JSON serialization
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"

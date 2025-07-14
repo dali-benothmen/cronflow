@@ -144,12 +144,12 @@ A granular, step-by-step development plan using a monolith architecture for Node
 
 **Actions**:
 
-- [ ] Create `core/src/schema.sql` with table definitions
-- [ ] Define `workflows` table (id, name, definition, created_at)
-- [ ] Define `workflow_runs` table (id, workflow_id, status, payload, created_at)
-- [ ] Define `steps` table (id, run_id, name, status, result, created_at)
-- [ ] Create `core/src/database.rs` with connection setup
-- [ ] Add database initialization function
+- [x] Create `core/src/schema.sql` with table definitions
+- [x] Define `workflows` table (id, name, definition, created_at)
+- [x] Define `workflow_runs` table (id, workflow_id, status, payload, created_at)
+- [x] Define `steps` table (id, run_id, name, status, result, created_at)
+- [x] Create `core/src/database.rs` with connection setup
+- [x] Add database initialization function
 
 **Expected Result**: Database schema is defined and can be initialized
 
@@ -162,12 +162,12 @@ A granular, step-by-step development plan using a monolith architecture for Node
 
 **Actions**:
 
-- [ ] Define `WorkflowDefinition` struct in `core/src/models.rs`
-- [ ] Define `WorkflowRun` struct with status enum
-- [ ] Define `Step` and `StepResult` structs
-- [ ] Add Serde derive macros for JSON serialization
-- [ ] Create `WorkflowState` enum (Pending, Running, Completed, Failed)
-- [ ] Add validation methods to structs
+- [x] Define `WorkflowDefinition` struct in `core/src/models.rs`
+- [x] Define `WorkflowRun` struct with status enum
+- [x] Define `Step` and `StepResult` structs
+- [x] Add Serde derive macros for JSON serialization
+- [x] Create `WorkflowState` enum (Pending, Running, Completed, Failed)
+- [x] Add validation methods to structs
 
 **Expected Result**: Rust can serialize/deserialize workflow data
 
@@ -180,12 +180,12 @@ A granular, step-by-step development plan using a monolith architecture for Node
 
 **Actions**:
 
-- [ ] Create `StateManager` struct in `core/src/state.rs`
-- [ ] Implement `register_workflow` method
-- [ ] Implement `get_workflow` method
-- [ ] Implement `create_run` method
-- [ ] Add basic error handling with custom error types
-- [ ] Connect to database in StateManager
+- [x] Create `StateManager` struct in `core/src/state.rs`
+- [x] Implement `register_workflow` method
+- [x] Implement `get_workflow` method
+- [x] Implement `create_run` method
+- [x] Add basic error handling with custom error types
+- [x] Connect to database in StateManager
 
 **Expected Result**: Workflows can be registered and retrieved from database
 
@@ -198,12 +198,12 @@ A granular, step-by-step development plan using a monolith architecture for Node
 
 **Actions**:
 
-- [ ] Set up N-API module in `core/src/bridge.rs`
-- [ ] Implement `register_workflow` N-API function
-- [ ] Add JSON serialization/deserialization
-- [ ] Add error handling for invalid JSON
-- [ ] Create basic logging for registration events
-- [ ] Test N-API function from Node.js
+- [x] Set up N-API module in `core/src/bridge.rs`
+- [x] Implement `register_workflow` N-API function
+- [x] Add JSON serialization/deserialization
+- [x] Add error handling for invalid JSON
+- [x] Create basic logging for registration events
+- [x] Test N-API function from Node.js
 
 **Expected Result**: Node.js can call Rust functions via N-API
 

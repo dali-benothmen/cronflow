@@ -26,6 +26,7 @@ mod tests {
     use super::*;
     use crate::database::Database;
     use crate::models::{WorkflowDefinition, StepDefinition, TriggerDefinition, RetryConfig, WorkflowRun, RunStatus, StepResult, StepStatus};
+    use crate::bridge::{register_workflow, create_run, get_run_status, execute_step};
     use std::fs;
     use chrono::Utc;
     use uuid::Uuid;
@@ -297,6 +298,70 @@ mod tests {
         let run = retrieved_run.unwrap();
         assert_eq!(run.workflow_id, "test-workflow", "Run should have correct workflow ID");
         assert!(matches!(run.status, RunStatus::Pending), "Run should have pending status");
+        
+        // Clean up
+        let _ = fs::remove_file(db_path);
+    }
+
+    #[test]
+    fn test_napi_bridge_functions() {
+        // Create a temporary database file
+        let db_path = "test_napi_bridge.db";
+        
+        // Clean up any existing test file
+        let _ = fs::remove_file(db_path);
+        
+        // Test workflow registration via N-API bridge
+        let workflow_json = r#"{
+            "id": "test-workflow-napi",
+            "name": "Test Workflow N-API",
+            "description": "A test workflow for N-API verification",
+            "steps": [
+                {
+                    "id": "step1",
+                    "name": "First Step",
+                    "action": "test_action",
+                    "timeout": 5000,
+                    "retry": {
+                        "max_attempts": 3,
+                        "backoff_ms": 1000
+                    },
+                    "depends_on": []
+                }
+            ],
+            "triggers": [
+                {
+                    "Webhook": {
+                        "path": "/webhook/test",
+                        "method": "POST"
+                    }
+                }
+            ],
+            "created_at": "2024-01-01T00:00:00Z",
+            "updated_at": "2024-01-01T00:00:00Z"
+        }"#;
+        
+        // Test register_workflow function
+        let register_result = register_workflow(workflow_json.to_string(), db_path.to_string());
+        assert!(register_result.success, "N-API workflow registration should succeed: {}", register_result.message);
+        
+        // Test create_run function
+        let payload_json = r#"{"test": "data", "timestamp": 1234567890}"#;
+        let create_result = create_run("test-workflow-napi".to_string(), payload_json.to_string(), db_path.to_string());
+        assert!(create_result.success, "N-API run creation should succeed: {}", create_result.message);
+        assert!(create_result.run_id.is_some(), "Run ID should be returned");
+        
+        let run_id = create_result.run_id.unwrap();
+        
+        // Test get_run_status function
+        let status_result = get_run_status(run_id.clone(), db_path.to_string());
+        assert!(status_result.success, "N-API status retrieval should succeed: {}", status_result.message);
+        assert!(status_result.status.is_some(), "Status should be returned");
+        
+        // Test execute_step function
+        let step_result = execute_step(run_id, "step1".to_string(), db_path.to_string());
+        assert!(step_result.success, "N-API step execution should succeed: {}", step_result.message);
+        assert!(step_result.result.is_some(), "Step result should be returned");
         
         // Clean up
         let _ = fs::remove_file(db_path);

@@ -66,8 +66,8 @@ impl StateManager {
             return Ok(Some(run.clone()));
         }
 
-        // TODO: Load from database
-        Ok(None)
+        // Load from database
+        self.db.get_run(&run_id.to_string())
     }
 
     /// Update run status
