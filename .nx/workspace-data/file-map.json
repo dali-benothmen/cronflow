@@ -2,9 +2,15 @@
   "version": "6.0",
   "nxVersion": "21.2.4",
   "pathMappings": {
-    "@node-cronflow/core": ["packages/core/src/index.ts"],
-    "@node-cronflow/sdk": ["packages/sdk/src/index.ts"],
-    "@node-cronflow/services": ["packages/services/src/index.ts"]
+    "@node-cronflow/core": [
+      "packages/core/src/index.ts"
+    ],
+    "@node-cronflow/sdk": [
+      "packages/sdk/src/index.ts"
+    ],
+    "@node-cronflow/services": [
+      "packages/services/src/index.ts"
+    ]
   },
   "nxJsonPlugins": [
     {
@@ -23,7 +29,6 @@
     }
   ],
   "fileMap": {
-    "nonProjectFiles": [],
     "projectFileMap": {
       "node-cronflow": [
         {
@@ -35,8 +40,16 @@
           "hash": "4041787903749919721"
         },
         {
+          "file": ".github/workflows/ci.yml",
+          "hash": "14593544276665847794"
+        },
+        {
           "file": ".gitignore",
           "hash": "338916636826426463"
+        },
+        {
+          "file": ".npmrc",
+          "hash": "18062052376101108704"
         },
         {
           "file": ".prettierignore",
@@ -79,13 +92,12 @@
           "hash": "9749500779447611594"
         },
         {
-          "file": "package-lock.json",
-          "hash": "604802856217041975"
+          "file": "package.json",
+          "hash": "687836780920836613"
         },
         {
-          "file": "package.json",
-          "hash": "4841888897002971838",
-          "deps": ["npm:@monodon/rust", "npm:@nx/js", "npm:nx"]
+          "file": "packages/sdk/src/index.test.ts",
+          "hash": "4663457881146045583"
         },
         {
           "file": "packages/sdk/src/index.ts",
@@ -98,8 +110,13 @@
         {
           "file": "tsconfig.json",
           "hash": "5582636361782075766"
+        },
+        {
+          "file": "vitest.config.ts",
+          "hash": "1331225060375385691"
         }
       ]
-    }
+    },
+    "nonProjectFiles": []
   }
 }
