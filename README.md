@@ -93,15 +93,30 @@ node-cronflow/
 
 - [API Reference](./docs/api-reference.md)
 - [Architecture](./docs/architecture.md)
+- [Versioning Guide](./docs/versioning-guide.md)
 - [Examples](./examples/)
 
 ## 🤝 Contributing
 
+### Development Workflow
+
 1. Fork the repository
-2. Create a feature branch
-3. Make your changes
+2. Create a feature branch: `git checkout -b feat/your-feature`
+3. Make your changes following [conventional commits](./docs/versioning-guide.md)
 4. Add tests
 5. Submit a pull request
+
+### Commit Message Format
+
+We use [Conventional Commits](https://www.conventionalcommits.org/) for versioning:
+
+```bash
+git commit -m "feat(sdk): add parallel workflow execution"
+git commit -m "fix(core): resolve memory leak in state manager"
+git commit -m "docs: update API reference"
+```
+
+See [Versioning Guide](./docs/versioning-guide.md) for detailed information.
 
 ## 📄 License
 

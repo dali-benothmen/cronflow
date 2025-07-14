@@ -1,6 +1,6 @@
 {
   "name": "node-cronflow",
-  "version": "0.1.0",
+  "version": "0.0.0",
   "description": "A sophisticated workflow automation engine built on Node.js + Rust, providing a code-first alternative to tools like n8n",
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
@@ -29,7 +29,9 @@
     "format:check": "prettier --check .",
     "dev": "tsc --watch",
     "clean": "rm -rf dist node_modules packages",
-    "install:all": "npm install && npm run build:all"
+    "install:all": "npm install && npm run build:all",
+    "release": "semantic-release",
+    "release:dry-run": "semantic-release --dry-run"
   },
   "keywords": [
     "workflow",
@@ -48,10 +50,6 @@
     "email": "team@node-cronflow.com"
   },
   "license": "MIT",
-  "repository": {
-    "type": "git",
-    "url": "https://github.com/node-cronflow/node-cronflow.git"
-  },
   "bugs": {
     "url": "https://github.com/node-cronflow/node-cronflow/issues"
   },
@@ -72,6 +70,9 @@
     "zod": "^3.22.0"
   },
   "devDependencies": {
+    "@semantic-release/changelog": "^7.0.0",
+    "@semantic-release/git": "^11.0.0",
+    "@semantic-release/npm": "^11.0.0",
     "@types/node": "^20.0.0",
     "@typescript-eslint/eslint-plugin": "^7.0.0",
     "@typescript-eslint/parser": "^7.0.0",
@@ -79,6 +80,7 @@
     "@vitest/ui": "^2.0.0",
     "eslint": "^8.57.0",
     "prettier": "^3.2.0",
+    "semantic-release": "^23.0.0",
     "typescript": "^5.3.0",
     "vitest": "^2.0.0",
     "@rollup/rollup-linux-x64-gnu": "^4.40.0"

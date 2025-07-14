@@ -1,0 +1,28 @@
+# <type>(<scope>): <subject>
+#
+# <body>
+#
+# <footer>
+
+# Types:
+# feat:     A new feature
+# fix:      A bug fix
+# docs:     Documentation only changes
+# style:    Changes that do not affect the meaning of the code
+# refactor: A code change that neither fixes a bug nor adds a feature
+# perf:     A code change that improves performance
+# test:     Adding missing tests or correcting existing tests
+# chore:    Changes to the build process or auxiliary tools
+
+# Scopes:
+# sdk:      Node.js SDK changes
+# core:     Rust core engine changes
+# services: Built-in services changes
+# docs:     Documentation changes
+# build:    Build system changes
+
+# Examples:
+# feat(sdk): add parallel workflow execution
+# fix(core): resolve memory leak in state manager
+# docs: update API reference
+# chore(build): update TypeScript configuration
