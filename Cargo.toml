@@ -1,9 +1,0 @@
-
-[workspace]
-resolver = '2'
-members = [
-	'packages/core',
-]
-
-[profile.release]
-lto = true

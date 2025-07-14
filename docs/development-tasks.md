@@ -1,6 +1,6 @@
 # Node-Cronflow Development Tasks
 
-A granular, step-by-step development plan using Nx monorepo for Node.js + Rust project.
+A granular, step-by-step development plan using a monolith architecture for Node.js + Rust project.
 
 ## Development Philosophy
 
@@ -8,61 +8,60 @@ A granular, step-by-step development plan using Nx monorepo for Node.js + Rust p
 - **Progressive Dependencies**: Each task builds on the previous one
 - **AI-Friendly**: Tasks are small enough that an AI can understand the current state
 - **Clear Context**: Each task includes the current state and what needs to be done next
-- **Monorepo Structure**: Using Nx for optimal Node.js + Rust development
+- **Monolith Structure**: Using a single package with root-level directories for simplicity and reliability
 
 ---
 
-## Phase 1: Monorepo Foundation
+## Phase 1: Monolith Foundation
 
-### Task 1.1: Initialize Nx Monorepo
+### Task 1.1: Initialize Monolith Project Structure
 
 **Current State**: Empty directory
-**Goal**: Set up Nx monorepo with Node.js and Rust support
+**Goal**: Set up monolith project with Node.js and Rust components
 
 **Actions**:
 
-- [x] Install Nx globally: `npm install -g nx`
-- [x] Create new Nx workspace: `npx create-nx-workspace@latest node-cronflow --preset=empty`
-- [x] Navigate to project directory
-- [x] Add Rust plugin: `npm install -D @nx/rust`
-- [x] Configure Nx for Rust development
+- [x] Initialize npm package: `npm init -y`
+- [x] Create root-level directory structure
+- [x] Add TypeScript configuration
+- [x] Add build scripts for Rust core and TypeScript compilation
+- [x] Configure npm publishing and validation
 
-**Expected Result**: Nx workspace is initialized with Rust support
+**Expected Result**: Monolith project structure is initialized with build system
 
 ---
 
 ### Task 1.2: Create Project Structure
 
-**Current State**: Nx workspace exists
-**Goal**: Set up the monorepo package structure
+**Current State**: Basic npm package exists
+**Goal**: Set up the monolith directory structure
 
 **Actions**:
 
-- [x] Create `packages/` directory
-- [x] Create `packages/core/` for Rust engine
-- [x] Create `packages/sdk/` for Node.js SDK
-- [x] Create `packages/services/` for built-in services
+- [x] Create `core/` directory for Rust engine
+- [x] Create `sdk/` directory for Node.js SDK
+- [x] Create `services/` directory for built-in services
+- [x] Create `src/` directory for main entry point
 - [x] Create `examples/` directory for example workflows
 - [x] Create `docs/` directory for documentation
 - [x] Create `scripts/` directory for build scripts
 
-**Expected Result**: Monorepo directory structure is created
+**Expected Result**: Monolith directory structure is created
 
 ---
 
 ### Task 1.3: Initialize Rust Core Package
 
 **Current State**: Directory structure exists
-**Goal**: Set up the Rust core package with Nx
+**Goal**: Set up the Rust core package
 
 **Actions**:
 
-- [x] Generate Rust library: `nx g @nx/rust:library core --directory=packages/core`
-- [x] Update `packages/core/Cargo.toml` with dependencies
+- [x] Create `core/Cargo.toml` with dependencies
 - [x] Add `node-api` dependency for N-API bindings
 - [x] Add `serde` and `serde_json` for JSON handling
 - [x] Add `rusqlite` for database operations
-- [x] Create basic `packages/core/src/lib.rs`
+- [x] Create basic `core/src/lib.rs`
 
 **Expected Result**: Rust core package is initialized and builds successfully
 
@@ -75,12 +74,11 @@ A granular, step-by-step development plan using Nx monorepo for Node.js + Rust p
 
 **Actions**:
 
-- [x] Generate Node.js library: `nx g @nx/js:library sdk --directory=packages/sdk`
-- [x] Update `packages/sdk/package.json` with dependencies
-- [x] Add TypeScript configuration
+- [x] Create `sdk/package.json` with dependencies
+- [x] Add TypeScript configuration for SDK
 - [x] Add `@types/node` for Node.js types
 - [x] Add `zod` for schema validation
-- [x] Create basic `packages/sdk/src/index.ts`
+- [x] Create basic `sdk/src/index.ts`
 
 **Expected Result**: Node.js SDK package is initialized and builds successfully
 
@@ -93,30 +91,29 @@ A granular, step-by-step development plan using Nx monorepo for Node.js + Rust p
 
 **Actions**:
 
-- [ ] Generate Node.js library: `nx g @nx/js:library services --directory=packages/services`
-- [ ] Update `packages/services/package.json` with dependencies
-- [ ] Add TypeScript configuration for services
-- [ ] Create basic service exports
+- [x] Create `services/package.json` with dependencies
+- [x] Add TypeScript configuration for services
+- [x] Create basic service exports
+- [x] Add service template structure
 
 **Expected Result**: Services package is initialized and ready for service templates
 
 ---
 
-### Task 1.6: Configure Workspace Dependencies
+### Task 1.6: Configure Build System
 
 **Current State**: All packages exist
-**Goal**: Set up package dependencies and workspace configuration
+**Goal**: Set up build scripts and dependencies
 
 **Actions**:
 
-- [ ] Update root `package.json` with workspace configuration
-- [ ] Add SDK as dependency to services package
-- [ ] Configure Nx project graph dependencies
-- [ ] Set up shared TypeScript configuration
-- [ ] Configure build and test scripts
-- [ ] Test workspace: `nx run-many --target=build`
+- [x] Update root `package.json` with build scripts
+- [x] Configure TypeScript compilation for SDK and services
+- [x] Set up Rust build via Cargo
+- [x] Configure main entry point compilation
+- [x] Test build system: `npm run build:all`
 
-**Expected Result**: All packages can be built together and dependencies work correctly
+**Expected Result**: All components can be built together and dependencies work correctly
 
 ---
 
@@ -129,12 +126,12 @@ A granular, step-by-step development plan using Nx monorepo for Node.js + Rust p
 
 **Actions**:
 
-- [ ] Create `packages/core/src/error.rs` with error types
-- [ ] Create `packages/core/src/models.rs` with data structures
-- [ ] Create `packages/core/src/database.rs` for database operations
-- [ ] Create `packages/core/src/state.rs` for state management
-- [ ] Create `packages/core/src/bridge.rs` for N-API bindings
-- [ ] Update `packages/core/src/lib.rs` to export modules
+- [ ] Create `core/src/error.rs` with error types
+- [ ] Create `core/src/models.rs` with data structures
+- [ ] Create `core/src/database.rs` for database operations
+- [ ] Create `core/src/state.rs` for state management
+- [ ] Create `core/src/bridge.rs` for N-API bindings
+- [ ] Update `core/src/lib.rs` to export modules
 
 **Expected Result**: Rust project has proper module structure
 
@@ -147,11 +144,11 @@ A granular, step-by-step development plan using Nx monorepo for Node.js + Rust p
 
 **Actions**:
 
-- [ ] Create `packages/core/src/schema.sql` with table definitions
+- [ ] Create `core/src/schema.sql` with table definitions
 - [ ] Define `workflows` table (id, name, definition, created_at)
 - [ ] Define `workflow_runs` table (id, workflow_id, status, payload, created_at)
 - [ ] Define `steps` table (id, run_id, name, status, result, created_at)
-- [ ] Create `packages/core/src/database.rs` with connection setup
+- [ ] Create `core/src/database.rs` with connection setup
 - [ ] Add database initialization function
 
 **Expected Result**: Database schema is defined and can be initialized
@@ -165,7 +162,7 @@ A granular, step-by-step development plan using Nx monorepo for Node.js + Rust p
 
 **Actions**:
 
-- [ ] Define `WorkflowDefinition` struct in `packages/core/src/models.rs`
+- [ ] Define `WorkflowDefinition` struct in `core/src/models.rs`
 - [ ] Define `WorkflowRun` struct with status enum
 - [ ] Define `Step` and `StepResult` structs
 - [ ] Add Serde derive macros for JSON serialization
@@ -183,7 +180,7 @@ A granular, step-by-step development plan using Nx monorepo for Node.js + Rust p
 
 **Actions**:
 
-- [ ] Create `StateManager` struct in `packages/core/src/state.rs`
+- [ ] Create `StateManager` struct in `core/src/state.rs`
 - [ ] Implement `register_workflow` method
 - [ ] Implement `get_workflow` method
 - [ ] Implement `create_run` method
@@ -201,7 +198,7 @@ A granular, step-by-step development plan using Nx monorepo for Node.js + Rust p
 
 **Actions**:
 
-- [ ] Set up N-API module in `packages/core/src/bridge.rs`
+- [ ] Set up N-API module in `core/src/bridge.rs`
 - [ ] Implement `register_workflow` N-API function
 - [ ] Add JSON serialization/deserialization
 - [ ] Add error handling for invalid JSON
@@ -221,7 +218,7 @@ A granular, step-by-step development plan using Nx monorepo for Node.js + Rust p
 
 **Actions**:
 
-- [ ] Create `packages/core/src/job.rs` with Job struct
+- [ ] Create `core/src/job.rs` with Job struct
 - [ ] Define job states (Pending, Running, Completed, Failed)
 - [ ] Add job metadata (workflowId, stepName, payload)
 - [ ] Create job queue structure
@@ -239,7 +236,7 @@ A granular, step-by-step development plan using Nx monorepo for Node.js + Rust p
 
 **Actions**:
 
-- [ ] Create `packages/core/src/dispatcher.rs` with Dispatcher struct
+- [ ] Create `core/src/dispatcher.rs` with Dispatcher struct
 - [ ] Implement job queue management
 - [ ] Add job status tracking
 - [ ] Create job dispatching logic
@@ -257,7 +254,7 @@ A granular, step-by-step development plan using Nx monorepo for Node.js + Rust p
 
 **Actions**:
 
-- [ ] Create `packages/core/src/context.rs` with Context struct
+- [ ] Create `core/src/context.rs` with Context struct
 - [ ] Define context fields (payload, steps, services, run)
 - [ ] Implement context serialization to JSON
 - [ ] Add context creation from job data
@@ -275,7 +272,7 @@ A granular, step-by-step development plan using Nx monorepo for Node.js + Rust p
 
 **Actions**:
 
-- [ ] Add `execute_job` function to `packages/core/src/bridge.rs`
+- [ ] Add `execute_job` function to `core/src/bridge.rs`
 - [ ] Implement job dispatching from N-API
 - [ ] Add context serialization for Node.js
 - [ ] Create job result handling
@@ -295,12 +292,12 @@ A granular, step-by-step development plan using Nx monorepo for Node.js + Rust p
 
 **Actions**:
 
-- [ ] Create `packages/sdk/src/workflow.ts` with WorkflowInstance class
+- [ ] Create `sdk/src/workflow.ts` with WorkflowInstance class
 - [ ] Implement `cronflow.define()` function
 - [ ] Add basic workflow options (id, name, description)
 - [ ] Create workflow validation
 - [ ] Add workflow serialization to JSON
-- [ ] Export from `packages/sdk/src/index.ts`
+- [ ] Export from `sdk/src/index.ts`
 
 **Expected Result**: Basic workflow definition works
 
@@ -350,7 +347,7 @@ A granular, step-by-step development plan using Nx monorepo for Node.js + Rust p
 **Actions**:
 
 - [ ] Add Rust addon dependency to SDK package
-- [ ] Update `packages/sdk/src/index.ts` to use Rust addon
+- [ ] Update `sdk/src/index.ts` to use Rust addon
 - [ ] Add workflow registration to Rust engine
 - [ ] Implement workflow serialization
 - [ ] Add error handling for registration
@@ -369,7 +366,7 @@ A granular, step-by-step development plan using Nx monorepo for Node.js + Rust p
 
 **Actions**:
 
-- [ ] Create `packages/core/src/triggers.rs` with trigger types
+- [ ] Create `core/src/triggers.rs` with trigger types
 - [ ] Add webhook trigger structure
 - [ ] Create HTTP server setup with actix-web
 - [ ] Add webhook endpoint routing
@@ -425,7 +422,7 @@ A granular, step-by-step development plan using Nx monorepo for Node.js + Rust p
 
 **Actions**:
 
-- [ ] Create `packages/services/src/index.ts` with service types
+- [ ] Create `services/src/index.ts` with service types
 - [ ] Implement `defineService()` function
 - [ ] Add service validation
 - [ ] Create service template structure
@@ -678,34 +675,34 @@ A granular, step-by-step development plan using Nx monorepo for Node.js + Rust p
 
 ---
 
-## Nx Monorepo Benefits
+## Monolith Architecture Benefits
 
 ### Development Workflow:
 
-- **Build**: `nx run-many --target=build` builds all packages
-- **Test**: `nx run-many --target=test` tests all packages
-- **Dev**: `nx run-many --target=dev` runs dev mode for all packages
-- **Affected**: `nx affected:build` only builds changed packages
+- **Build**: `npm run build:all` builds all components
+- **Test**: `npm test` tests all components
+- **Dev**: `npm run dev` runs dev mode
+- **Publish**: `npm run release` creates new version
 
 ### Package Dependencies:
 
 - SDK depends on Core (Rust addon)
 - Services depends on SDK
-- Examples depends on SDK and Services
-- Clear dependency graph with Nx
+- Main entry point exports everything
+- Single npm package for users
 
 ### Tooling:
 
-- **Nx Console**: Visual development tools
-- **Nx Cloud**: Distributed caching and analytics
-- **Nx Graph**: Visualize package dependencies
-- **Nx Affected**: Only rebuild what changed
+- **TypeScript**: Shared configuration with path mapping
+- **Rust**: Cargo for core engine compilation
+- **npm**: Single package management
+- **Semantic Release**: Automatic versioning
 
 ### Configuration:
 
 - Shared TypeScript configuration
-- Shared ESLint and Prettier configuration
-- Centralized dependency management
+- Centralized build scripts
+- Single package.json for dependencies
 - Optimized build and test pipelines
 
-This monorepo structure with Nx provides the best development experience for a Node.js + Rust project, with clear separation of concerns, efficient tooling, and excellent scalability.
+This monolith structure provides the best development experience for a Node.js + Rust project, with clear separation of concerns, efficient tooling, and excellent simplicity for both development and deployment.

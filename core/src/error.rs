@@ -30,6 +30,12 @@ pub enum CoreError {
     #[error("Configuration error: {0}")]
     Configuration(String),
 
+    #[error("Date parsing error: {0}")]
+    DateParse(#[from] chrono::ParseError),
+
+    #[error("UUID parsing error: {0}")]
+    UuidParse(#[from] uuid::Error),
+
     #[error("Internal error: {0}")]
     Internal(String),
 }
