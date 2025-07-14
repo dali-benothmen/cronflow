@@ -1,0 +1,52 @@
+{
+  "name": "node-cronflow",
+  "version": "1.0.0",
+  "description": "A sophisticated workflow automation engine built on Node.js + Rust",
+  "main": "index.js",
+  "directories": {
+    "doc": "docs"
+  },
+  "scripts": {
+    "build": "nx run-many --target=build",
+    "test": "nx run-many --target=test",
+    "lint": "nx run-many --target=lint",
+    "lint:fix": "nx run-many --target=lint --fix",
+    "format": "prettier --write .",
+    "format:check": "prettier --check .",
+    "dev": "nx run-many --target=dev",
+    "clean": "nx reset",
+    "graph": "nx graph",
+    "affected:build": "nx affected:build",
+    "affected:test": "nx affected:test"
+  },
+  "keywords": [
+    "workflow",
+    "automation",
+    "nodejs",
+    "rust",
+    "cron",
+    "scheduler",
+    "webhooks"
+  ],
+  "author": "",
+  "license": "MIT",
+  "devDependencies": {
+    "@monodon/rust": "^2.3.0",
+    "@nx/js": "^21.2.4",
+    "@typescript-eslint/eslint-plugin": "^7.0.0",
+    "@typescript-eslint/parser": "^7.0.0",
+    "eslint": "^8.57.0",
+    "nx": "21.2.4",
+    "prettier": "^3.2.0",
+    "typescript": "^5.3.0"
+  },
+  "workspaces": [
+    "packages/*"
+  ],
+  "nx": {
+    "workspaceLayout": {
+      "appsDir": "packages",
+      "libsDir": "packages"
+    }
+  }
+}

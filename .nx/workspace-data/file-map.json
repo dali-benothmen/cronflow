@@ -1,0 +1,105 @@
+{
+  "version": "6.0",
+  "nxVersion": "21.2.4",
+  "pathMappings": {
+    "@node-cronflow/core": ["packages/core/src/index.ts"],
+    "@node-cronflow/sdk": ["packages/sdk/src/index.ts"],
+    "@node-cronflow/services": ["packages/services/src/index.ts"]
+  },
+  "nxJsonPlugins": [
+    {
+      "name": "@nx/js",
+      "version": "^21.2.4",
+      "options": {
+        "buildableProjectDepsInPackageJsonType": "dependencies"
+      }
+    },
+    {
+      "name": "@monodon/rust",
+      "version": "^2.3.0",
+      "options": {
+        "buildableProjectDepsInPackageJsonType": "dependencies"
+      }
+    }
+  ],
+  "fileMap": {
+    "nonProjectFiles": [],
+    "projectFileMap": {
+      "node-cronflow": [
+        {
+          "file": ".clippy.toml",
+          "hash": "9740742986452108511"
+        },
+        {
+          "file": ".eslintrc.json",
+          "hash": "4041787903749919721"
+        },
+        {
+          "file": ".gitignore",
+          "hash": "338916636826426463"
+        },
+        {
+          "file": ".prettierignore",
+          "hash": "18068612722738004054"
+        },
+        {
+          "file": ".prettierrc",
+          "hash": "2044758701524863286"
+        },
+        {
+          "file": "README.md",
+          "hash": "11123752324738637615"
+        },
+        {
+          "file": "docs/api-reference.md",
+          "hash": "16767548918637989363"
+        },
+        {
+          "file": "docs/architecture.md",
+          "hash": "2950546608433871109"
+        },
+        {
+          "file": "docs/development-tasks.md",
+          "hash": "17702912296572897890"
+        },
+        {
+          "file": "docs/division-of-responsibilities-node-rust.md",
+          "hash": "944108397682893668"
+        },
+        {
+          "file": "docs/documentation.md",
+          "hash": "6445295819738117112"
+        },
+        {
+          "file": "docs/example-usage.md",
+          "hash": "666134559351902124"
+        },
+        {
+          "file": "nx.json",
+          "hash": "9749500779447611594"
+        },
+        {
+          "file": "package-lock.json",
+          "hash": "604802856217041975"
+        },
+        {
+          "file": "package.json",
+          "hash": "4841888897002971838",
+          "deps": ["npm:@monodon/rust", "npm:@nx/js", "npm:nx"]
+        },
+        {
+          "file": "packages/sdk/src/index.ts",
+          "hash": "6230817476320403594"
+        },
+        {
+          "file": "rustfmt.toml",
+          "hash": "16324872440385804312"
+        },
+        {
+          "file": "tsconfig.json",
+          "hash": "5582636361782075766"
+        }
+      ]
+    }
+  }
+}

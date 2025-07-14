@@ -1,0 +1,32 @@
+{
+  "compilerOptions": {
+    "target": "ES2022",
+    "module": "ESNext",
+    "moduleResolution": "node",
+    "lib": ["ES2022"],
+    "outDir": "./dist",
+    "rootDir": "./",
+    "strict": true,
+    "esModuleInterop": true,
+    "skipLibCheck": true,
+    "forceConsistentCasingInFileNames": true,
+    "declaration": true,
+    "declarationMap": true,
+    "sourceMap": true,
+    "composite": true,
+    "incremental": true,
+    "resolveJsonModule": true,
+    "allowSyntheticDefaultImports": true,
+    "experimentalDecorators": true,
+    "emitDecoratorMetadata": true,
+    "noEmit": true,
+    "baseUrl": ".",
+    "paths": {
+      "@node-cronflow/core": ["packages/core/src/index.ts"],
+      "@node-cronflow/sdk": ["packages/sdk/src/index.ts"],
+      "@node-cronflow/services": ["packages/services/src/index.ts"]
+    }
+  },
+  "include": ["packages/**/*", "scripts/**/*", "examples/**/*"],
+  "exclude": ["node_modules", "dist", "build", "target", "*.node"]
+}
