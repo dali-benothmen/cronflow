@@ -3,7 +3,7 @@ console.log('🧪 Testing N-API Bridge...\n');
 // Check if the N-API module is available
 let coreModule;
 try {
-  coreModule = require('../../core/target/release/core.node');
+  coreModule = require('../../core/core.node');
   console.log('✅ N-API module loaded successfully');
 } catch (error) {
   console.log('⚠️  N-API module not available yet');
@@ -18,8 +18,7 @@ try {
   process.exit(0);
 }
 
-const { register_workflow, create_run, get_run_status, execute_step } =
-  coreModule;
+const { registerWorkflow, createRun, getRunStatus, executeStep } = coreModule;
 
 // Test database path
 const db_path = './test_napi_bridge.db';
@@ -57,7 +56,7 @@ const test_workflow = {
 // Test 1: Register workflow
 console.log('1️⃣ Testing workflow registration...');
 const workflow_json = JSON.stringify(test_workflow);
-const register_result = register_workflow(workflow_json, db_path);
+const register_result = registerWorkflow(workflow_json, db_path);
 console.log('Register result:', register_result);
 
 if (!register_result.success) {
@@ -70,7 +69,7 @@ console.log('✅ Workflow registration successful\n');
 console.log('2️⃣ Testing run creation...');
 const payload = { test: 'data', timestamp: Date.now() };
 const payload_json = JSON.stringify(payload);
-const create_result = create_run(test_workflow.id, payload_json, db_path);
+const create_result = createRun(test_workflow.id, payload_json, db_path);
 console.log('Create result:', create_result);
 
 if (!create_result.success) {
@@ -81,8 +80,8 @@ console.log('✅ Run creation successful\n');
 
 // Test 3: Get run status
 console.log('3️⃣ Testing run status retrieval...');
-const run_id = create_result.run_id;
-const status_result = get_run_status(run_id, db_path);
+const run_id = create_result.runId; // Fix: use runId instead of run_id
+const status_result = getRunStatus(run_id, db_path);
 console.log('Status result:', status_result);
 
 if (!status_result.success) {
@@ -93,7 +92,7 @@ console.log('✅ Status retrieval successful\n');
 
 // Test 4: Execute step
 console.log('4️⃣ Testing step execution...');
-const step_result = execute_step(run_id, 'step1', db_path);
+const step_result = executeStep(run_id, 'step1', db_path);
 console.log('Step result:', step_result);
 
 if (!step_result.success) {

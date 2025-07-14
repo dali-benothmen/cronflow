@@ -6,16 +6,32 @@
   "types": "./dist/index.d.ts",
   "files": [
     "dist/**/*",
-    "core/target/release/*.node",
+    "core/core.node",
     "README.md",
     "LICENSE"
   ],
+  "napi": {
+    "binaryName": "core",
+    "targets": [
+      "x86_64-pc-windows-msvc",
+      "i686-pc-windows-msvc",
+      "aarch64-apple-darwin",
+      "x86_64-apple-darwin",
+      "x86_64-unknown-linux-gnu",
+      "x86_64-unknown-linux-musl",
+      "aarch64-unknown-linux-gnu",
+      "aarch64-unknown-linux-musl",
+      "armv7-unknown-linux-gnueabihf",
+      "x86_64-unknown-freebsd"
+    ]
+  },
   "scripts": {
     "build": "npm run build:sdk && npm run build:services && npm run build:main",
     "build:sdk": "tsc -p sdk/tsconfig.json",
     "build:services": "tsc -p services/tsconfig.json",
     "build:main": "tsc -p tsconfig.json",
-    "build:core": "cd core && cargo build --release",
+    "build:core": "cd core && napi build --release --package-json-path ../package.json",
+    "build:core:debug": "cd core && napi build --package-json-path ../package.json",
     "build:all": "npm run build:core && npm run build",
     "prepublishOnly": "npm run build:all && npm run test:package",
     "test": "vitest",
@@ -23,12 +39,13 @@
     "test:ui": "vitest --ui",
     "test:coverage": "vitest run --coverage",
     "test:package": "node scripts/test-package.js",
+    "test:napi": "node tests/napi/bridge-test.js",
     "lint": "eslint src/**/*.ts sdk/**/*.ts services/**/*.ts",
     "lint:fix": "eslint src/**/*.ts sdk/**/*.ts services/**/*.ts --fix",
     "format": "prettier --write .",
     "format:check": "prettier --check .",
     "dev": "tsc --watch",
-    "clean": "rm -rf dist node_modules packages",
+    "clean": "rm -rf dist node_modules packages core/core.node",
     "install:all": "npm install && npm run build:all",
     "release": "semantic-release",
     "release:dry-run": "semantic-release --dry-run"
@@ -70,6 +87,7 @@
     "zod": "^3.22.0"
   },
   "devDependencies": {
+    "@napi-rs/cli": "^3.0.0",
     "@semantic-release/changelog": "^7.0.0",
     "@semantic-release/git": "^11.0.0",
     "@semantic-release/npm": "^11.0.0",
