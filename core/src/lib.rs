@@ -220,4 +220,85 @@ mod tests {
         let step_validation_result = invalid_step.validate();
         assert!(step_validation_result.is_err(), "Invalid step should fail validation");
     }
+
+    #[test]
+    fn test_state_manager_workflow_registration() {
+        // Create a temporary database file
+        let db_path = "test_state_manager.db";
+        
+        // Clean up any existing test file
+        let _ = fs::remove_file(db_path);
+        
+        // Create state manager
+        let state_manager_result = crate::state::StateManager::new(db_path);
+        assert!(state_manager_result.is_ok(), "State manager should be created successfully");
+        
+        let state_manager = state_manager_result.unwrap();
+        
+        // Create a test workflow
+        let workflow = WorkflowDefinition {
+            id: "test-workflow".to_string(),
+            name: "Test Workflow".to_string(),
+            description: Some("A test workflow".to_string()),
+            steps: vec![
+                StepDefinition {
+                    id: "step1".to_string(),
+                    name: "First Step".to_string(),
+                    action: "test_action".to_string(),
+                    timeout: Some(5000),
+                    retry: Some(RetryConfig {
+                        max_attempts: 3,
+                        backoff_ms: 1000,
+                    }),
+                    depends_on: vec![],
+                }
+            ],
+            triggers: vec![
+                TriggerDefinition::Webhook {
+                    path: "/webhook/test".to_string(),
+                    method: "POST".to_string(),
+                }
+            ],
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+        };
+        
+        // Test workflow registration
+        let register_result = state_manager.register_workflow(workflow.clone());
+        assert!(register_result.is_ok(), "Workflow registration should succeed");
+        
+        // Test workflow retrieval
+        let retrieved_workflow_result = state_manager.get_workflow("test-workflow");
+        assert!(retrieved_workflow_result.is_ok(), "Workflow retrieval should succeed");
+        
+        let retrieved_workflow = retrieved_workflow_result.unwrap();
+        assert!(retrieved_workflow.is_some(), "Retrieved workflow should exist");
+        
+        let retrieved = retrieved_workflow.unwrap();
+        assert_eq!(retrieved.id, workflow.id, "Retrieved workflow should have same ID");
+        assert_eq!(retrieved.name, workflow.name, "Retrieved workflow should have same name");
+        assert_eq!(retrieved.steps.len(), workflow.steps.len(), "Retrieved workflow should have same number of steps");
+        
+        // Test creating a workflow run
+        let mut state_manager = crate::state::StateManager::new(db_path).unwrap();
+        let run_result = state_manager.create_run("test-workflow", serde_json::json!({"test": "data"}));
+        assert!(run_result.is_ok(), "Workflow run creation should succeed");
+        
+        let run_id = run_result.unwrap();
+        assert!(run_id != Uuid::nil(), "Run ID should not be nil");
+        
+        // Test retrieving the run
+        let run_retrieval_result = state_manager.get_run(&run_id);
+        assert!(run_retrieval_result.is_ok(), "Run retrieval should succeed");
+        
+        let retrieved_run = run_retrieval_result.unwrap();
+        assert!(retrieved_run.is_some(), "Retrieved run should exist");
+        
+        let run = retrieved_run.unwrap();
+        assert_eq!(run.workflow_id, "test-workflow", "Run should have correct workflow ID");
+        assert!(matches!(run.status, RunStatus::Pending), "Run should have pending status");
+        
+        // Clean up
+        let _ = fs::remove_file(db_path);
+    }
 }
