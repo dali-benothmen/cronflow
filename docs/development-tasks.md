@@ -75,12 +75,12 @@ A granular, step-by-step development plan using Nx monorepo for Node.js + Rust p
 
 **Actions**:
 
-- [ ] Generate Node.js library: `nx g @nx/js:library sdk --directory=packages/sdk`
-- [ ] Update `packages/sdk/package.json` with dependencies
-- [ ] Add TypeScript configuration
-- [ ] Add `@types/node` for Node.js types
-- [ ] Add `zod` for schema validation
-- [ ] Create basic `packages/sdk/src/index.ts`
+- [x] Generate Node.js library: `nx g @nx/js:library sdk --directory=packages/sdk`
+- [x] Update `packages/sdk/package.json` with dependencies
+- [x] Add TypeScript configuration
+- [x] Add `@types/node` for Node.js types
+- [x] Add `zod` for schema validation
+- [x] Create basic `packages/sdk/src/index.ts`
 
 **Expected Result**: Node.js SDK package is initialized and builds successfully
 
@@ -95,8 +95,6 @@ A granular, step-by-step development plan using Nx monorepo for Node.js + Rust p
 
 - [ ] Generate Node.js library: `nx g @nx/js:library services --directory=packages/services`
 - [ ] Update `packages/services/package.json` with dependencies
-- [ ] Add service-specific dependencies (stripe, slack, etc.)
-- [ ] Create service template structure
 - [ ] Add TypeScript configuration for services
 - [ ] Create basic service exports
 
