@@ -35,6 +35,49 @@
   "fileMap": {
     "nonProjectFiles": [],
     "projectFileMap": {
+      "core": [
+        {
+          "file": "packages/core/Cargo.toml",
+          "hash": "15329024734598651450",
+          "deps": [
+            "cargo:chrono",
+            "cargo:cron",
+            "cargo:env_logger",
+            "cargo:log",
+            "cargo:reqwest",
+            "cargo:rusqlite",
+            "cargo:serde",
+            "cargo:serde_json",
+            "cargo:thiserror",
+            "cargo:tokio",
+            "cargo:uuid"
+          ]
+        },
+        {
+          "file": "packages/core/src/bridge.rs",
+          "hash": "7778492569265840196"
+        },
+        {
+          "file": "packages/core/src/database.rs",
+          "hash": "11102390886935150057"
+        },
+        {
+          "file": "packages/core/src/error.rs",
+          "hash": "16390679533734710973"
+        },
+        {
+          "file": "packages/core/src/lib.rs",
+          "hash": "4724354212439697785"
+        },
+        {
+          "file": "packages/core/src/models.rs",
+          "hash": "5809674053650537830"
+        },
+        {
+          "file": "packages/core/src/state.rs",
+          "hash": "16747813237114169483"
+        }
+      ],
       "node-cronflow": [
         {
           "file": ".cargo/config.toml",
@@ -86,7 +129,7 @@
         },
         {
           "file": "docs/development-tasks.md",
-          "hash": "5023693726535705411"
+          "hash": "13170744722296164345"
         },
         {
           "file": "docs/division-of-responsibilities-node-rust.md",
@@ -127,17 +170,6 @@
           ]
         },
         {
-          "file": "packages/sdk/src/index.test.ts",
-          "hash": "4663457881146045583",
-          "deps": [
-            "npm:vitest"
-          ]
-        },
-        {
-          "file": "packages/sdk/src/index.ts",
-          "hash": "6230817476320403594"
-        },
-        {
           "file": "rustfmt.toml",
           "hash": "16324872440385804312"
         },
@@ -153,47 +185,36 @@
           ]
         }
       ],
-      "core": [
+      "sdk": [
         {
-          "file": "packages/core/Cargo.toml",
-          "hash": "15329024734598651450",
+          "file": "packages/sdk/package.json",
+          "hash": "10454915561717945837",
           "deps": [
-            "cargo:chrono",
-            "cargo:cron",
-            "cargo:env_logger",
-            "cargo:log",
-            "cargo:reqwest",
-            "cargo:rusqlite",
-            "cargo:serde",
-            "cargo:serde_json",
-            "cargo:thiserror",
-            "cargo:tokio",
-            "cargo:uuid"
+            "npm:@typescript-eslint/eslint-plugin",
+            "npm:@typescript-eslint/parser",
+            "npm:eslint",
+            "npm:typescript",
+            "npm:vitest"
           ]
         },
         {
-          "file": "packages/core/src/bridge.rs",
-          "hash": "7778492569265840196"
+          "file": "packages/sdk/project.json",
+          "hash": "11097167438329086026"
         },
         {
-          "file": "packages/core/src/database.rs",
-          "hash": "11102390886935150057"
+          "file": "packages/sdk/src/index.test.ts",
+          "hash": "4663457881146045583",
+          "deps": [
+            "npm:vitest"
+          ]
         },
         {
-          "file": "packages/core/src/error.rs",
-          "hash": "16390679533734710973"
+          "file": "packages/sdk/src/index.ts",
+          "hash": "8901799208671915101"
         },
         {
-          "file": "packages/core/src/lib.rs",
-          "hash": "4724354212439697785"
-        },
-        {
-          "file": "packages/core/src/models.rs",
-          "hash": "5809674053650537830"
-        },
-        {
-          "file": "packages/core/src/state.rs",
-          "hash": "16747813237114169483"
+          "file": "packages/sdk/tsconfig.json",
+          "hash": "7285716208079282567"
         }
       ]
     }

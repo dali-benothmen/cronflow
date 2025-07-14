@@ -57,12 +57,12 @@ A granular, step-by-step development plan using Nx monorepo for Node.js + Rust p
 
 **Actions**:
 
-- [ ] Generate Rust library: `nx g @nx/rust:library core --directory=packages/core`
-- [ ] Update `packages/core/Cargo.toml` with dependencies
-- [ ] Add `node-api` dependency for N-API bindings
-- [ ] Add `serde` and `serde_json` for JSON handling
-- [ ] Add `rusqlite` for database operations
-- [ ] Create basic `packages/core/src/lib.rs`
+- [x] Generate Rust library: `nx g @nx/rust:library core --directory=packages/core`
+- [x] Update `packages/core/Cargo.toml` with dependencies
+- [x] Add `node-api` dependency for N-API bindings
+- [x] Add `serde` and `serde_json` for JSON handling
+- [x] Add `rusqlite` for database operations
+- [x] Create basic `packages/core/src/lib.rs`
 
 **Expected Result**: Rust core package is initialized and builds successfully
 

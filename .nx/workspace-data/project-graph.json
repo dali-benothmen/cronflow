@@ -26,6 +26,146 @@
         "tags": []
       }
     },
+    "sdk": {
+      "name": "sdk",
+      "type": "lib",
+      "data": {
+        "root": "packages/sdk",
+        "name": "sdk",
+        "projectType": "library",
+        "tags": [
+          "npm:public"
+        ],
+        "metadata": {
+          "targetGroups": {
+            "NPM Scripts": [
+              "test:run",
+              "test:ui",
+              "test:coverage",
+              "lint:fix"
+            ]
+          },
+          "description": "Node.js SDK for Node-Cronflow workflow automation engine",
+          "js": {
+            "packageName": "@node-cronflow/sdk",
+            "packageMain": "./src/index.ts",
+            "isInPackageManagerWorkspaces": true
+          }
+        },
+        "targets": {
+          "test:run": {
+            "executor": "nx:run-script",
+            "options": {
+              "script": "test:run"
+            },
+            "metadata": {
+              "scriptContent": "vitest run",
+              "runCommand": "npm run test:run"
+            },
+            "configurations": {},
+            "parallelism": true
+          },
+          "test:ui": {
+            "executor": "nx:run-script",
+            "options": {
+              "script": "test:ui"
+            },
+            "metadata": {
+              "scriptContent": "vitest --ui",
+              "runCommand": "npm run test:ui"
+            },
+            "configurations": {},
+            "parallelism": true
+          },
+          "test:coverage": {
+            "executor": "nx:run-script",
+            "options": {
+              "script": "test:coverage"
+            },
+            "metadata": {
+              "scriptContent": "vitest run --coverage",
+              "runCommand": "npm run test:coverage"
+            },
+            "configurations": {},
+            "parallelism": true
+          },
+          "lint:fix": {
+            "executor": "nx:run-script",
+            "options": {
+              "script": "lint:fix"
+            },
+            "metadata": {
+              "scriptContent": "eslint src/**/*.ts --fix",
+              "runCommand": "npm run lint:fix"
+            },
+            "configurations": {},
+            "parallelism": true
+          },
+          "nx-release-publish": {
+            "executor": "@nx/js:release-publish",
+            "dependsOn": [
+              "^nx-release-publish"
+            ],
+            "options": {},
+            "configurations": {},
+            "parallelism": true
+          },
+          "build": {
+            "executor": "@nx/js:tsc",
+            "outputs": [
+              "{options.outputPath}"
+            ],
+            "options": {
+              "outputPath": "dist/packages/sdk",
+              "main": "packages/sdk/src/index.ts",
+              "tsConfig": "packages/sdk/tsconfig.json",
+              "assets": [
+                "packages/sdk/*.md"
+              ]
+            },
+            "configurations": {},
+            "parallelism": true,
+            "dependsOn": [
+              "^build"
+            ]
+          },
+          "lint": {
+            "executor": "@nx/eslint:lint",
+            "outputs": [
+              "{options.outputFile}"
+            ],
+            "options": {
+              "lintFilePatterns": [
+                "packages/sdk/**/*.ts"
+              ]
+            },
+            "configurations": {},
+            "parallelism": true,
+            "dependsOn": [
+              "^build"
+            ]
+          },
+          "test": {
+            "executor": "@nx/vite:test",
+            "outputs": [
+              "{options.reportsDirectory}"
+            ],
+            "options": {
+              "passWithNoTests": true,
+              "reportsDirectory": "../../coverage/packages/sdk"
+            },
+            "configurations": {},
+            "parallelism": true,
+            "dependsOn": [
+              "^build"
+            ]
+          }
+        },
+        "$schema": "../../node_modules/nx/schemas/project-schema.json",
+        "sourceRoot": "packages/sdk/src",
+        "implicitDependencies": []
+      }
+    },
     "node-cronflow": {
       "name": "node-cronflow",
       "type": "lib",
@@ -9008,6 +9148,33 @@
         "type": "static"
       }
     ],
+    "sdk": [
+      {
+        "source": "sdk",
+        "target": "npm:@typescript-eslint/eslint-plugin",
+        "type": "static"
+      },
+      {
+        "source": "sdk",
+        "target": "npm:@typescript-eslint/parser",
+        "type": "static"
+      },
+      {
+        "source": "sdk",
+        "target": "npm:eslint",
+        "type": "static"
+      },
+      {
+        "source": "sdk",
+        "target": "npm:typescript",
+        "type": "static"
+      },
+      {
+        "source": "sdk",
+        "target": "npm:vitest",
+        "type": "static"
+      }
+    ],
     "node-cronflow": [
       {
         "source": "node-cronflow",
@@ -15513,5 +15680,5 @@
   },
   "version": "6.0",
   "errors": [],
-  "computedAt": 1752838561399
+  "computedAt": 1752866705826
 }
