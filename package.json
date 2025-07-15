@@ -26,29 +26,31 @@
     ]
   },
   "scripts": {
-    "build": "npm run build:sdk && npm run build:services && npm run build:main",
-    "build:sdk": "tsc -p sdk/tsconfig.json",
-    "build:services": "tsc -p services/tsconfig.json",
-    "build:main": "tsc -p tsconfig.json",
+    "build": "bun run build:sdk && bun run build:services && bun run build:main",
+    "build:sdk": "bun build sdk/index.ts --outdir dist/sdk --target node --format cjs",
+    "build:services": "bun build services/index.ts --outdir dist/services --target node --format cjs",
+    "build:main": "bun build src/index.ts --outdir dist --target node --format cjs",
     "build:core": "cd core && napi build --release --package-json-path ../package.json",
     "build:core:debug": "cd core && napi build --package-json-path ../package.json",
-    "build:all": "npm run build:core && npm run build",
-    "prepublishOnly": "npm run build:all && npm run test:package",
-    "test": "vitest",
-    "test:run": "vitest run",
-    "test:ui": "vitest --ui",
-    "test:coverage": "vitest run --coverage",
-    "test:package": "node scripts/test-package.js",
-    "test:napi": "node tests/napi/bridge-test.js",
+    "build:all": "bun run build:core && bun run build",
+    "prepublishOnly": "bun run build:all && bun run test:package",
+    "test": "bun test",
+    "test:run": "bun test --run",
+    "test:ui": "bun test --ui",
+    "test:coverage": "bun test --coverage",
+    "test:package": "bun run scripts/test-package.js",
+    "test:napi": "bun run tests/napi/bridge-test.js",
     "lint": "eslint src/**/*.ts sdk/**/*.ts services/**/*.ts",
     "lint:fix": "eslint src/**/*.ts sdk/**/*.ts services/**/*.ts --fix",
     "format": "prettier --write .",
     "format:check": "prettier --check .",
-    "dev": "tsc --watch",
+    "dev": "bun --watch src/index.ts",
     "clean": "rm -rf dist node_modules packages core/core.node",
-    "install:all": "npm install && npm run build:all",
+    "install:all": "bun install && bun run build:all",
     "release": "semantic-release",
-    "release:dry-run": "semantic-release --dry-run"
+    "release:dry-run": "semantic-release --dry-run",
+    "benchmark": "bun run benchmarks/bun-vs-node-benchmark.js",
+    "benchmark:node": "node benchmarks/node-vs-bun-benchmark.js"
   },
   "keywords": [
     "workflow",
@@ -72,7 +74,8 @@
   },
   "homepage": "https://github.com/node-cronflow/node-cronflow#readme",
   "engines": {
-    "node": ">=18.0.0"
+    "node": ">=18.0.0",
+    "bun": ">=1.0.0"
   },
   "os": [
     "linux",
@@ -105,5 +108,17 @@
   },
   "publishConfig": {
     "access": "public"
+  },
+  "bun": {
+    "module": "src/index.ts",
+    "main": "./dist/index.js",
+    "types": "./dist/index.d.ts",
+    "exports": {
+      ".": {
+        "import": "./dist/index.js",
+        "require": "./dist/index.js",
+        "types": "./dist/index.d.ts"
+      }
+    }
   }
 }
