@@ -15,7 +15,7 @@ export interface WorkflowDefinition {
 
 export interface StepDefinition {
   name: string;
-  action: (ctx: any) => any;
+  action: (_ctx: any) => any;
 }
 
 export interface TriggerDefinition {
@@ -28,7 +28,7 @@ export interface ServiceDefinition<TConfig = any, TInstance = any> {
   name: string;
   version: string;
   configSchema: any; // Zod schema for configuration
-  createInstance: (config: TConfig) => TInstance;
+  createInstance: (_config: TConfig) => TInstance;
 }
 
 export interface ServiceInstance {
