@@ -218,12 +218,12 @@ A granular, step-by-step development plan using a monolith architecture for Node
 
 **Actions**:
 
-- [ ] Create `core/src/job.rs` with Job struct
-- [ ] Define job states (Pending, Running, Completed, Failed)
-- [ ] Add job metadata (workflowId, stepName, payload)
-- [ ] Create job queue structure
-- [ ] Add job ID generation
-- [ ] Add job validation methods
+- [x] Create `core/src/job.rs` with Job struct
+- [x] Define job states (Pending, Running, Completed, Failed)
+- [x] Add job metadata (workflowId, stepName, payload)
+- [x] Create job queue structure
+- [x] Add job ID generation
+- [x] Add job validation methods
 
 **Expected Result**: Job structure is defined and can be created
 
@@ -236,12 +236,12 @@ A granular, step-by-step development plan using a monolith architecture for Node
 
 **Actions**:
 
-- [ ] Create `core/src/dispatcher.rs` with Dispatcher struct
-- [ ] Implement job queue management
-- [ ] Add job status tracking
-- [ ] Create job dispatching logic
-- [ ] Add basic worker pool structure
-- [ ] Add job timeout handling
+- [x] Create `core/src/dispatcher.rs` with Dispatcher struct
+- [x] Implement job queue management
+- [x] Add job status tracking
+- [x] Create job dispatching logic
+- [x] Add basic worker pool structure
+- [x] Add job timeout handling
 
 **Expected Result**: Jobs can be created and queued for execution
 
