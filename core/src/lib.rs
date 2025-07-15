@@ -9,6 +9,7 @@ pub mod database;
 pub mod state;
 pub mod bridge;
 pub mod job;
+pub mod dispatcher;
 
 /// Core engine version
 pub const VERSION: &str = "0.1.0";
