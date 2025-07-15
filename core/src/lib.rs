@@ -8,6 +8,7 @@ pub mod models;
 pub mod database;
 pub mod state;
 pub mod bridge;
+pub mod job;
 
 /// Core engine version
 pub const VERSION: &str = "0.1.0";

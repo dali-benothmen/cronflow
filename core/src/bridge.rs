@@ -3,13 +3,14 @@
 //! This module handles the communication between the Rust core engine
 //! and the Node.js SDK via N-API.
 
-use napi::{JsObject, JsString, Result as NapiResult, Env};
+use napi::{CallContext, JsNumber, JsString, JsObject, Result, JsUndefined, JsNull, JsBoolean};
 use napi_derive::napi;
 use crate::error::{CoreError, CoreResult};
 use crate::state::StateManager;
 use crate::models::WorkflowDefinition;
-use serde_json;
+use serde_json::{json, Value};
 use std::sync::Mutex;
+use std::collections::HashMap;
 
 /// N-API bridge for Node.js communication
 pub struct Bridge {
