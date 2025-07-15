@@ -15,7 +15,8 @@ export interface WorkflowDefinition {
 
 export interface StepDefinition {
   name: string;
-  action: (ctx: any) => any;
+  // eslint-disable-next-line @typescript-eslint/no-unused-vars
+  action: (_ctx: any) => any;
 }
 
 export interface TriggerDefinition {
@@ -28,7 +29,8 @@ export interface ServiceDefinition<TConfig = any, TInstance = any> {
   name: string;
   version: string;
   configSchema: any; // Zod schema for configuration
-  createInstance: (config: TConfig) => TInstance;
+  // eslint-disable-next-line @typescript-eslint/no-unused-vars
+  createInstance: (_config: TConfig) => TInstance;
 }
 
 export interface ServiceInstance {

@@ -26,13 +26,14 @@
     ]
   },
   "scripts": {
-    "build": "bun run build:sdk && bun run build:services && bun run build:main",
+    "build": "bun run build:sdk && bun run build:services && bun run build:main && bun run generate:types",
     "build:sdk": "bun build sdk/index.ts --outdir dist/sdk --target node --format cjs",
     "build:services": "bun build services/index.ts --outdir dist/services --target node --format cjs",
     "build:main": "bun build src/index.ts --outdir dist --target node --format cjs",
     "build:core": "cd core && napi build --release --package-json-path ../package.json",
     "build:core:debug": "cd core && napi build --package-json-path ../package.json",
     "build:all": "bun run build:core && bun run build",
+    "generate:types": "node scripts/generate-types.js",
     "prepublishOnly": "bun run build:all && bun run test:package",
     "test": "bun test",
     "test:run": "bun test --run",

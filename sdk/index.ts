@@ -79,6 +79,7 @@ class Cronflow {
   private engineState: 'STOPPED' | 'STARTING' | 'STARTED' = 'STOPPED';
 
   constructor() {
+    // eslint-disable-next-line no-console
     console.log(`Node-Cronflow SDK v${VERSION} initialized`);
   }
 
@@ -101,6 +102,7 @@ class Cronflow {
     WorkflowDefinitionSchema.parse(workflow);
 
     this.workflows.set(id, workflow);
+    // eslint-disable-next-line no-console
     console.log(`Workflow '${id}' defined successfully`);
 
     return new WorkflowInstance(workflow, this);
@@ -115,12 +117,14 @@ class Cronflow {
     }
 
     this.engineState = 'STARTING';
+    // eslint-disable-next-line no-console
     console.log('Starting Node-Cronflow engine...');
 
     // TODO: Initialize Rust core engine
     // TODO: Register workflows with the engine
 
     this.engineState = 'STARTED';
+    // eslint-disable-next-line no-console
     console.log('Node-Cronflow engine started successfully');
   }
 
@@ -142,15 +146,17 @@ class Cronflow {
 // Workflow instance for fluent API
 class WorkflowInstance {
   constructor(
-    private workflow: WorkflowDefinition,
-    private cronflow: Cronflow
+    // eslint-disable-next-line @typescript-eslint/no-unused-vars
+    private readonly workflow: WorkflowDefinition,
+    // eslint-disable-next-line @typescript-eslint/no-unused-vars
+    private readonly cronflowInstance: Cronflow
   ) {}
 
   /**
    * Start this specific workflow
    */
   async start(): Promise<void> {
-    return this.cronflow.start();
+    return this.cronflowInstance.start();
   }
 
   /**
