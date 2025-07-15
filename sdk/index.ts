@@ -146,24 +146,22 @@ class Cronflow {
 // Workflow instance for fluent API
 class WorkflowInstance {
   constructor(
-    // eslint-disable-next-line @typescript-eslint/no-unused-vars
-    private readonly workflow: WorkflowDefinition,
-    // eslint-disable-next-line @typescript-eslint/no-unused-vars
-    private readonly cronflowInstance: Cronflow
+    private readonly _workflow: WorkflowDefinition,
+    private readonly _cronflowInstance: Cronflow
   ) {}
 
   /**
    * Start this specific workflow
    */
   async start(): Promise<void> {
-    return this.cronflowInstance.start();
+    return this._cronflowInstance.start();
   }
 
   /**
    * Get the workflow definition
    */
   getDefinition(): WorkflowDefinition {
-    return this.workflow;
+    return this._workflow;
   }
 }
 

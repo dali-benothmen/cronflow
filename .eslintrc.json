@@ -17,7 +17,8 @@
     "no-console": "warn",
     "eqeqeq": ["error", "always"],
     "curly": ["error", "all"],
-    "no-duplicate-imports": "error"
+    "no-duplicate-imports": "error",
+    "no-unused-vars": ["error", { "argsIgnorePattern": "^_" }]
   },
   "ignorePatterns": [
     "dist/",
