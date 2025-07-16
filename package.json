@@ -1,7 +1,7 @@
 {
-  "name": "node-cronflow",
+  "name": "cronflow",
   "version": "0.0.0",
-  "description": "A sophisticated workflow automation engine built on Node.js + Rust, providing a code-first alternative to tools like n8n",
+  "description": "The fastestworkflow automation engine built on Bun.js + Rust, providing a code-first alternative to tools like n8n",
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
   "files": [
