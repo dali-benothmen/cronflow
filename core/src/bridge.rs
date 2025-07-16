@@ -13,6 +13,7 @@ use crate::job::Job;
 use serde_json::{json, Value};
 use std::sync::Mutex;
 use std::collections::HashMap;
+use uuid::Uuid;
 
 /// N-API bridge for Node.js communication
 pub struct Bridge {
@@ -131,18 +132,16 @@ impl Bridge {
 
     /// Execute a job with context for Bun.js
     pub fn execute_job(&self, job: &Job, services: HashMap<String, serde_json::Value>) -> CoreResult<String> {
-        log::info!("Executing job {} for step {}", job.id, job.step_name);
+        log::info!("Executing job: {}", job.id);
         
-        // Get workflow and run from state manager
-        let state_manager = self.state_manager.lock()
-            .map_err(|_| CoreError::Internal("Failed to acquire state manager lock".to_string()))?;
+        // Get state manager
+        let state_manager = self.state_manager.lock().unwrap();
         
-        // Get workflow
-        let workflow = state_manager.get_workflow(&job.workflow_id)?
-            .ok_or_else(|| CoreError::WorkflowNotFound(format!("Workflow not found: {}", job.workflow_id)))?;
+        // Get workflow definition
+        let workflow = state_manager.get_workflow(&job.workflow_id)?;
         
-        // Get run
-        let run_uuid = uuid::Uuid::parse_str(&job.run_id)
+        // Get run information
+        let run_uuid = Uuid::parse_str(&job.run_id)
             .map_err(|e| CoreError::UuidParse(e))?;
         let run = state_manager.get_run(&run_uuid)?
             .ok_or_else(|| CoreError::WorkflowNotFound(format!("Run not found: {}", job.run_id)))?;
@@ -150,11 +149,24 @@ impl Bridge {
         // Get completed steps for this run
         let completed_steps = state_manager.get_completed_steps(&run_uuid)?;
         
-        // Create context object
-        let context = Context::from_job(job, &workflow, &run, &completed_steps, services)?;
+        // Create context object using the new method
+        let context = Context::new(
+            job.run_id.clone(),
+            job.workflow_id.clone(),
+            job.step_name.clone(),
+            job.payload.clone(),
+            run,
+            completed_steps,
+        )?;
+        
+        // Add services to context
+        let mut context_with_services = context;
+        for (name, config) in services {
+            context_with_services.add_service(name, config);
+        }
         
         // Serialize context for Bun.js
-        let context_json = context.to_json()?;
+        let context_json = context_with_services.to_json()?;
         
         // For now, return the context JSON
         // TODO: In the real implementation, this would be sent to Bun.js for execution
