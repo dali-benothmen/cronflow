@@ -10,6 +10,7 @@ pub mod state;
 pub mod bridge;
 pub mod job;
 pub mod dispatcher;
+pub mod context;
 pub mod bun_ffi_test;
 
 /// Core engine version

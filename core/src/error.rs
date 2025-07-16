@@ -29,6 +29,9 @@ pub enum CoreError {
     #[error("Configuration error: {0}")]
     Configuration(String),
 
+    #[error("Validation error: {0}")]
+    Validation(String),
+
     #[error("Date parsing error: {0}")]
     DateParse(#[from] chrono::ParseError),
 
