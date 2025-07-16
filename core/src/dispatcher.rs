@@ -7,6 +7,8 @@ use chrono::{DateTime, Utc};
 use crate::error::CoreError;
 use crate::job::{Job, JobQueue, JobState};
 use crate::models::{StepResult, StepStatus};
+use crate::bridge::Bridge;
+use serde_json;
 
 /// Worker pool configuration
 #[derive(Debug, Clone)]
@@ -122,11 +124,12 @@ pub struct Dispatcher {
     completed_jobs: Arc<Mutex<Vec<String>>>,
     running_jobs: Arc<Mutex<HashMap<String, DateTime<Utc>>>>,
     shutdown_flag: Arc<Mutex<bool>>,
+    bridge: Arc<Bridge>,
 }
 
 impl Dispatcher {
     /// Create a new job dispatcher
-    pub fn new(config: WorkerPoolConfig) -> Self {
+    pub fn new(config: WorkerPoolConfig, bridge: Bridge) -> Self {
         Self {
             job_queue: Arc::new(Mutex::new(JobQueue::new())),
             workers: Arc::new(Mutex::new(HashMap::new())),
@@ -135,6 +138,7 @@ impl Dispatcher {
             completed_jobs: Arc::new(Mutex::new(Vec::new())),
             running_jobs: Arc::new(Mutex::new(HashMap::new())),
             shutdown_flag: Arc::new(Mutex::new(false)),
+            bridge: Arc::new(bridge),
         }
     }
 
@@ -262,6 +266,7 @@ impl Dispatcher {
         let stats = Arc::clone(&self.stats);
         let completed_jobs = Arc::clone(&self.completed_jobs);
         let running_jobs = Arc::clone(&self.running_jobs);
+        let bridge = Arc::clone(&self.bridge);
         
         // Add worker to pool
         {
@@ -310,7 +315,7 @@ impl Dispatcher {
                     
                     // Process the job
                     let start_time = Instant::now();
-                    let result = Self::process_job(&mut job);
+                    let result = Self::process_job(&mut job, &bridge);
                     let processing_time = start_time.elapsed().as_millis() as u64;
                     
                     // Update job with result
@@ -442,17 +447,27 @@ impl Dispatcher {
         Ok(())
     }
 
-    /// Process a job (simulated execution)
-    fn process_job(job: &mut Job) -> Result<StepResult, CoreError> {
-        // Simulate job processing
-        thread::sleep(Duration::from_millis(100));
+    /// Process a job (connect to N-API bridge)
+    fn process_job(job: &mut Job, bridge: &Bridge) -> Result<StepResult, CoreError> {
+        log::info!("Processing job {} for step {}", job.id, job.step_name);
+        
+        // For now, use empty services
+        // TODO: Load services from configuration
+        let services = HashMap::new();
+        
+        // Execute job via bridge
+        let result_json = bridge.execute_job(job, services)?;
+        
+        // Parse the result to extract context and status
+        let result: serde_json::Value = serde_json::from_str(&result_json)
+            .map_err(|e| CoreError::Serialization(e))?;
         
         // For now, simulate successful execution
-        // In the real implementation, this would call Node.js via N-API
+        // TODO: In the real implementation, this would parse the actual result from Bun.js
         let step_result = StepResult {
             step_id: job.step_name.clone(),
             status: StepStatus::Completed,
-            output: Some(job.payload.clone()),
+            output: Some(result),
             error: None,
             started_at: Utc::now(),
             completed_at: Some(Utc::now()),
@@ -502,10 +517,15 @@ mod tests {
     use crate::job::{Job, JobPriority};
     use serde_json::json;
 
+    fn create_test_bridge() -> Bridge {
+        Bridge::new("test_dispatcher.db").expect("Failed to create test bridge")
+    }
+
     #[test]
     fn test_dispatcher_creation() {
         let config = WorkerPoolConfig::default();
-        let dispatcher = Dispatcher::new(config);
+        let bridge = create_test_bridge();
+        let dispatcher = Dispatcher::new(config, bridge);
         
         assert_eq!(dispatcher.config.min_workers, 2);
         assert_eq!(dispatcher.config.max_workers, 10);
@@ -514,7 +534,8 @@ mod tests {
     #[test]
     fn test_job_submission() {
         let config = WorkerPoolConfig::default();
-        let dispatcher = Dispatcher::new(config);
+        let bridge = create_test_bridge();
+        let dispatcher = Dispatcher::new(config, bridge);
         
         let job = Job::new(
             "workflow-1".to_string(),
@@ -530,7 +551,8 @@ mod tests {
     #[test]
     fn test_dispatcher_stats() {
         let config = WorkerPoolConfig::default();
-        let dispatcher = Dispatcher::new(config);
+        let bridge = create_test_bridge();
+        let dispatcher = Dispatcher::new(config, bridge);
         
         let stats = dispatcher.get_stats().unwrap();
         assert_eq!(stats.total_jobs_processed, 0);

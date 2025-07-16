@@ -7,7 +7,9 @@ use napi::{CallContext, JsNumber, JsString, JsObject, Result, JsUndefined, JsNul
 use napi_derive::napi;
 use crate::error::{CoreError, CoreResult};
 use crate::state::StateManager;
-use crate::models::WorkflowDefinition;
+use crate::models::{WorkflowDefinition, WorkflowRun, StepResult};
+use crate::context::Context;
+use crate::job::Job;
 use serde_json::{json, Value};
 use std::sync::Mutex;
 use std::collections::HashMap;
@@ -126,6 +128,51 @@ impl Bridge {
         log::info!("Step execution result for {}: {}", step_id, result_json);
         Ok(result_json)
     }
+
+    /// Execute a job with context for Bun.js
+    pub fn execute_job(&self, job: &Job, services: HashMap<String, serde_json::Value>) -> CoreResult<String> {
+        log::info!("Executing job {} for step {}", job.id, job.step_name);
+        
+        // Get workflow and run from state manager
+        let state_manager = self.state_manager.lock()
+            .map_err(|_| CoreError::Internal("Failed to acquire state manager lock".to_string()))?;
+        
+        // Get workflow
+        let workflow = state_manager.get_workflow(&job.workflow_id)?
+            .ok_or_else(|| CoreError::WorkflowNotFound(format!("Workflow not found: {}", job.workflow_id)))?;
+        
+        // Get run
+        let run_uuid = uuid::Uuid::parse_str(&job.run_id)
+            .map_err(|e| CoreError::UuidParse(e))?;
+        let run = state_manager.get_run(&run_uuid)?
+            .ok_or_else(|| CoreError::WorkflowNotFound(format!("Run not found: {}", job.run_id)))?;
+        
+        // Get completed steps for this run
+        let completed_steps = state_manager.get_completed_steps(&run_uuid)?;
+        
+        // Create context object
+        let context = Context::from_job(job, &workflow, &run, &completed_steps, services)?;
+        
+        // Serialize context for Bun.js
+        let context_json = context.to_json()?;
+        
+        // For now, return the context JSON
+        // TODO: In the real implementation, this would be sent to Bun.js for execution
+        let result = serde_json::json!({
+            "job_id": job.id,
+            "run_id": job.run_id,
+            "step_id": job.step_name,
+            "context": context_json,
+            "status": "ready_for_execution",
+            "message": "Job context created successfully, ready for Bun.js execution"
+        });
+        
+        let result_json = serde_json::to_string(&result)
+            .map_err(|e| CoreError::Serialization(e))?;
+        
+        log::info!("Job execution context created for {}: {}", job.id, result_json);
+        Ok(result_json)
+    }
 }
 
 // N-API module setup
@@ -152,6 +199,17 @@ pub struct RunStatusResult {
 #[napi(object)]
 pub struct StepExecutionResult {
     pub success: bool,
+    pub result: Option<String>,
+    pub message: String,
+}
+
+#[napi(object)]
+pub struct JobExecutionResult {
+    pub success: bool,
+    pub job_id: Option<String>,
+    pub run_id: Option<String>,
+    pub step_id: Option<String>,
+    pub context: Option<String>,
     pub result: Option<String>,
     pub message: String,
 }
@@ -276,6 +334,98 @@ pub fn execute_step(run_id: String, step_id: String, db_path: String) -> StepExe
                 success: false,
                 result: None,
                 message: format!("Failed to execute step: {}", e),
+            }
+        }
+    }
+}
+
+/// Execute a job with context via N-API
+#[napi]
+pub fn execute_job(job_json: String, services_json: String, db_path: String) -> JobExecutionResult {
+    let bridge = match Bridge::new(&db_path) {
+        Ok(bridge) => bridge,
+        Err(e) => {
+            return JobExecutionResult {
+                success: false,
+                job_id: None,
+                run_id: None,
+                step_id: None,
+                context: None,
+                result: None,
+                message: format!("Failed to create bridge: {}", e),
+            };
+        }
+    };
+    
+    // Parse job from JSON
+    let job: Job = match serde_json::from_str(&job_json) {
+        Ok(job) => job,
+        Err(e) => {
+            return JobExecutionResult {
+                success: false,
+                job_id: None,
+                run_id: None,
+                step_id: None,
+                context: None,
+                result: None,
+                message: format!("Failed to parse job JSON: {}", e),
+            };
+        }
+    };
+    
+    // Parse services from JSON
+    let services: HashMap<String, serde_json::Value> = match serde_json::from_str(&services_json) {
+        Ok(services) => services,
+        Err(e) => {
+            return JobExecutionResult {
+                success: false,
+                job_id: None,
+                run_id: None,
+                step_id: None,
+                context: None,
+                result: None,
+                message: format!("Failed to parse services JSON: {}", e),
+            };
+        }
+    };
+    
+    match bridge.execute_job(&job, services) {
+        Ok(result_json) => {
+            // Parse the result to extract individual fields
+            let result: serde_json::Value = match serde_json::from_str(&result_json) {
+                Ok(result) => result,
+                Err(_) => {
+                    return JobExecutionResult {
+                        success: false,
+                        job_id: None,
+                        run_id: None,
+                        step_id: None,
+                        context: None,
+                        result: None,
+                        message: "Failed to parse execution result".to_string(),
+                    };
+                }
+            };
+            
+            JobExecutionResult {
+                success: true,
+                job_id: result["job_id"].as_str().map(|s| s.to_string()),
+                run_id: result["run_id"].as_str().map(|s| s.to_string()),
+                step_id: result["step_id"].as_str().map(|s| s.to_string()),
+                context: result["context"].as_str().map(|s| s.to_string()),
+                result: Some(result_json),
+                message: "Job executed successfully".to_string(),
+            }
+        }
+        Err(e) => {
+            JobExecutionResult {
+                success: false,
+                job_id: None,
+                run_id: None,
+                step_id: None,
+                context: None,
+                result: None,
+                message: format!("Failed to execute job: {}", e),
             }
         }
     }

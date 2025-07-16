@@ -112,4 +112,9 @@ impl StateManager {
         log::info!("Cleaned up {} completed runs", count);
         Ok(())
     }
+
+    /// Get completed steps for a run
+    pub fn get_completed_steps(&self, run_id: &Uuid) -> CoreResult<Vec<StepResult>> {
+        self.db.get_step_results(&run_id.to_string())
+    }
 } 
