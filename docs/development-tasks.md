@@ -250,16 +250,16 @@ A granular, step-by-step development plan using a monolith architecture for Node
 ### Task 3.3: Create Context Object
 
 **Current State**: Job dispatcher exists
-**Goal**: Define the context object passed to Node.js
+**Goal**: Define the context object passed to Bun.js
 
 **Actions**:
 
-- [ ] Create `core/src/context.rs` with Context struct
-- [ ] Define context fields (payload, steps, services, run)
-- [ ] Implement context serialization to JSON
-- [ ] Add context creation from job data
-- [ ] Create context validation
-- [ ] Add context metadata (runId, workflowId, etc.)
+- [x] Create `core/src/context.rs` with Context struct
+- [x] Define context fields (payload, steps, services, run)
+- [x] Implement context serialization to JSON
+- [x] Add context creation from job data
+- [x] Create context validation
+- [x] Add context metadata (runId, workflowId, etc.)
 
 **Expected Result**: Context objects can be created and serialized
 
