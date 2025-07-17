@@ -38,6 +38,16 @@ export interface StepOptions {
   retry?: RetryConfig;
   cache?: CacheConfig;
   delay?: string | number;
+  // Control flow options
+  parallel?: boolean;
+  race?: boolean;
+  loop?: boolean;
+  maxIterations?: number;
+  controlFlow?: boolean;
+  endIf?: boolean;
+  conditional?: boolean;
+  conditionType?: 'if' | 'elseIf' | 'else';
+  stepCount?: number;
 }
 
 export interface RetryConfig {
@@ -85,5 +95,5 @@ export interface Context {
     rawBody?: Buffer;
   };
   cancel: (reason?: string) => never;
-  error?: Error; // Error from failed steps
+  error?: Error;
 }

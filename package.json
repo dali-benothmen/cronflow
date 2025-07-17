@@ -64,7 +64,13 @@
     "benchmark:node": "node benchmarks/node-vs-bun-benchmark.js",
     "docs": "bun run docs:generate && bun run docs:serve",
     "docs:generate": "echo 'Documentation generation not yet implemented'",
-    "docs:serve": "echo 'Documentation server not yet implemented'"
+    "docs:serve": "echo 'Documentation server not yet implemented'",
+    "examples": "bun run examples/run-all-examples.ts",
+    "examples:simple": "bun run examples/run-simple-webhook.ts",
+    "examples:scheduled": "bun run examples/run-scheduled-workflow.ts",
+    "examples:robust": "bun run examples/run-robust-workflow.ts",
+    "examples:complex": "bun run examples/run-complex-workflow.ts",
+    "examples:control-flow": "bun run examples/run-control-flow-workflow.ts"
   },
   "keywords": [
     "workflow",
