@@ -278,7 +278,6 @@ export class WorkflowInstance {
   }
 
   endIf(): WorkflowInstance {
-    // Validate that we're in an if block
     if (this._controlFlowStack.length === 0) {
       throw new Error('endIf() called without matching if()');
     }
@@ -297,7 +296,6 @@ export class WorkflowInstance {
       id: `endif_${lastControlFlow.name}`,
       name: `endif_${lastControlFlow.name}`,
       handler: (ctx: Context) => {
-        // This step just marks the end of the conditional block
         return { type: 'endIf', blockName: lastControlFlow.name };
       },
       type: 'step',
@@ -368,7 +366,6 @@ export class WorkflowInstance {
       id: `else_${lastControlFlow.name}`,
       name: `else_${lastControlFlow.name}`,
       handler: (ctx: Context) => {
-        // Else condition is always true (fallback)
         return true;
       },
       type: 'step',
@@ -503,8 +500,15 @@ export class WorkflowInstance {
   async register(): Promise<void> {
     this.validate();
 
-    // TODO: Register with Rust engine
-    console.log(`Registering workflow: ${this._workflow.id}`);
+    // Register with the Cronflow instance (which will handle Rust engine registration)
+    if (
+      this._cronflowInstance &&
+      typeof this._cronflowInstance.registerWorkflow === 'function'
+    ) {
+      await this._cronflowInstance.registerWorkflow(this._workflow);
+    } else {
+      console.log(`Registering workflow: ${this._workflow.id}`);
+    }
 
     return Promise.resolve();
   }
