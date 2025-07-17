@@ -272,12 +272,12 @@ A granular, step-by-step development plan using a monolith architecture for Node
 
 **Actions**:
 
-- [ ] Add `execute_job` function to `core/src/bridge.rs`
-- [ ] Implement job dispatching from N-API
-- [ ] Add context serialization for Node.js
-- [ ] Create job result handling
-- [ ] Add error handling for job execution
-- [ ] Test job execution end-to-end
+- [x] Add `execute_job` function to `core/src/bridge.rs`
+- [x] Implement job dispatching from N-API
+- [x] Add context serialization for Node.js
+- [x] Create job result handling
+- [x] Add error handling for job execution
+- [x] Test job execution end-to-end
 
 **Expected Result**: Rust can dispatch jobs to Node.js and handle results
 
@@ -292,12 +292,12 @@ A granular, step-by-step development plan using a monolith architecture for Node
 
 **Actions**:
 
-- [ ] Create `sdk/src/workflow.ts` with WorkflowInstance class
-- [ ] Implement `cronflow.define()` function
-- [ ] Add basic workflow options (id, name, description)
-- [ ] Create workflow validation
-- [ ] Add workflow serialization to JSON
-- [ ] Export from `sdk/src/index.ts`
+- [x] Create `sdk/src/workflow.ts` with WorkflowInstance class
+- [x] Implement `cronflow.define()` function
+- [x] Add basic workflow options (id, name, description)
+- [x] Create workflow validation
+- [x] Add workflow serialization to JSON
+- [x] Export from `sdk/src/index.ts`
 
 **Expected Result**: Basic workflow definition works
 
@@ -310,12 +310,12 @@ A granular, step-by-step development plan using a monolith architecture for Node
 
 **Actions**:
 
-- [ ] Add `.step()` method to WorkflowInstance
-- [ ] Add `.action()` method for side-effects
-- [ ] Implement step validation
-- [ ] Add step options (timeout, retry)
-- [ ] Create step metadata tracking
-- [ ] Add step serialization
+- [x] Add `.step()` method to WorkflowInstance
+- [x] Add `.action()` method for side-effects
+- [x] Implement step validation
+- [x] Add step options (timeout, retry)
+- [x] Create step metadata tracking
+- [x] Add step serialization
 
 **Expected Result**: Workflows can define steps with options
 
