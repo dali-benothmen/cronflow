@@ -9,7 +9,7 @@ use crate::state::StateManager;
 use crate::models::WorkflowDefinition;
 use crate::context::Context;
 use crate::job::Job;
-use crate::triggers::{TriggerManager, WebhookTrigger};
+use crate::triggers::{TriggerManager, WebhookTrigger, ScheduleTrigger};
 use std::sync::Mutex;
 use std::collections::HashMap;
 use uuid::Uuid;
@@ -85,6 +85,66 @@ impl Bridge {
             .map_err(|e| CoreError::Serialization(e))?;
         
         Ok(triggers_json)
+    }
+
+    /// Register a schedule trigger for a workflow
+    pub fn register_schedule_trigger(&self, workflow_id: &str, trigger_json: &str) -> CoreResult<String> {
+        log::info!("Registering schedule trigger for workflow: {} with config: {}", workflow_id, trigger_json);
+        
+        // Parse trigger JSON
+        let trigger: ScheduleTrigger = serde_json::from_str(trigger_json)
+            .map_err(|e| CoreError::Serialization(e))?;
+        
+        // Validate the trigger
+        trigger.validate()?;
+        
+        // Register with trigger manager
+        let mut trigger_manager = self.trigger_manager.lock()
+            .map_err(|_| CoreError::Internal("Failed to acquire trigger manager lock".to_string()))?;
+        
+        let trigger_id = trigger_manager.register_schedule_trigger(workflow_id, trigger)?;
+        
+        log::info!("Successfully registered schedule trigger for workflow: {} with ID: {}", workflow_id, trigger_id);
+        Ok(trigger_id)
+    }
+
+    /// Get all registered schedule triggers
+    pub fn get_schedule_triggers(&self) -> CoreResult<String> {
+        let trigger_manager = self.trigger_manager.lock()
+            .map_err(|_| CoreError::Internal("Failed to acquire trigger manager lock".to_string()))?;
+        
+        let triggers = trigger_manager.get_schedule_triggers();
+        
+        let triggers_json = serde_json::to_string(&triggers)
+            .map_err(|e| CoreError::Serialization(e))?;
+        
+        Ok(triggers_json)
+    }
+
+    /// Enable or disable a schedule trigger
+    pub fn set_schedule_enabled(&self, trigger_id: &str, enabled: bool) -> CoreResult<()> {
+        log::info!("Setting schedule trigger {} enabled: {}", trigger_id, enabled);
+        
+        let mut trigger_manager = self.trigger_manager.lock()
+            .map_err(|_| CoreError::Internal("Failed to acquire trigger manager lock".to_string()))?;
+        
+        trigger_manager.set_schedule_enabled(trigger_id, enabled)?;
+        
+        log::info!("Successfully updated schedule trigger: {}", trigger_id);
+        Ok(())
+    }
+
+    /// Remove a schedule trigger
+    pub fn remove_schedule_trigger(&self, trigger_id: &str) -> CoreResult<()> {
+        log::info!("Removing schedule trigger: {}", trigger_id);
+        
+        let mut trigger_manager = self.trigger_manager.lock()
+            .map_err(|_| CoreError::Internal("Failed to acquire trigger manager lock".to_string()))?;
+        
+        trigger_manager.remove_schedule_trigger(trigger_id)?;
+        
+        log::info!("Successfully removed schedule trigger: {}", trigger_id);
+        Ok(())
     }
 
     /// Create a workflow run from Node.js
@@ -275,6 +335,19 @@ pub struct WebhookTriggersResult {
     pub message: String,
 }
 
+#[napi(object)]
+pub struct ScheduleTriggerRegistrationResult {
+    pub success: bool,
+    pub message: String,
+}
+
+#[napi(object)]
+pub struct ScheduleTriggersResult {
+    pub success: bool,
+    pub triggers: Option<String>,
+    pub message: String,
+}
+
 /// Register a workflow via N-API
 #[napi]
 pub fn register_workflow(workflow_json: String, db_path: String) -> WorkflowRegistrationResult {
@@ -360,6 +433,125 @@ pub fn get_webhook_triggers(db_path: String) -> WebhookTriggersResult {
                 success: false,
                 triggers: None,
                 message: format!("Failed to get webhook triggers: {}", e),
+            }
+        }
+    }
+}
+
+/// Register a schedule trigger via N-API
+#[napi]
+pub fn register_schedule_trigger(workflow_id: String, trigger_json: String, db_path: String) -> ScheduleTriggerRegistrationResult {
+    let bridge = match Bridge::new(&db_path) {
+        Ok(bridge) => bridge,
+        Err(e) => {
+            return ScheduleTriggerRegistrationResult {
+                success: false,
+                message: format!("Failed to create bridge: {}", e),
+            };
+        }
+    };
+    
+    match bridge.register_schedule_trigger(&workflow_id, &trigger_json) {
+        Ok(trigger_id) => {
+            ScheduleTriggerRegistrationResult {
+                success: true,
+                message: format!("Schedule trigger registered successfully with ID: {}", trigger_id),
+            }
+        }
+        Err(e) => {
+            ScheduleTriggerRegistrationResult {
+                success: false,
+                message: format!("Failed to register schedule trigger: {}", e),
+            }
+        }
+    }
+}
+
+/// Get all schedule triggers via N-API
+#[napi]
+pub fn get_schedule_triggers(db_path: String) -> ScheduleTriggersResult {
+    let bridge = match Bridge::new(&db_path) {
+        Ok(bridge) => bridge,
+        Err(e) => {
+            return ScheduleTriggersResult {
+                success: false,
+                triggers: None,
+                message: format!("Failed to create bridge: {}", e),
+            };
+        }
+    };
+    
+    match bridge.get_schedule_triggers() {
+        Ok(triggers_json) => {
+            ScheduleTriggersResult {
+                success: true,
+                triggers: Some(triggers_json),
+                message: "Schedule triggers retrieved successfully".to_string(),
+            }
+        }
+        Err(e) => {
+            ScheduleTriggersResult {
+                success: false,
+                triggers: None,
+                message: format!("Failed to get schedule triggers: {}", e),
+            }
+        }
+    }
+}
+
+/// Enable or disable a schedule trigger via N-API
+#[napi]
+pub fn set_schedule_enabled(trigger_id: String, enabled: bool, db_path: String) -> ScheduleTriggerRegistrationResult {
+    let bridge = match Bridge::new(&db_path) {
+        Ok(bridge) => bridge,
+        Err(e) => {
+            return ScheduleTriggerRegistrationResult {
+                success: false,
+                message: format!("Failed to create bridge: {}", e),
+            };
+        }
+    };
+    
+    match bridge.set_schedule_enabled(&trigger_id, enabled) {
+        Ok(_) => {
+            ScheduleTriggerRegistrationResult {
+                success: true,
+                message: format!("Schedule trigger {} enabled: {}", trigger_id, enabled),
+            }
+        }
+        Err(e) => {
+            ScheduleTriggerRegistrationResult {
+                success: false,
+                message: format!("Failed to set schedule trigger enabled: {}", e),
+            }
+        }
+    }
+}
+
+/// Remove a schedule trigger via N-API
+#[napi]
+pub fn remove_schedule_trigger(trigger_id: String, db_path: String) -> ScheduleTriggerRegistrationResult {
+    let bridge = match Bridge::new(&db_path) {
+        Ok(bridge) => bridge,
+        Err(e) => {
+            return ScheduleTriggerRegistrationResult {
+                success: false,
+                message: format!("Failed to create bridge: {}", e),
+            };
+        }
+    };
+    
+    match bridge.remove_schedule_trigger(&trigger_id) {
+        Ok(_) => {
+            ScheduleTriggerRegistrationResult {
+                success: true,
+                message: format!("Schedule trigger {} removed", trigger_id),
+            }
+        }
+        Err(e) => {
+            ScheduleTriggerRegistrationResult {
+                success: false,
+                message: format!("Failed to remove schedule trigger: {}", e),
             }
         }
     }

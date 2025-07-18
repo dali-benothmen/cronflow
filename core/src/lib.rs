@@ -13,6 +13,7 @@ pub mod dispatcher;
 pub mod context;
 pub mod triggers;
 pub mod webhook_server;
+pub mod scheduler;
 pub mod bun_ffi_test;
 
 /// Core engine version
