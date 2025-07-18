@@ -164,13 +164,18 @@ export class Cronflow {
     return this.workflows.get(id);
   }
 
-  async registerWorkflow(workflow: WorkflowDefinition): Promise<void> {
+  async registerWorkflow(workflow: WorkflowDefinition): Promise<any> {
     WorkflowDefinitionSchema.parse(workflow);
     this.workflows.set(workflow.id, workflow);
 
     if (core && this.engineState === 'STARTED') {
       await this.registerWorkflowWithRust(workflow);
     }
+
+    return {
+      success: true,
+      message: `Workflow '${workflow.id}' registered successfully`,
+    };
   }
 
   private async registerWorkflowWithRust(
@@ -300,5 +305,223 @@ export class Cronflow {
 
   isRustCoreAvailable(): boolean {
     return core !== null;
+  }
+
+  async executeManualTrigger(workflowId: string, payload: any): Promise<any> {
+    if (!core) {
+      console.log(
+        `⚠️  Simulation: Executing manual trigger for workflow: ${workflowId}`
+      );
+      return {
+        success: true,
+        run_id: 'simulation-run-id',
+        workflow_id: workflowId,
+        message: 'Manual trigger executed in simulation mode',
+      };
+    }
+
+    try {
+      const payloadJson = JSON.stringify(payload);
+      const result = core.executeManualTrigger(
+        workflowId,
+        payloadJson,
+        this.dbPath
+      );
+
+      if (result.success) {
+        console.log(
+          `✅ Manual trigger executed successfully for workflow: ${workflowId}`
+        );
+        return result;
+      } else {
+        throw new Error(`Failed to execute manual trigger: ${result.message}`);
+      }
+    } catch (error) {
+      console.error(
+        `❌ Failed to execute manual trigger for workflow ${workflowId}:`,
+        error
+      );
+      throw error;
+    }
+  }
+
+  async executeWebhookTrigger(request: any): Promise<any> {
+    if (!core) {
+      console.log(
+        `⚠️  Simulation: Executing webhook trigger with request:`,
+        request
+      );
+      return {
+        success: true,
+        run_id: 'simulation-run-id',
+        workflow_id: 'simulation-workflow',
+        message: 'Webhook trigger executed in simulation mode',
+      };
+    }
+
+    try {
+      const requestJson = JSON.stringify(request);
+      const result = core.executeWebhookTrigger(requestJson, this.dbPath);
+
+      if (result.success) {
+        console.log(`✅ Webhook trigger executed successfully`);
+        return result;
+      } else {
+        throw new Error(`Failed to execute webhook trigger: ${result.message}`);
+      }
+    } catch (error) {
+      console.error(`❌ Failed to execute webhook trigger:`, error);
+      throw error;
+    }
+  }
+
+  async executeScheduleTrigger(triggerId: string): Promise<any> {
+    if (!core) {
+      console.log(`⚠️  Simulation: Executing schedule trigger: ${triggerId}`);
+      return {
+        success: true,
+        run_id: 'simulation-run-id',
+        workflow_id: 'simulation-workflow',
+        message: 'Schedule trigger executed in simulation mode',
+      };
+    }
+
+    try {
+      const result = core.executeScheduleTrigger(triggerId, this.dbPath);
+
+      if (result.success) {
+        console.log(`✅ Schedule trigger executed successfully: ${triggerId}`);
+        return result;
+      } else {
+        throw new Error(
+          `Failed to execute schedule trigger: ${result.message}`
+        );
+      }
+    } catch (error) {
+      console.error(
+        `❌ Failed to execute schedule trigger ${triggerId}:`,
+        error
+      );
+      throw error;
+    }
+  }
+
+  async getTriggerStats(): Promise<any> {
+    if (!core) {
+      console.log(`⚠️  Simulation: Getting trigger statistics`);
+      return {
+        success: true,
+        stats: JSON.stringify({
+          total_triggers: 0,
+          webhook_triggers: 0,
+          schedule_triggers: 0,
+        }),
+        message: 'Trigger statistics retrieved in simulation mode',
+      };
+    }
+
+    try {
+      const result = core.getTriggerStats(this.dbPath);
+
+      if (result.success) {
+        console.log(`✅ Trigger statistics retrieved successfully`);
+        return result;
+      } else {
+        throw new Error(`Failed to get trigger statistics: ${result.message}`);
+      }
+    } catch (error) {
+      console.error(`❌ Failed to get trigger statistics:`, error);
+      throw error;
+    }
+  }
+
+  async getWorkflowTriggers(workflowId: string): Promise<any> {
+    if (!core) {
+      console.log(
+        `⚠️  Simulation: Getting triggers for workflow: ${workflowId}`
+      );
+      return {
+        success: true,
+        triggers: JSON.stringify([]),
+        message: 'Workflow triggers retrieved in simulation mode',
+      };
+    }
+
+    try {
+      const result = core.getWorkflowTriggers(workflowId, this.dbPath);
+
+      if (result.success) {
+        console.log(
+          `✅ Workflow triggers retrieved successfully for: ${workflowId}`
+        );
+        return result;
+      } else {
+        throw new Error(`Failed to get workflow triggers: ${result.message}`);
+      }
+    } catch (error) {
+      console.error(
+        `❌ Failed to get workflow triggers for ${workflowId}:`,
+        error
+      );
+      throw error;
+    }
+  }
+
+  async unregisterWorkflowTriggers(workflowId: string): Promise<any> {
+    if (!core) {
+      console.log(
+        `⚠️  Simulation: Unregistering triggers for workflow: ${workflowId}`
+      );
+      return {
+        success: true,
+        message: 'Workflow triggers unregistered in simulation mode',
+      };
+    }
+
+    try {
+      const result = core.unregisterWorkflowTriggers(workflowId, this.dbPath);
+
+      if (result.success) {
+        console.log(
+          `✅ Workflow triggers unregistered successfully for: ${workflowId}`
+        );
+        return result;
+      } else {
+        throw new Error(
+          `Failed to unregister workflow triggers: ${result.message}`
+        );
+      }
+    } catch (error) {
+      console.error(
+        `❌ Failed to unregister workflow triggers for ${workflowId}:`,
+        error
+      );
+      throw error;
+    }
+  }
+
+  async getScheduleTriggers(): Promise<any> {
+    if (!core) {
+      console.log(`⚠️  Simulation: Getting schedule triggers`);
+      return {
+        success: true,
+        triggers: JSON.stringify([]),
+        message: 'Schedule triggers retrieved in simulation mode',
+      };
+    }
+
+    try {
+      const result = core.getScheduleTriggers(this.dbPath);
+
+      if (result.success) {
+        console.log(`✅ Schedule triggers retrieved successfully`);
+        return result;
+      } else {
+        throw new Error(`Failed to get schedule triggers: ${result.message}`);
+      }
+    } catch (error) {
+      console.error(`❌ Failed to get schedule triggers:`, error);
+      throw error;
+    }
   }
 }

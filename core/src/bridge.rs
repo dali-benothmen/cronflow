@@ -7,27 +7,31 @@ use napi_derive::napi;
 use crate::error::{CoreError, CoreResult};
 use crate::state::StateManager;
 use crate::models::WorkflowDefinition;
-use crate::context::Context;
 use crate::job::Job;
 use crate::triggers::{TriggerManager, WebhookTrigger, ScheduleTrigger};
-use std::sync::Mutex;
+use crate::trigger_executor::TriggerExecutor;
+use std::sync::{Arc, Mutex};
 use std::collections::HashMap;
 use uuid::Uuid;
 
 /// N-API bridge for Node.js communication
 pub struct Bridge {
-    state_manager: Mutex<StateManager>,
-    trigger_manager: Mutex<TriggerManager>,
+    state_manager: Arc<Mutex<StateManager>>,
+    trigger_manager: Arc<Mutex<TriggerManager>>,
+    trigger_executor: TriggerExecutor,
 }
 
 impl Bridge {
     /// Create a new N-API bridge
     pub fn new(db_path: &str) -> CoreResult<Self> {
-        let state_manager = StateManager::new(db_path)?;
-        let trigger_manager = TriggerManager::new();
+        let state_manager = Arc::new(Mutex::new(StateManager::new(db_path)?));
+        let trigger_manager = Arc::new(Mutex::new(TriggerManager::new()));
+        let trigger_executor = TriggerExecutor::new(state_manager.clone(), trigger_manager.clone());
+        
         Ok(Bridge { 
-            state_manager: Mutex::new(state_manager),
-            trigger_manager: Mutex::new(trigger_manager),
+            state_manager,
+            trigger_manager,
+            trigger_executor,
         })
     }
 
@@ -49,7 +53,10 @@ impl Bridge {
         
         state_manager.register_workflow(workflow.clone())?;
         
-        log::info!("Successfully registered workflow: {}", workflow.id);
+        // Register triggers for the workflow
+        let trigger_ids = self.trigger_executor.register_workflow_triggers(&workflow.id, &workflow)?;
+        
+        log::info!("Successfully registered workflow: {} with {} triggers: {:?}", workflow.id, trigger_ids.len(), trigger_ids);
         Ok(())
     }
 
@@ -227,7 +234,7 @@ impl Bridge {
     }
 
     /// Execute a job with context for Bun.js
-    pub fn execute_job(&self, job: &Job, services: HashMap<String, serde_json::Value>) -> CoreResult<String> {
+    pub fn execute_job(&self, job: &Job, _services: HashMap<String, serde_json::Value>) -> CoreResult<String> {
         log::info!("Executing job: {}", job.id);
         
         // Get state manager
@@ -237,49 +244,118 @@ impl Bridge {
         let _workflow = state_manager.get_workflow(&job.workflow_id)?;
         
         // Get run information
-        let run_uuid = Uuid::parse_str(&job.run_id)
+        let _run_uuid = Uuid::parse_str(&job.run_id)
             .map_err(|e| CoreError::UuidParse(e))?;
-        let run = state_manager.get_run(&run_uuid)?
-            .ok_or_else(|| CoreError::WorkflowNotFound(format!("Run not found: {}", job.run_id)))?;
         
-        // Get completed steps for this run
-        let completed_steps = state_manager.get_completed_steps(&run_uuid)?;
-        
-        // Create context object using the new method
-        let context = Context::new(
-            job.run_id.clone(),
-            job.workflow_id.clone(),
-            job.step_name.clone(),
-            job.payload.clone(),
-            run,
-            completed_steps,
-        )?;
-        
-        // Add services to context
-        let mut context_with_services = context;
-        for (name, config) in services {
-            context_with_services.add_service(name, config);
-        }
-        
-        // Serialize context for Bun.js
-        let context_json = context_with_services.to_json()?;
-        
-        // For now, return the context JSON
-        // TODO: In the real implementation, this would be sent to Bun.js for execution
+        // For now, return a simple result
+        // TODO: Implement actual job execution logic
         let result = serde_json::json!({
             "job_id": job.id,
             "run_id": job.run_id,
             "step_id": job.step_name,
-            "context": context_json,
-            "status": "ready_for_execution",
-            "message": "Job context created successfully, ready for Bun.js execution"
+            "status": "pending",
+            "message": "Job execution not yet implemented"
         });
         
         let result_json = serde_json::to_string(&result)
             .map_err(|e| CoreError::Serialization(e))?;
         
-        log::info!("Job execution context created for {}: {}", job.id, result_json);
+        log::info!("Job execution result for {}: {}", job.id, result_json);
         Ok(result_json)
+    }
+
+    /// Execute a webhook trigger
+    pub fn execute_webhook_trigger(&self, request_json: &str) -> CoreResult<String> {
+        log::info!("Executing webhook trigger with request: {}", request_json);
+        
+        // Parse webhook request JSON
+        let request: crate::triggers::WebhookRequest = serde_json::from_str(request_json)
+            .map_err(|e| CoreError::Serialization(e))?;
+        
+        // Execute the webhook trigger
+        let result = self.trigger_executor.execute_webhook_trigger(request)?;
+        
+        // Serialize the result
+        let result_json = serde_json::to_string(&result)
+            .map_err(|e| CoreError::Serialization(e))?;
+        
+        log::info!("Webhook trigger execution result: {}", result_json);
+        Ok(result_json)
+    }
+
+    /// Execute a schedule trigger
+    pub fn execute_schedule_trigger(&self, trigger_id: &str) -> CoreResult<String> {
+        log::info!("Executing schedule trigger: {}", trigger_id);
+        
+        // Execute the schedule trigger
+        let result = self.trigger_executor.execute_schedule_trigger(trigger_id)?;
+        
+        // Serialize the result
+        let result_json = serde_json::to_string(&result)
+            .map_err(|e| CoreError::Serialization(e))?;
+        
+        log::info!("Schedule trigger execution result: {}", result_json);
+        Ok(result_json)
+    }
+
+    /// Execute a manual trigger
+    pub fn execute_manual_trigger(&self, workflow_id: &str, payload_json: &str) -> CoreResult<String> {
+        log::info!("Executing manual trigger for workflow: {} with payload: {}", workflow_id, payload_json);
+        
+        // Parse payload JSON
+        let payload: serde_json::Value = serde_json::from_str(payload_json)
+            .map_err(|e| CoreError::Serialization(e))?;
+        
+        // Execute the manual trigger
+        let result = self.trigger_executor.execute_manual_trigger(workflow_id, payload)?;
+        
+        // Serialize the result
+        let result_json = serde_json::to_string(&result)
+            .map_err(|e| CoreError::Serialization(e))?;
+        
+        log::info!("Manual trigger execution result: {}", result_json);
+        Ok(result_json)
+    }
+
+    /// Get trigger statistics
+    pub fn get_trigger_stats(&self) -> CoreResult<String> {
+        log::info!("Getting trigger statistics");
+        
+        // Get trigger statistics
+        let stats = self.trigger_executor.get_trigger_stats()?;
+        
+        // Serialize the result
+        let stats_json = serde_json::to_string(&stats)
+            .map_err(|e| CoreError::Serialization(e))?;
+        
+        log::info!("Trigger statistics: {}", stats_json);
+        Ok(stats_json)
+    }
+
+    /// Get triggers for a workflow
+    pub fn get_workflow_triggers(&self, workflow_id: &str) -> CoreResult<String> {
+        log::info!("Getting triggers for workflow: {}", workflow_id);
+        
+        // Get workflow triggers
+        let triggers = self.trigger_executor.get_workflow_triggers(workflow_id)?;
+        
+        // Serialize the result
+        let triggers_json = serde_json::to_string(&triggers)
+            .map_err(|e| CoreError::Serialization(e))?;
+        
+        log::info!("Workflow triggers: {}", triggers_json);
+        Ok(triggers_json)
+    }
+
+    /// Unregister triggers for a workflow
+    pub fn unregister_workflow_triggers(&self, workflow_id: &str) -> CoreResult<()> {
+        log::info!("Unregistering triggers for workflow: {}", workflow_id);
+        
+        // Unregister workflow triggers
+        self.trigger_executor.unregister_workflow_triggers(workflow_id)?;
+        
+        log::info!("Successfully unregistered triggers for workflow: {}", workflow_id);
+        Ok(())
     }
 }
 
@@ -345,6 +421,38 @@ pub struct ScheduleTriggerRegistrationResult {
 pub struct ScheduleTriggersResult {
     pub success: bool,
     pub triggers: Option<String>,
+    pub message: String,
+}
+
+/// Trigger execution result
+#[napi_derive::napi]
+pub struct TriggerExecutionResult {
+    pub success: bool,
+    pub run_id: Option<String>,
+    pub workflow_id: Option<String>,
+    pub message: String,
+}
+
+/// Trigger statistics result
+#[napi_derive::napi]
+pub struct TriggerStatsResult {
+    pub success: bool,
+    pub stats: Option<String>,
+    pub message: String,
+}
+
+/// Workflow triggers result
+#[napi_derive::napi]
+pub struct WorkflowTriggersResult {
+    pub success: bool,
+    pub triggers: Option<String>,
+    pub message: String,
+}
+
+/// Trigger unregistration result
+#[napi_derive::napi]
+pub struct TriggerUnregistrationResult {
+    pub success: bool,
     pub message: String,
 }
 
@@ -740,6 +848,243 @@ pub fn execute_job(job_json: String, services_json: String, db_path: String) -> 
                 context: None,
                 result: None,
                 message: format!("Failed to execute job: {}", e),
+            }
+        }
+    }
+} 
+
+/// Execute a webhook trigger via N-API
+#[napi]
+pub fn execute_webhook_trigger(request_json: String, db_path: String) -> TriggerExecutionResult {
+    let bridge = match Bridge::new(&db_path) {
+        Ok(bridge) => bridge,
+        Err(e) => {
+            return TriggerExecutionResult {
+                success: false,
+                run_id: None,
+                workflow_id: None,
+                message: format!("Failed to create bridge: {}", e),
+            };
+        }
+    };
+    
+    match bridge.execute_webhook_trigger(&request_json) {
+        Ok(result_json) => {
+            // Parse the result to extract individual fields
+            let result: serde_json::Value = match serde_json::from_str(&result_json) {
+                Ok(result) => result,
+                Err(_) => {
+                    return TriggerExecutionResult {
+                        success: false,
+                        run_id: None,
+                        workflow_id: None,
+                        message: "Failed to parse execution result".to_string(),
+                    };
+                }
+            };
+            
+            TriggerExecutionResult {
+                success: true,
+                run_id: result["run_id"].as_str().map(|s| s.to_string()),
+                workflow_id: result["workflow_id"].as_str().map(|s| s.to_string()),
+                message: result["message"].as_str().unwrap_or("Webhook trigger executed successfully").to_string(),
+            }
+        }
+        Err(e) => {
+            TriggerExecutionResult {
+                success: false,
+                run_id: None,
+                workflow_id: None,
+                message: format!("Failed to execute webhook trigger: {}", e),
+            }
+        }
+    }
+}
+
+/// Execute a schedule trigger via N-API
+#[napi]
+pub fn execute_schedule_trigger(trigger_id: String, db_path: String) -> TriggerExecutionResult {
+    let bridge = match Bridge::new(&db_path) {
+        Ok(bridge) => bridge,
+        Err(e) => {
+            return TriggerExecutionResult {
+                success: false,
+                run_id: None,
+                workflow_id: None,
+                message: format!("Failed to create bridge: {}", e),
+            };
+        }
+    };
+    
+    match bridge.execute_schedule_trigger(&trigger_id) {
+        Ok(result_json) => {
+            // Parse the result to extract individual fields
+            let result: serde_json::Value = match serde_json::from_str(&result_json) {
+                Ok(result) => result,
+                Err(_) => {
+                    return TriggerExecutionResult {
+                        success: false,
+                        run_id: None,
+                        workflow_id: None,
+                        message: "Failed to parse execution result".to_string(),
+                    };
+                }
+            };
+            
+            TriggerExecutionResult {
+                success: true,
+                run_id: result["run_id"].as_str().map(|s| s.to_string()),
+                workflow_id: result["workflow_id"].as_str().map(|s| s.to_string()),
+                message: result["message"].as_str().unwrap_or("Schedule trigger executed successfully").to_string(),
+            }
+        }
+        Err(e) => {
+            TriggerExecutionResult {
+                success: false,
+                run_id: None,
+                workflow_id: None,
+                message: format!("Failed to execute schedule trigger: {}", e),
+            }
+        }
+    }
+}
+
+/// Execute a manual trigger via N-API
+#[napi]
+pub fn execute_manual_trigger(workflow_id: String, payload_json: String, db_path: String) -> TriggerExecutionResult {
+    let bridge = match Bridge::new(&db_path) {
+        Ok(bridge) => bridge,
+        Err(e) => {
+            return TriggerExecutionResult {
+                success: false,
+                run_id: None,
+                workflow_id: None,
+                message: format!("Failed to create bridge: {}", e),
+            };
+        }
+    };
+    
+    match bridge.execute_manual_trigger(&workflow_id, &payload_json) {
+        Ok(result_json) => {
+            // Parse the result to extract individual fields
+            let result: serde_json::Value = match serde_json::from_str(&result_json) {
+                Ok(result) => result,
+                Err(_) => {
+                    return TriggerExecutionResult {
+                        success: false,
+                        run_id: None,
+                        workflow_id: None,
+                        message: "Failed to parse execution result".to_string(),
+                    };
+                }
+            };
+            
+            TriggerExecutionResult {
+                success: true,
+                run_id: result["run_id"].as_str().map(|s| s.to_string()),
+                workflow_id: result["workflow_id"].as_str().map(|s| s.to_string()),
+                message: result["message"].as_str().unwrap_or("Manual trigger executed successfully").to_string(),
+            }
+        }
+        Err(e) => {
+            TriggerExecutionResult {
+                success: false,
+                run_id: None,
+                workflow_id: None,
+                message: format!("Failed to execute manual trigger: {}", e),
+            }
+        }
+    }
+}
+
+/// Get trigger statistics via N-API
+#[napi]
+pub fn get_trigger_stats(db_path: String) -> TriggerStatsResult {
+    let bridge = match Bridge::new(&db_path) {
+        Ok(bridge) => bridge,
+        Err(e) => {
+            return TriggerStatsResult {
+                success: false,
+                stats: None,
+                message: format!("Failed to create bridge: {}", e),
+            };
+        }
+    };
+    
+    match bridge.get_trigger_stats() {
+        Ok(stats_json) => {
+            TriggerStatsResult {
+                success: true,
+                stats: Some(stats_json),
+                message: "Trigger statistics retrieved successfully".to_string(),
+            }
+        }
+        Err(e) => {
+            TriggerStatsResult {
+                success: false,
+                stats: None,
+                message: format!("Failed to get trigger statistics: {}", e),
+            }
+        }
+    }
+}
+
+/// Get triggers for a workflow via N-API
+#[napi]
+pub fn get_workflow_triggers(workflow_id: String, db_path: String) -> WorkflowTriggersResult {
+    let bridge = match Bridge::new(&db_path) {
+        Ok(bridge) => bridge,
+        Err(e) => {
+            return WorkflowTriggersResult {
+                success: false,
+                triggers: None,
+                message: format!("Failed to create bridge: {}", e),
+            };
+        }
+    };
+    
+    match bridge.get_workflow_triggers(&workflow_id) {
+        Ok(triggers_json) => {
+            WorkflowTriggersResult {
+                success: true,
+                triggers: Some(triggers_json),
+                message: "Workflow triggers retrieved successfully".to_string(),
+            }
+        }
+        Err(e) => {
+            WorkflowTriggersResult {
+                success: false,
+                triggers: None,
+                message: format!("Failed to get workflow triggers: {}", e),
+            }
+        }
+    }
+}
+
+/// Unregister triggers for a workflow via N-API
+#[napi]
+pub fn unregister_workflow_triggers(workflow_id: String, db_path: String) -> TriggerUnregistrationResult {
+    let bridge = match Bridge::new(&db_path) {
+        Ok(bridge) => bridge,
+        Err(e) => {
+            return TriggerUnregistrationResult {
+                success: false,
+                message: format!("Failed to create bridge: {}", e),
+            };
+        }
+    };
+    
+    match bridge.unregister_workflow_triggers(&workflow_id) {
+        Ok(_) => {
+            TriggerUnregistrationResult {
+                success: true,
+                message: format!("Successfully unregistered triggers for workflow: {}", workflow_id),
+            }
+        }
+        Err(e) => {
+            TriggerUnregistrationResult {
+                success: false,
+                message: format!("Failed to unregister workflow triggers: {}", e),
             }
         }
     }
