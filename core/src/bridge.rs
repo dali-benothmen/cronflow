@@ -3,14 +3,13 @@
 //! This module handles the communication between the Rust core engine
 //! and the Node.js SDK via N-API.
 
-use napi::{CallContext, JsNumber, JsString, JsObject, Result, JsUndefined, JsNull, JsBoolean};
 use napi_derive::napi;
 use crate::error::{CoreError, CoreResult};
 use crate::state::StateManager;
-use crate::models::{WorkflowDefinition, WorkflowRun, StepResult};
+use crate::models::WorkflowDefinition;
 use crate::context::Context;
 use crate::job::Job;
-use serde_json::{json, Value};
+use crate::triggers::{TriggerManager, WebhookTrigger};
 use std::sync::Mutex;
 use std::collections::HashMap;
 use uuid::Uuid;
@@ -18,14 +17,17 @@ use uuid::Uuid;
 /// N-API bridge for Node.js communication
 pub struct Bridge {
     state_manager: Mutex<StateManager>,
+    trigger_manager: Mutex<TriggerManager>,
 }
 
 impl Bridge {
     /// Create a new N-API bridge
     pub fn new(db_path: &str) -> CoreResult<Self> {
         let state_manager = StateManager::new(db_path)?;
+        let trigger_manager = TriggerManager::new();
         Ok(Bridge { 
-            state_manager: Mutex::new(state_manager) 
+            state_manager: Mutex::new(state_manager),
+            trigger_manager: Mutex::new(trigger_manager),
         })
     }
 
@@ -49,6 +51,40 @@ impl Bridge {
         
         log::info!("Successfully registered workflow: {}", workflow.id);
         Ok(())
+    }
+
+    /// Register a webhook trigger for a workflow
+    pub fn register_webhook_trigger(&self, workflow_id: &str, trigger_json: &str) -> CoreResult<()> {
+        log::info!("Registering webhook trigger for workflow: {} with config: {}", workflow_id, trigger_json);
+        
+        // Parse trigger JSON
+        let trigger: WebhookTrigger = serde_json::from_str(trigger_json)
+            .map_err(|e| CoreError::Serialization(e))?;
+        
+        // Validate the trigger
+        trigger.validate()?;
+        
+        // Register with trigger manager
+        let mut trigger_manager = self.trigger_manager.lock()
+            .map_err(|_| CoreError::Internal("Failed to acquire trigger manager lock".to_string()))?;
+        
+        trigger_manager.register_webhook_trigger(workflow_id, trigger)?;
+        
+        log::info!("Successfully registered webhook trigger for workflow: {}", workflow_id);
+        Ok(())
+    }
+
+    /// Get all registered webhook triggers
+    pub fn get_webhook_triggers(&self) -> CoreResult<String> {
+        let trigger_manager = self.trigger_manager.lock()
+            .map_err(|_| CoreError::Internal("Failed to acquire trigger manager lock".to_string()))?;
+        
+        let triggers = trigger_manager.get_webhook_triggers();
+        
+        let triggers_json = serde_json::to_string(&triggers)
+            .map_err(|e| CoreError::Serialization(e))?;
+        
+        Ok(triggers_json)
     }
 
     /// Create a workflow run from Node.js
@@ -138,7 +174,7 @@ impl Bridge {
         let state_manager = self.state_manager.lock().unwrap();
         
         // Get workflow definition
-        let workflow = state_manager.get_workflow(&job.workflow_id)?;
+        let _workflow = state_manager.get_workflow(&job.workflow_id)?;
         
         // Get run information
         let run_uuid = Uuid::parse_str(&job.run_id)
@@ -226,6 +262,19 @@ pub struct JobExecutionResult {
     pub message: String,
 }
 
+#[napi(object)]
+pub struct WebhookTriggerRegistrationResult {
+    pub success: bool,
+    pub message: String,
+}
+
+#[napi(object)]
+pub struct WebhookTriggersResult {
+    pub success: bool,
+    pub triggers: Option<String>,
+    pub message: String,
+}
+
 /// Register a workflow via N-API
 #[napi]
 pub fn register_workflow(workflow_json: String, db_path: String) -> WorkflowRegistrationResult {
@@ -250,6 +299,67 @@ pub fn register_workflow(workflow_json: String, db_path: String) -> WorkflowRegi
             WorkflowRegistrationResult {
                 success: false,
                 message: format!("Failed to register workflow: {}", e),
+            }
+        }
+    }
+}
+
+/// Register a webhook trigger via N-API
+#[napi]
+pub fn register_webhook_trigger(workflow_id: String, trigger_json: String, db_path: String) -> WebhookTriggerRegistrationResult {
+    let bridge = match Bridge::new(&db_path) {
+        Ok(bridge) => bridge,
+        Err(e) => {
+            return WebhookTriggerRegistrationResult {
+                success: false,
+                message: format!("Failed to create bridge: {}", e),
+            };
+        }
+    };
+    
+    match bridge.register_webhook_trigger(&workflow_id, &trigger_json) {
+        Ok(_) => {
+            WebhookTriggerRegistrationResult {
+                success: true,
+                message: "Webhook trigger registered successfully".to_string(),
+            }
+        }
+        Err(e) => {
+            WebhookTriggerRegistrationResult {
+                success: false,
+                message: format!("Failed to register webhook trigger: {}", e),
+            }
+        }
+    }
+}
+
+/// Get all webhook triggers via N-API
+#[napi]
+pub fn get_webhook_triggers(db_path: String) -> WebhookTriggersResult {
+    let bridge = match Bridge::new(&db_path) {
+        Ok(bridge) => bridge,
+        Err(e) => {
+            return WebhookTriggersResult {
+                success: false,
+                triggers: None,
+                message: format!("Failed to create bridge: {}", e),
+            };
+        }
+    };
+    
+    match bridge.get_webhook_triggers() {
+        Ok(triggers_json) => {
+            WebhookTriggersResult {
+                success: true,
+                triggers: Some(triggers_json),
+                message: "Webhook triggers retrieved successfully".to_string(),
+            }
+        }
+        Err(e) => {
+            WebhookTriggersResult {
+                success: false,
+                triggers: None,
+                message: format!("Failed to get webhook triggers: {}", e),
             }
         }
     }

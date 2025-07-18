@@ -32,6 +32,12 @@ pub enum CoreError {
     #[error("Validation error: {0}")]
     Validation(String),
 
+    #[error("Invalid trigger configuration: {0}")]
+    InvalidTrigger(String),
+
+    #[error("Trigger not found: {0}")]
+    TriggerNotFound(String),
+
     #[error("Date parsing error: {0}")]
     DateParse(#[from] chrono::ParseError),
 
