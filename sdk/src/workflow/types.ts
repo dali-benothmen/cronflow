@@ -48,7 +48,6 @@ export interface StepOptions {
   retry?: RetryConfig;
   cache?: CacheConfig;
   delay?: string | number;
-  // Control flow options
   parallel?: boolean;
   race?: boolean;
   loop?: boolean;
@@ -58,6 +57,20 @@ export interface StepOptions {
   conditional?: boolean;
   conditionType?: 'if' | 'elseIf' | 'else';
   stepCount?: number;
+  cancel?: boolean;
+  reason?: string;
+  subflow?: boolean;
+  workflowId?: string;
+  input?: any;
+  forEach?: boolean;
+  batch?: boolean;
+  batchSize?: number;
+  humanInTheLoop?: boolean;
+  token?: string;
+  description?: string;
+  waitForEvent?: boolean;
+  eventName?: string;
+  onError?: (ctx: Context) => any;
 }
 
 export interface RetryConfig {

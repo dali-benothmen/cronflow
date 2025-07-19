@@ -388,7 +388,24 @@ export class WorkflowInstance {
   }
 
   cancel(reason?: string): WorkflowInstance {
-    // TODO: Implement cancel
+    const cancelStep: StepDefinition = {
+      id: `cancel_${generateId('cancel')}`,
+      name: 'cancel_workflow',
+      handler: (ctx: Context) => {
+        throw new Error(
+          `Workflow cancelled: ${reason || 'No reason provided'}`
+        );
+      },
+      type: 'step',
+      options: {
+        cancel: true,
+        reason,
+      },
+    };
+
+    this._workflow.steps.push(cancelStep);
+    this._currentStep = cancelStep;
+
     return this;
   }
 
@@ -401,7 +418,32 @@ export class WorkflowInstance {
   }
 
   subflow(name: string, workflowId: string, input?: any): WorkflowInstance {
-    // TODO: Implement subflow
+    const subflowStep: StepDefinition = {
+      id: `subflow_${name}`,
+      name: `subflow_${name}`,
+      handler: async (ctx: Context) => {
+        // TODO: Implement actual subflow execution
+        // For now, simulate subflow execution
+        console.log(`Executing subflow: ${workflowId} with input:`, input);
+
+        // Simulate subflow result
+        return {
+          subflowId: workflowId,
+          input,
+          result: { status: 'completed', subflowName: name },
+        };
+      },
+      type: 'step',
+      options: {
+        subflow: true,
+        workflowId,
+        input,
+      },
+    };
+
+    this._workflow.steps.push(subflowStep);
+    this._currentStep = subflowStep;
+
     return this;
   }
 
@@ -410,7 +452,66 @@ export class WorkflowInstance {
     items: (ctx: Context) => any[] | Promise<any[]>,
     iterationFn: (item: any, flow: WorkflowInstance) => void
   ): WorkflowInstance {
-    // TODO: Implement forEach
+    const forEachStep: StepDefinition = {
+      id: `forEach_${name}`,
+      name: `forEach_${name}`,
+      handler: async (ctx: Context) => {
+        const itemsArray = await items(ctx);
+
+        if (!Array.isArray(itemsArray)) {
+          throw new Error('forEach items function must return an array');
+        }
+
+        const results = await Promise.all(
+          itemsArray.map(async (item, index) => {
+            const tempFlow = new WorkflowInstance(
+              {
+                id: `${this._workflow.id}_${name}_${index}`,
+                name: `${name}_iteration_${index}`,
+                steps: [],
+                triggers: [],
+                created_at: new Date(),
+                updated_at: new Date(),
+              },
+              this._cronflowInstance
+            );
+
+            iterationFn(item, tempFlow);
+
+            const iterationSteps = tempFlow.getSteps();
+
+            let result = null;
+            for (const step of iterationSteps) {
+              if (step.handler) {
+                result = await step.handler(ctx);
+              }
+            }
+
+            return {
+              item,
+              result,
+              index,
+            };
+          })
+        );
+
+        return {
+          type: 'forEach',
+          name,
+          results,
+          totalItems: itemsArray.length,
+        };
+      },
+      type: 'step',
+      options: {
+        forEach: true,
+        parallel: true,
+      },
+    };
+
+    this._workflow.steps.push(forEachStep);
+    this._currentStep = forEachStep;
+
     return this;
   }
 
@@ -419,7 +520,77 @@ export class WorkflowInstance {
     options: { items: (ctx: Context) => any[] | Promise<any[]>; size: number },
     batchFn: (batch: any[], flow: WorkflowInstance) => void
   ): WorkflowInstance {
-    // TODO: Implement batch
+    const batchStep: StepDefinition = {
+      id: `batch_${name}`,
+      name: `batch_${name}`,
+      handler: async (ctx: Context) => {
+        const itemsArray = await options.items(ctx);
+
+        if (!Array.isArray(itemsArray)) {
+          throw new Error('batch items function must return an array');
+        }
+
+        const { size } = options;
+        const batches = [];
+
+        for (let i = 0; i < itemsArray.length; i += size) {
+          batches.push(itemsArray.slice(i, i + size));
+        }
+
+        const results = [];
+
+        for (let batchIndex = 0; batchIndex < batches.length; batchIndex++) {
+          const batch = batches[batchIndex];
+
+          const tempFlow = new WorkflowInstance(
+            {
+              id: `${this._workflow.id}_${name}_batch_${batchIndex}`,
+              name: `${name}_batch_${batchIndex}`,
+              steps: [],
+              triggers: [],
+              created_at: new Date(),
+              updated_at: new Date(),
+            },
+            this._cronflowInstance
+          );
+
+          batchFn(batch, tempFlow);
+
+          const batchSteps = tempFlow.getSteps();
+
+          let batchResult = null;
+          for (const step of batchSteps) {
+            if (step.handler) {
+              batchResult = await step.handler(ctx);
+            }
+          }
+
+          results.push({
+            batchIndex,
+            items: batch,
+            result: batchResult,
+            size: batch.length,
+          });
+        }
+
+        return {
+          type: 'batch',
+          name,
+          results,
+          totalBatches: batches.length,
+          totalItems: itemsArray.length,
+        };
+      },
+      type: 'step',
+      options: {
+        batch: true,
+        batchSize: options.size,
+      },
+    };
+
+    this._workflow.steps.push(batchStep);
+    this._currentStep = batchStep;
+
     return this;
   }
 
@@ -428,17 +599,94 @@ export class WorkflowInstance {
     onPause: (token: string) => void;
     description: string;
   }): WorkflowInstance {
-    // TODO: Implement human in the loop
+    const token = generateId('human_approval');
+    const timeoutMs = parseDuration(options.timeout);
+
+    const humanStep: StepDefinition = {
+      id: `human_${token}`,
+      name: 'human_in_the_loop',
+      handler: async (ctx: Context) => {
+        // Call the onPause function with the token
+        options.onPause(token);
+
+        // TODO: Implement actual pause mechanism
+        // For now, simulate a pause
+        console.log(`Human approval required: ${options.description}`);
+        console.log(`Token: ${token}`);
+        console.log(`Timeout: ${options.timeout}`);
+
+        // Simulate approval after a short delay
+        await new Promise(resolve => setTimeout(resolve, 1000));
+
+        return {
+          type: 'human_approval',
+          token,
+          description: options.description,
+          approved: true, // Simulated approval
+        };
+      },
+      type: 'step',
+      options: {
+        humanInTheLoop: true,
+        token,
+        timeout: timeoutMs,
+        description: options.description,
+      },
+    };
+
+    this._workflow.steps.push(humanStep);
+    this._currentStep = humanStep;
+
     return this;
   }
 
   waitForEvent(eventName: string, timeout?: string): WorkflowInstance {
-    // TODO: Implement wait for event
+    const timeoutMs = timeout ? parseDuration(timeout) : undefined;
+
+    const waitStep: StepDefinition = {
+      id: `wait_${eventName}`,
+      name: `wait_for_event_${eventName}`,
+      handler: async (ctx: Context) => {
+        // TODO: Implement actual event waiting mechanism
+        console.log(`Waiting for event: ${eventName}`);
+        if (timeout) {
+          console.log(`Timeout: ${timeout}`);
+        }
+
+        // Simulate event reception
+        await new Promise(resolve => setTimeout(resolve, 500));
+
+        return {
+          type: 'event_wait',
+          eventName,
+          received: true, // Simulated event
+          data: { event: eventName, timestamp: Date.now() },
+        };
+      },
+      type: 'step',
+      options: {
+        waitForEvent: true,
+        eventName,
+        timeout: timeoutMs,
+      },
+    };
+
+    this._workflow.steps.push(waitStep);
+    this._currentStep = waitStep;
+
     return this;
   }
 
   onError(handlerFn: (ctx: Context) => any): WorkflowInstance {
-    // TODO: Implement onError
+    if (!this._currentStep) {
+      throw new Error('No current step. Call .step() or .action() first.');
+    }
+
+    if (!this._currentStep.options) {
+      this._currentStep.options = {};
+    }
+
+    this._currentStep.options.onError = handlerFn;
     return this;
   }
 

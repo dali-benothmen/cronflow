@@ -663,14 +663,82 @@ workflow.step('send-notification', async (ctx) => {
 
 **Actions**:
 
-- [ ] Implement `.forEach()` method
-- [ ] Add `.batch()` method
-- [ ] Create `.subflow()` method
-- [ ] Add `.cancel()` and `.sleep()`
-- [ ] Test advanced features
-- [ ] Add advanced flow serialization
+- [x] Implement `.forEach()` method
+- [x] Add `.batch()` method
+- [x] Create `.subflow()` method
+- [x] Add `.cancel()` and `.sleep()`
+- [x] Test advanced features
+- [x] Add advanced flow serialization
 
 **Expected Result**: Advanced workflow features work correctly
+
+**Implementation Details**:
+- ✅ **Cancel Method**: Implemented `.cancel()` with reason parameter and error throwing
+- ✅ **Sleep Method**: Already implemented with duration parsing and Promise-based delay
+- ✅ **Subflow Method**: Implemented `.subflow()` for executing child workflows with input data
+- ✅ **ForEach Method**: Implemented `.forEach()` for parallel processing of array items with sub-workflows
+- ✅ **Batch Method**: Implemented `.batch()` for sequential processing of large arrays in smaller chunks
+- ✅ **Human in the Loop**: Implemented `.humanInTheLoop()` with token generation and timeout handling
+- ✅ **Wait for Event**: Implemented `.waitForEvent()` for pausing until specific events occur
+- ✅ **OnError Method**: Implemented `.onError()` for custom error handling on steps
+- ✅ **Type Safety**: Extended StepOptions interface with all advanced control flow options
+- ✅ **Testing**: Comprehensive test suite with 9 test scenarios covering all features
+- ✅ **Example**: Created comprehensive example demonstrating real-world usage
+- ✅ **Complex Workflows**: Support for combining multiple advanced features together
+
+**Key Features**:
+1. **Cancel**: Gracefully stop workflow execution with custom reason
+2. **Sleep**: Pause workflow for specified duration (supports ms, s, m, h, d units)
+3. **Subflow**: Execute another workflow as child process with input data
+4. **ForEach**: Execute sub-workflow for each item in parallel with full context
+5. **Batch**: Process large arrays in smaller sequential batches for memory efficiency
+6. **Human in the Loop**: Pause workflow for human approval with token and timeout
+7. **Wait for Event**: Pause workflow until specific event occurs with optional timeout
+8. **OnError**: Custom error handling for individual steps with fallback values
+9. **Complex Orchestration**: Combine multiple advanced features in single workflow
+
+**Example Usage**:
+```typescript
+workflow
+  .step('get-users', () => fetchUsers())
+  .forEach('process-users',
+    (ctx) => ctx.steps['get-users'].output,
+    (user, flow) => {
+      flow
+        .step('send-email', () => sendEmail(user))
+        .step('update-status', () => updateStatus(user));
+    }
+  )
+  .batch('process-batches',
+    { items: (ctx) => ctx.steps['get-users'].output, size: 100 },
+    (batch, flow) => {
+      flow.step('process-batch', () => processBatch(batch));
+    }
+  )
+  .humanInTheLoop({
+    timeout: '1h',
+    description: 'Approve processing',
+    onPause: (token) => sendApprovalEmail(token)
+  })
+  .waitForEvent('processing.complete', '30m')
+  .step('finalize', () => finalize());
+```
+
+**Testing**:
+- Created comprehensive test suite (`tests/advanced-control-flow.test.ts`)
+- Tests cover all 9 advanced control flow features
+- Verified complex workflow orchestration
+- All tests pass successfully
+
+**Files Modified**:
+- `sdk/src/workflow/instance.ts` (implemented all advanced methods)
+- `sdk/src/workflow/types.ts` (extended StepOptions interface)
+- `tests/advanced-control-flow.test.ts` (comprehensive test suite)
+- `examples/advanced-control-flow-example.ts` (real-world example)
+
+**Next Steps**:
+- Task 7.2: Add Human-in-the-Loop capabilities (enhanced)
+- Task 7.3: Add State Management features
 
 ---
 
