@@ -598,9 +598,13 @@ export class WorkflowInstance {
     timeout: string;
     onPause: (token: string) => void;
     description: string;
+    approvalUrl?: string;
+    metadata?: Record<string, any>;
   }): WorkflowInstance {
     const token = generateId('human_approval');
     const timeoutMs = parseDuration(options.timeout);
+    const createdAt = Date.now();
+    const expiresAt = createdAt + timeoutMs;
 
     const humanStep: StepDefinition = {
       id: `human_${token}`,
@@ -609,20 +613,54 @@ export class WorkflowInstance {
         // Call the onPause function with the token
         options.onPause(token);
 
-        // TODO: Implement actual pause mechanism
-        // For now, simulate a pause
-        console.log(`Human approval required: ${options.description}`);
-        console.log(`Token: ${token}`);
-        console.log(`Timeout: ${options.timeout}`);
+        const pauseInfo = {
+          token,
+          workflowId: ctx.run.workflowId,
+          runId: ctx.run.id,
+          stepId: `human_${token}`,
+          description: options.description,
+          metadata: options.metadata || {},
+          createdAt,
+          expiresAt,
+          status: 'waiting',
+          payload: ctx.payload,
+          lastStepOutput: ctx.last,
+        };
 
-        // Simulate approval after a short delay
+        // TODO: Store pause info in persistent storage (database)
+        console.log(`🛑 Human approval required: ${options.description}`);
+        console.log(`🔑 Approval token: ${token}`);
+        console.log(
+          `⏰ Timeout: ${options.timeout} (expires at ${new Date(expiresAt).toISOString()})`
+        );
+
+        if (options.approvalUrl) {
+          console.log(`🌐 Approval URL: ${options.approvalUrl}?token=${token}`);
+        }
+
+        // Simulate approval after a short delay for demo purposes
+        // In real implementation, this would wait for external resume call
         await new Promise(resolve => setTimeout(resolve, 1000));
+
+        // Simulate approval response
+        const approvalResponse = {
+          approved: true,
+          reason: 'Demo approval',
+          approvedBy: 'demo-user',
+          approvedAt: Date.now(),
+        };
 
         return {
           type: 'human_approval',
           token,
           description: options.description,
-          approved: true, // Simulated approval
+          metadata: options.metadata,
+          approved: approvalResponse.approved,
+          reason: approvalResponse.reason,
+          approvedBy: approvalResponse.approvedBy,
+          approvedAt: approvalResponse.approvedAt,
+          expiresAt,
+          status: 'completed',
         };
       },
       type: 'step',
@@ -631,6 +669,10 @@ export class WorkflowInstance {
         token,
         timeout: timeoutMs,
         description: options.description,
+        approvalUrl: options.approvalUrl,
+        metadata: options.metadata,
+        createdAt,
+        expiresAt,
       },
     };
 

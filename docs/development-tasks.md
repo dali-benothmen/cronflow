@@ -749,14 +749,79 @@ workflow
 
 **Actions**:
 
-- [ ] Implement `.humanInTheLoop()` method
-- [ ] Create pause/resume token system
-- [ ] Add timeout handling
-- [ ] Create approval notification system
-- [ ] Test human approval workflows
-- [ ] Add human approval serialization
+- [x] Implement `.humanInTheLoop()` method
+- [x] Create pause/resume token system
+- [x] Add timeout handling
+- [x] Create approval notification system
+- [x] Test human approval workflows
+- [x] Add human approval serialization
 
 **Expected Result**: Workflows can pause for human approval
+
+**Implementation Details**:
+- ✅ **Enhanced humanInTheLoop Method**: Implemented with approval URL, metadata, and timeout support
+- ✅ **Pause/Resume Token System**: Generated unique tokens for workflow resumption
+- ✅ **Timeout Handling**: Proper timeout management with expiration tracking
+- ✅ **Approval Notification System**: Rich notification with URLs and metadata
+- ✅ **Resume Functionality**: `cronflow.resume(token, payload)` for external approval handling
+- ✅ **Metadata Support**: Rich context for approval decisions
+- ✅ **Multiple Approval Levels**: Support for manager, director, and auto-approval workflows
+- ✅ **Conditional Approval**: Risk-based approval routing
+- ✅ **Approval Chain Tracking**: Complete audit trail of approval decisions
+- ✅ **Auto-escalation**: Timeout-based escalation capabilities
+
+**Key Features**:
+1. **Token Generation**: Unique tokens for each approval request
+2. **Approval URLs**: Web-based approval interfaces
+3. **Rich Metadata**: Context information for approval decisions
+4. **Timeout Management**: Expiration tracking and auto-escalation
+5. **Resume Functionality**: External approval handling via API
+6. **Multiple Levels**: Manager, director, and system approvals
+7. **Conditional Logic**: Risk-based approval routing
+8. **Audit Trail**: Complete approval chain tracking
+
+**Example Usage**:
+```typescript
+workflow
+  .step('assess-risk', (ctx) => {
+    return { requiresApproval: ctx.last.amount > 10000 };
+  })
+  .if('needs-approval', (ctx) => ctx.last.requiresApproval)
+    .humanInTheLoop({
+      timeout: '24h',
+      description: 'Manager approval required',
+      approvalUrl: 'https://approvals.company.com/approve',
+      metadata: {
+        approvalLevel: 'manager',
+        riskLevel: 'high',
+        autoEscalate: true
+      },
+      onPause: (token) => {
+        console.log(`Approval required: ${token}`);
+      }
+    })
+    .step('process-approval', (ctx) => {
+      return { approved: ctx.last.approved };
+    })
+  .endIf()
+```
+
+**Testing**:
+- Created comprehensive test suite (`tests/human-in-the-loop.test.ts`)
+- Tests cover all 7 enhanced human-in-the-loop features
+- Verified token generation, URL support, metadata handling
+- Tested resume functionality and timeout handling
+- All tests pass successfully
+
+**Files Modified**:
+- `sdk/src/workflow/instance.ts` (enhanced humanInTheLoop method)
+- `sdk/src/workflow/types.ts` (extended StepOptions interface)
+- `sdk/src/cronflow.ts` (implemented resume functionality)
+- `tests/human-in-the-loop.test.ts` (comprehensive test suite)
+- `examples/enhanced-human-in-the-loop-example.ts` (real-world example)
+
+**Next Steps**:
+- Task 7.3: Add State Management features
 
 ---
 

@@ -68,6 +68,10 @@ export interface StepOptions {
   humanInTheLoop?: boolean;
   token?: string;
   description?: string;
+  approvalUrl?: string;
+  metadata?: Record<string, any>;
+  createdAt?: number;
+  expiresAt?: number;
   waitForEvent?: boolean;
   eventName?: string;
   onError?: (ctx: Context) => any;
