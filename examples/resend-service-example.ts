@@ -5,7 +5,6 @@
 import { defineService } from '../services/src/index';
 import { z } from 'zod';
 
-// Define the Resend email service
 export const resendServiceTemplate = defineService({
   id: 'resend',
   name: 'Resend',
@@ -24,7 +23,6 @@ export const resendServiceTemplate = defineService({
     }),
   },
   setup: ({ config, auth, engine }) => {
-    // Mock Resend client (in real implementation, this would be the actual Resend SDK)
     const mockResendClient = {
       emails: {
         send: async (params: {
@@ -39,7 +37,6 @@ export const resendServiceTemplate = defineService({
             from: params.from || config.defaultFrom,
           });
 
-          // Simulate API call
           await new Promise(resolve => setTimeout(resolve, 100));
 
           return {
@@ -79,7 +76,6 @@ export const resendServiceTemplate = defineService({
             from: params.from || config.defaultFrom,
           });
 
-          // Simulate API call
           await new Promise(resolve => setTimeout(resolve, 150));
 
           return {
@@ -100,13 +96,13 @@ export const resendServiceTemplate = defineService({
   },
 });
 
-// Example usage:
-// const resendService = resendServiceTemplate.withConfig({
-//   auth: {
-//     apiKey: process.env.RESEND_API_KEY!,
-//   },
-//   config: {
-//     defaultFrom: 'noreply@mycompany.com',
-//     defaultReplyTo: 'support@mycompany.com',
-//   },
-// });
+// Example usage with withConfig method
+export const resendService = resendServiceTemplate.withConfig({
+  auth: {
+    apiKey: process.env.RESEND_API_KEY || 'mock-api-key-for-example',
+  },
+  config: {
+    defaultFrom: 'noreply@mycompany.com',
+    defaultReplyTo: 'support@mycompany.com',
+  },
+});

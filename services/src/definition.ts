@@ -1,9 +1,15 @@
 import { z } from 'zod';
-import type { ServiceDefinition } from './types';
+import type { ServiceDefinition, ConfiguredService } from './types';
+import { createServiceInstance } from './instance';
 
 export function defineService<TConfig = any, TAuth = any>(
   options: ServiceDefinition<TConfig, TAuth>
-): ServiceDefinition<TConfig, TAuth> {
+): ServiceDefinition<TConfig, TAuth> & {
+  withConfig: (config: {
+    auth: TAuth;
+    config?: TConfig;
+  }) => ConfiguredService<TConfig, TAuth>;
+} {
   if (!options.id || options.id.trim() === '') {
     throw new Error('Service ID cannot be empty');
   }
@@ -36,12 +42,23 @@ export function defineService<TConfig = any, TAuth = any>(
     }
   }
 
-  return {
+  const serviceDef: ServiceDefinition<TConfig, TAuth> = {
     id: options.id,
     name: options.name,
     description: options.description,
     version: options.version,
     schema: options.schema,
     setup: options.setup,
+  };
+
+  return {
+    ...serviceDef,
+    withConfig: (config: { auth: TAuth; config?: TConfig }) => {
+      return createServiceInstance(
+        serviceDef,
+        config.config || ({} as TConfig),
+        config.auth
+      );
+    },
   };
 }
