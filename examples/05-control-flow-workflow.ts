@@ -1,8 +1,5 @@
-import { Cronflow } from '../sdk/src/cronflow';
+import { cronflow } from '../sdk/src/index';
 import { Context } from '../sdk/src/workflow/types';
-
-// Create cronflow instance
-const cronflow = new Cronflow();
 
 // Example: Order Processing Workflow with Control Flow
 const orderProcessingWorkflow = cronflow.define({

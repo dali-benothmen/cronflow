@@ -1,30 +1,29 @@
-import { Cronflow } from '../sdk/src/cronflow';
+import { cronflow } from '../sdk/src/index';
 import { Context } from '../sdk/src/workflow/types';
-
-// Create cronflow instance
-const cronflow = new Cronflow();
 
 // Example 2: Scheduled workflow
 const scheduledWorkflow = cronflow.define({
-  id: 'scheduled-daily-report',
-  name: 'Daily Report Workflow',
-  description: 'Generates daily reports on schedule',
+  id: 'scheduled-workflow',
+  name: 'Scheduled Workflow',
+  description: 'A workflow that runs on a schedule',
 });
 
 scheduledWorkflow
-  .onSchedule('0 9 * * *') // Run at 9 AM daily
-  .step('generate-report', async (ctx: Context) => {
-    console.log('📊 Generating daily report...');
-    return { reportId: 'daily-2024-01-15', status: 'generated' };
+  .onSchedule('0 */6 * * *') // Every 6 hours
+  .step('fetch-data', async (ctx: Context) => {
+    console.log('🕐 Running scheduled task at:', new Date().toISOString());
+    return { data: 'scheduled data', timestamp: Date.now() };
   })
-  .step('send-report', async (ctx: Context) => {
-    console.log('📧 Sending report:', ctx.last.reportId);
-    return { sent: true, recipient: 'admin@company.com' };
+  .step('process-data', async (ctx: Context) => {
+    console.log('📊 Processing data from previous step:', ctx.last);
+    return { processed: true, result: ctx.last.data };
+  })
+  .action('log-completion', (ctx: Context) => {
+    console.log('✅ Scheduled workflow completed successfully');
   });
 
 console.log('✅ Scheduled Workflow created successfully!');
 console.log('📋 Workflow ID:', scheduledWorkflow.getId());
-console.log('📋 Steps:', scheduledWorkflow.getSteps().length);
-console.log('📋 Triggers:', scheduledWorkflow.getTriggers().length);
+console.log('📋 Schedule:', '0 */6 * * * (every 6 hours)');
 
 export { scheduledWorkflow };
