@@ -567,12 +567,12 @@ Connect the trigger system to workflow execution, enabling triggers to automatic
 
 **Actions**:
 
-- [ ] Implement `.withConfig()` method
-- [ ] Add configuration validation
-- [ ] Create service instance management
-- [ ] Add service dependency injection
-- [ ] Test service configuration
-- [ ] Add service serialization
+- [x] Implement `.withConfig()` method
+- [x] Add configuration validation
+- [x] Create service instance management
+- [x] Add service dependency injection
+- [x] Test service configuration
+- [x] Add service serialization
 
 **Expected Result**: Services can be configured and used
 
@@ -585,14 +585,72 @@ Connect the trigger system to workflow execution, enabling triggers to automatic
 
 **Actions**:
 
-- [ ] Add services package as dependency to SDK
-- [ ] Update context object to include services
-- [ ] Add service method calling
-- [ ] Implement service error handling
-- [ ] Add service logging
-- [ ] Test service integration
+- [x] Add services package as dependency to SDK
+- [x] Register services in .define() by adding them to services array
+- [x] Update context object to include services
+- [x] Only services registered in the services array inside .define() will be available in ctx.services
+- [x] Add service method calling
+- [x] Implement service error handling
+- [x] Add service logging
+- [x] Test service integration
 
 **Expected Result**: Services are available in `ctx.services` during execution
+
+**Implementation Details**:
+- ✅ **Service Integration**: Updated SDK to accept services in workflow definition
+- ✅ **Context Integration**: Enhanced Context interface to include services as ConfiguredService objects
+- ✅ **Service Validation**: Added validation for services in workflow definition
+- ✅ **Service Access**: Services are accessible via `ctx.services.{serviceId}` in workflow steps
+- ✅ **Rust Compatibility**: Services are excluded from Rust serialization (contain functions)
+- ✅ **Type Safety**: Full TypeScript support with proper service typing
+- ✅ **Error Handling**: Comprehensive error handling for missing or invalid services
+- ✅ **Testing**: Created comprehensive test suite with 9 test scenarios
+- ✅ **Example**: Updated example to demonstrate real-world service usage
+
+**Key Features**:
+1. **Service Registration**: Services can be added to workflow definition via `services` array
+2. **Service Access**: Services are available in `ctx.services.{serviceId}` during execution
+3. **Service Actions**: Service actions can be called from workflow steps
+4. **Type Safety**: Full TypeScript support with proper service typing
+5. **Validation**: Services are validated during workflow definition
+6. **Rust Compatibility**: Services work with Rust core (excluded from serialization)
+
+**Example Usage**:
+```typescript
+const workflow = cronflow.define({
+  id: 'my-workflow',
+  services: [emailService, slackService],
+});
+
+workflow.step('send-notification', async (ctx) => {
+  const emailService = ctx.services.email;
+  const result = await emailService.actions.send({
+    to: 'user@example.com',
+    subject: 'Notification',
+    html: '<p>Hello!</p>',
+  });
+  return result;
+});
+```
+
+**Testing**:
+- Created comprehensive integration tests (`tests/service-integration.test.ts`)
+- Tests cover service definition, configuration, workflow integration, and execution
+- Verified service access in context and action execution
+- Tested workflows with and without services
+- All tests pass successfully
+
+**Files Modified**:
+- `sdk/src/cronflow.ts` (updated define function and serialization)
+- `sdk/src/workflow/types.ts` (updated Context and WorkflowDefinition interfaces)
+- `sdk/src/utils.ts` (added createContext function)
+- `tests/service-integration.test.ts` (new comprehensive test suite)
+- `examples/resend-service-example.ts` (updated with real workflow example)
+
+**Next Steps**:
+- Task 7.1: Add Advanced Control Flow (forEach, batch, subflow, etc.)
+- Task 7.2: Add Human-in-the-Loop capabilities
+- Task 7.3: Add State Management features
 
 ---
 

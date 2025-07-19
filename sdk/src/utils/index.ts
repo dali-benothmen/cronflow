@@ -1,6 +1,4 @@
-// ============================================================================
-// UTILITY FUNCTIONS
-// ============================================================================
+import type { Context, ConfiguredService } from '../workflow/types';
 
 /**
  * Convert interval string to cron expression
@@ -32,45 +30,101 @@ export function intervalToCron(interval: string): string {
 }
 
 /**
- * Parse duration string to milliseconds
- * @param duration - The duration string (e.g., "5s", "1m", "1h", "1d")
+ * Parse duration string or number to milliseconds
+ * @param duration - The duration string (e.g., "5s", "1m", "1h", "1d") or number
  * @returns The duration in milliseconds
  * @throws {Error} When duration format is invalid
  */
-export function parseDuration(duration: string): number {
-  const match = duration.match(/^(\d+)([smhd])$/);
+export function parseDuration(duration: string | number): number {
+  if (typeof duration === 'number') {
+    return duration;
+  }
+
+  const units: Record<string, number> = {
+    ms: 1,
+    s: 1000,
+    m: 60 * 1000,
+    h: 60 * 60 * 1000,
+    d: 24 * 60 * 60 * 1000,
+  };
+
+  const match = duration.match(/^(\d+)(ms|s|m|h|d)$/);
   if (!match) {
     throw new Error(
-      `Invalid duration format: ${duration}. Expected format like "5s", "1m", "1h", "1d"`
+      `Invalid duration format: ${duration}. Use format like "5s", "10m", "2h", "1d"`
     );
   }
 
-  const [, amount, unit] = match;
-  const num = parseInt(amount);
-
-  switch (unit) {
-    case 's': // seconds
-      return num * 1000;
-    case 'm': // minutes
-      return num * 60 * 1000;
-    case 'h': // hours
-      return num * 60 * 60 * 1000;
-    case 'd': // days
-      return num * 24 * 60 * 60 * 1000;
-    default:
-      throw new Error(`Unsupported duration unit: ${unit}`);
-  }
+  const [, value, unit] = match;
+  return parseInt(value) * units[unit];
 }
 
 /**
  * Generate a unique ID for workflows, steps, or runs
- * @param prefix - Optional prefix for the ID (default: 'id')
+ * @param prefix - Optional prefix for the ID (default: 'run')
  * @returns A unique string ID
  */
-export function generateId(prefix: string = 'id'): string {
-  const timestamp = Date.now().toString(36);
-  const random = Math.random().toString(36).substring(2, 8);
-  return `${prefix}_${timestamp}_${random}`;
+export function generateId(prefix: string = 'run'): string {
+  return `${prefix}_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
+}
+
+/**
+ * Create a context object for workflow execution
+ * @param payload - The workflow payload
+ * @param workflowId - The workflow ID
+ * @param runId - The run ID
+ * @param services - Array of configured services
+ * @param steps - Record of step outputs
+ * @param lastOutput - Output from the previous step
+ * @param trigger - Trigger information
+ * @returns A complete context object
+ */
+export function createContext(
+  payload: any,
+  workflowId: string,
+  runId: string,
+  services: ConfiguredService[] = [],
+  steps: Record<string, { output: any }> = {},
+  lastOutput: any = null,
+  trigger: { headers: Record<string, string>; rawBody?: Buffer } = {
+    headers: {},
+  }
+): Context {
+  // Convert services array to services object
+  const servicesObject: Record<string, ConfiguredService> = {};
+  for (const service of services) {
+    servicesObject[service.id] = service;
+  }
+
+  return {
+    payload,
+    steps,
+    services: servicesObject,
+    run: {
+      id: runId,
+      workflowId,
+    },
+    state: {
+      get: (key: string, defaultValue?: any) => {
+        // TODO: Implement state management
+        return defaultValue;
+      },
+      set: async (key: string, value: any, options?: { ttl?: string }) => {
+        // TODO: Implement state management
+        console.log(`Setting state: ${key} = ${value}`);
+      },
+      incr: async (key: string, amount: number = 1) => {
+        // TODO: Implement state management
+        console.log(`Incrementing state: ${key} by ${amount}`);
+        return 0;
+      },
+    },
+    last: lastOutput,
+    trigger,
+    cancel: (reason?: string) => {
+      throw new Error(`Workflow cancelled: ${reason || 'No reason provided'}`);
+    },
+  };
 }
 
 /**
