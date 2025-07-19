@@ -1,4 +1,5 @@
 import type { Context, ConfiguredService } from '../workflow/types';
+import { createStateWrapper } from '../state';
 
 /**
  * Convert interval string to cron expression
@@ -77,6 +78,7 @@ export function generateId(prefix: string = 'run'): string {
  * @param steps - Record of step outputs
  * @param lastOutput - Output from the previous step
  * @param trigger - Trigger information
+ * @param dbPath - Database path for state persistence
  * @returns A complete context object
  */
 export function createContext(
@@ -88,13 +90,17 @@ export function createContext(
   lastOutput: any = null,
   trigger: { headers: Record<string, string>; rawBody?: Buffer } = {
     headers: {},
-  }
+  },
+  dbPath: string = './cronflow.db'
 ): Context {
   // Convert services array to services object
   const servicesObject: Record<string, ConfiguredService> = {};
   for (const service of services) {
     servicesObject[service.id] = service;
   }
+
+  // Create state wrapper for persistent state management
+  const stateWrapper = createStateWrapper(workflowId, runId, dbPath);
 
   return {
     payload,
@@ -106,17 +112,13 @@ export function createContext(
     },
     state: {
       get: (key: string, defaultValue?: any) => {
-        // TODO: Implement state management
-        return defaultValue;
+        return stateWrapper.get(key, defaultValue);
       },
       set: async (key: string, value: any, options?: { ttl?: string }) => {
-        // TODO: Implement state management
-        console.log(`Setting state: ${key} = ${value}`);
+        await stateWrapper.set(key, value, options);
       },
       incr: async (key: string, amount: number = 1) => {
-        // TODO: Implement state management
-        console.log(`Incrementing state: ${key} by ${amount}`);
-        return 0;
+        return await stateWrapper.incr(key, amount);
       },
     },
     last: lastOutput,

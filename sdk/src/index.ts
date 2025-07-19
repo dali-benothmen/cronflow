@@ -40,6 +40,18 @@ export const cronflow = {
   cancelRun: cronflowFunctions.cancelRun,
 
   publishEvent: cronflowFunctions.publishEvent,
+
+  // State management functions
+  getGlobalState: cronflowFunctions.getGlobalState,
+  setGlobalState: cronflowFunctions.setGlobalState,
+  incrGlobalState: cronflowFunctions.incrGlobalState,
+  deleteGlobalState: cronflowFunctions.deleteGlobalState,
+  getWorkflowState: cronflowFunctions.getWorkflowState,
+  setWorkflowState: cronflowFunctions.setWorkflowState,
+  incrWorkflowState: cronflowFunctions.incrWorkflowState,
+  deleteWorkflowState: cronflowFunctions.deleteWorkflowState,
+  getStateStats: cronflowFunctions.getStateStats,
+  cleanupExpiredState: cronflowFunctions.cleanupExpiredState,
 };
 
 export type { WorkflowDefinition } from './workflow/types';
@@ -50,3 +62,5 @@ export type { TriggerDefinition } from './workflow/types';
 export { WorkflowDefinitionSchema } from './workflow/validation';
 
 export * from './workflow';
+
+export * from './state';
