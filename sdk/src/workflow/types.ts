@@ -83,6 +83,10 @@ export interface RetryConfig {
     strategy: 'exponential' | 'fixed';
     delay: string | number;
   };
+  jitter?: boolean;
+  maxBackoff?: string | number;
+  onRetry?: (attempt: number, error: Error, delay: number) => void;
+  shouldRetry?: (error: Error) => boolean;
 }
 
 export interface CacheConfig {

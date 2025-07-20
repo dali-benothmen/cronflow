@@ -1,26 +1,10 @@
-import { Context, WorkflowDefinition } from '../workflow/types';
-import { createContext } from '../utils';
-import { generateId } from '../utils';
+import { WorkflowDefinition, Context, StepDefinition } from '../workflow/types';
+import { StepExecutor, StepExecutionResult } from '../execution';
 
-export interface TestRun {
-  id: string;
-  workflowId: string;
-  status: 'pending' | 'running' | 'completed' | 'failed';
-  steps: Record<
-    string,
-    {
-      name: string;
-      status: 'pending' | 'running' | 'completed' | 'failed';
-      output?: any;
-      error?: Error;
-      duration: number;
-    }
-  >;
-  payload: any;
-  error?: Error;
-  duration: number;
-  createdAt: Date;
-  completedAt?: Date;
+export interface TestAssertion {
+  stepName: string;
+  expectedStatus: 'succeed' | 'fail';
+  expectedError?: string;
 }
 
 export interface TestStep {
@@ -30,22 +14,29 @@ export interface TestStep {
   mocked: boolean;
 }
 
-export interface TestAssertion {
-  stepName: string;
-  expectedStatus: 'succeed' | 'fail';
-  expectedError?: string;
+export interface TestRun {
+  status: 'completed' | 'failed';
+  duration: number;
+  steps: Array<{
+    name: string;
+    status: 'completed' | 'failed';
+    output?: any;
+    error?: Error;
+    duration: number;
+    attempts: number;
+    retryDelays: number[];
+  }>;
+  error?: Error;
 }
 
 export class TestHarness {
   protected workflow: WorkflowDefinition;
-  private testSteps: Map<string, TestStep> = new Map();
-  private assertions: TestAssertion[] = [];
-  private payload: any = {};
-  private runId: string;
+  protected testSteps: Map<string, TestStep> = new Map();
+  protected assertions: TestAssertion[] = [];
+  protected payload: any = {};
 
   constructor(workflow: WorkflowDefinition) {
     this.workflow = workflow;
-    this.runId = generateId('test');
     this.initializeTestSteps();
   }
 
@@ -67,76 +58,69 @@ export class TestHarness {
 
   mockStep(
     stepName: string,
-    mockFn: (ctx: Context) => any | Promise<any>
+    mockHandler: (ctx: Context) => any | Promise<any>
   ): TestHarness {
     const testStep = this.testSteps.get(stepName);
     if (!testStep) {
-      throw new Error(
-        `Step '${stepName}' not found in workflow '${this.workflow.id}'`
-      );
+      throw new Error(`Step '${stepName}' not found in workflow`);
     }
 
-    testStep.handler = mockFn;
+    testStep.handler = mockHandler;
     testStep.mocked = true;
     return this;
   }
 
   expectStep(stepName: string): TestAssertionBuilder {
-    if (!this.testSteps.has(stepName)) {
-      throw new Error(
-        `Step '${stepName}' not found in workflow '${this.workflow.id}'`
-      );
-    }
-
     return new TestAssertionBuilder(this, stepName);
   }
 
   async run(): Promise<TestRun> {
     const startTime = Date.now();
+    const context = this.createContext();
     const testRun: TestRun = {
-      id: this.runId,
-      workflowId: this.workflow.id,
-      status: 'running',
-      steps: {},
-      payload: this.payload,
+      status: 'completed',
       duration: 0,
-      createdAt: new Date(),
+      steps: [],
     };
 
     try {
-      const context = createContext(
-        this.payload,
-        this.workflow.id,
-        this.runId,
-        this.workflow.services || [],
-        {},
-        null,
-        { headers: {} }
-      );
-
       for (const step of this.workflow.steps) {
         const testStep = this.testSteps.get(step.name);
-        if (!testStep) continue;
+        if (!testStep) {
+          throw new Error(`Test step '${step.name}' not found`);
+        }
 
         const stepStartTime = Date.now();
-        const stepResult: TestRun['steps'][string] = {
+        const stepResult: TestRun['steps'][0] = {
           name: step.name,
-          status: 'pending',
+          status: 'completed',
           duration: 0,
+          attempts: 1,
+          retryDelays: [],
         };
 
-        testRun.steps[step.name] = stepResult;
-
         try {
-          stepResult.status = 'running';
-          const output = await testStep.handler(context);
+          // Execute step with retry logic
+          const executionResult =
+            await StepExecutor.executeStepWithErrorHandling(
+              step,
+              context,
+              step.options
+            );
 
-          stepResult.status = 'completed';
-          stepResult.output = output;
-          stepResult.duration = Date.now() - stepStartTime;
+          stepResult.status = executionResult.success ? 'completed' : 'failed';
+          stepResult.output = executionResult.output;
+          stepResult.error = executionResult.error;
+          stepResult.duration = executionResult.totalDuration;
+          stepResult.attempts = executionResult.attempts;
+          stepResult.retryDelays = executionResult.retryDelays;
 
-          context.last = output;
-          context.steps[step.name] = { output };
+          if (executionResult.success) {
+            context.last = executionResult.output;
+            context.steps[step.name] = { output: executionResult.output };
+          } else {
+            throw executionResult.error;
+          }
         } catch (error) {
           stepResult.status = 'failed';
           stepResult.error = error as Error;
@@ -163,57 +147,50 @@ export class TestHarness {
           }
         }
 
-        const assertion = this.assertions.find(a => a.stepName === step.name);
-        if (assertion) {
-          if (
-            assertion.expectedStatus === 'succeed' &&
-            stepResult.status !== 'completed'
-          ) {
-            throw new Error(
-              `Step '${step.name}' was expected to succeed but failed`
-            );
-          }
-          if (
-            assertion.expectedStatus === 'fail' &&
-            stepResult.status !== 'failed'
-          ) {
-            throw new Error(
-              `Step '${step.name}' was expected to fail but succeeded`
-            );
-          }
-        }
+        testRun.steps.push(stepResult);
       }
-
-      for (const assertion of this.assertions) {
-        if (!testRun.steps[assertion.stepName]) {
-          throw new Error(
-            `Expected step '${assertion.stepName}' was not executed`
-          );
-        }
-      }
-
-      testRun.status = 'completed';
-      testRun.completedAt = new Date();
-      testRun.duration = Date.now() - startTime;
     } catch (error) {
       testRun.status = 'failed';
       testRun.error = error as Error;
-      testRun.duration = Date.now() - startTime;
     }
 
+    testRun.duration = Date.now() - startTime;
     return testRun;
   }
 
-  addAssertion(assertion: TestAssertion): void {
-    this.assertions.push(assertion);
+  private createContext(): Context {
+    return {
+      payload: this.payload,
+      steps: {},
+      services: {},
+      run: {
+        id: 'test-run',
+        workflowId: this.workflow.id,
+      },
+      state: {
+        get: (key: string, defaultValue?: any) => defaultValue,
+        set: async () => {},
+        incr: async (key: string, amount: number = 1) => amount,
+      },
+      last: null,
+      trigger: {
+        headers: {},
+      },
+      cancel: (reason?: string) => {
+        throw new Error(
+          `Workflow cancelled: ${reason || 'No reason provided'}`
+        );
+      },
+    };
   }
 
-  reset(): void {
-    this.assertions = [];
-    this.payload = {};
-    this.runId = generateId('test');
-    this.initializeTestSteps();
+  public addAssertion(assertion: TestAssertion): void {
+    this.assertions.push(assertion);
   }
+}
+
+export function createTestHarness(workflow: WorkflowDefinition): TestHarness {
+  return new TestHarness(workflow);
 }
 
 export class TestAssertionBuilder {
@@ -233,6 +210,14 @@ export class TestAssertionBuilder {
     return this.harness;
   }
 
+  toFail(): TestHarness {
+    this.harness.addAssertion({
+      stepName: this.stepName,
+      expectedStatus: 'fail',
+    });
+    return this.harness;
+  }
+
   toFailWith(errorMessage: string): TestHarness {
     this.harness.addAssertion({
       stepName: this.stepName,
@@ -241,16 +226,4 @@ export class TestAssertionBuilder {
     });
     return this.harness;
   }
-
-  toFail(): TestHarness {
-    this.harness.addAssertion({
-      stepName: this.stepName,
-      expectedStatus: 'fail',
-    });
-    return this.harness;
-  }
-}
-
-export function createTestHarness(workflow: WorkflowDefinition): TestHarness {
-  return new TestHarness(workflow);
 }

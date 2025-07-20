@@ -1,12 +1,14 @@
-//! Node-Cronflow SDK
-//!
-//! This is the Node.js SDK that provides the developer-friendly API
-//! for defining and managing workflows.
+export {
+  VERSION,
+  define,
+  start,
+  stop,
+  trigger,
+  inspect,
+  getWorkflows,
+  getWorkflow,
+} from './src/cronflow';
 
-// Export the main cronflow singleton
-export { Cronflow, VERSION } from './src/cronflow';
-
-// Export types
 export type {
   WorkflowDefinition,
   StepDefinition,
@@ -15,9 +17,12 @@ export type {
   Context,
 } from './src/workflow';
 
-// Export the WorkflowInstance class for direct usage
 export { WorkflowInstance } from './src/workflow';
 
-// Create and export the singleton instance
-import { Cronflow } from './src/cronflow';
-export const cronflow = new Cronflow();
+export { TestHarness, createTestHarness } from './src/testing';
+
+export { RetryExecutor } from './src/retry';
+export { StepExecutor } from './src/execution';
+
+import * as cronflowFunctions from './src/cronflow';
+export const cronflow = cronflowFunctions;
