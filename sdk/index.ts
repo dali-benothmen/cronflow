@@ -23,6 +23,7 @@ export { TestHarness, createTestHarness } from './src/testing';
 
 export { RetryExecutor } from './src/retry';
 export { StepExecutor } from './src/execution';
+export { CircuitBreaker, CircuitBreakerManager } from './src/circuit-breaker';
 
 import * as cronflowFunctions from './src/cronflow';
 export const cronflow = cronflowFunctions;

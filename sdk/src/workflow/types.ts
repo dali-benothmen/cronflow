@@ -46,6 +46,12 @@ export interface StepDefinition {
 export interface StepOptions {
   timeout?: string | number;
   retry?: RetryConfig;
+  circuitBreaker?: {
+    name?: string;
+    failureThreshold?: number;
+    recoveryTimeout?: string | number;
+    expectedErrors?: string[];
+  };
   cache?: CacheConfig;
   delay?: string | number;
   parallel?: boolean;

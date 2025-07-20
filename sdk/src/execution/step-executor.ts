@@ -1,5 +1,6 @@
 import { Context, StepDefinition, StepOptions } from '../workflow/types';
 import { RetryExecutor, RetryOptions } from '../retry';
+import { CircuitBreakerManager } from '../circuit-breaker';
 
 export interface StepExecutionResult {
   success: boolean;
@@ -11,6 +12,8 @@ export interface StepExecutionResult {
 }
 
 export class StepExecutor {
+  private static circuitBreakerManager = new CircuitBreakerManager();
+
   static async executeStep(
     step: StepDefinition,
     context: Context,
@@ -18,9 +21,43 @@ export class StepExecutor {
   ): Promise<StepExecutionResult> {
     const startTime = Date.now();
 
-    if (!options?.retry) {
+    if (!options?.retry && !options?.circuitBreaker) {
       try {
         const output = await step.handler(context);
+        return {
+          success: true,
+          output,
+          attempts: 1,
+          totalDuration: Date.now() - startTime,
+          retryDelays: [],
+        };
+      } catch (error) {
+        return {
+          success: false,
+          error: error instanceof Error ? error : new Error(String(error)),
+          attempts: 1,
+          totalDuration: Date.now() - startTime,
+          retryDelays: [],
+        };
+      }
+    }
+
+    const executeWithCircuitBreaker = async () => {
+      if (options?.circuitBreaker) {
+        const circuitBreakerName =
+          options.circuitBreaker.name || `step-${step.name}`;
+        return await this.circuitBreakerManager.executeWithCircuitBreaker(
+          circuitBreakerName,
+          () => step.handler(context),
+          options.circuitBreaker
+        );
+      }
+      return await step.handler(context);
+    };
+
+    if (!options?.retry) {
+      try {
+        const output = await executeWithCircuitBreaker();
         return {
           success: true,
           output,
@@ -49,7 +86,7 @@ export class StepExecutor {
     });
 
     const retryResult = await RetryExecutor.execute(
-      () => step.handler(context),
+      executeWithCircuitBreaker,
       retryOptions,
       context
     );
@@ -184,5 +221,9 @@ export class StepExecutor {
       ...baseContext,
       error,
     };
+  }
+
+  static getCircuitBreakerManager(): CircuitBreakerManager {
+    return this.circuitBreakerManager;
   }
 }
