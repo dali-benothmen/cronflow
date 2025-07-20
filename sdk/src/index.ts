@@ -64,3 +64,5 @@ export { WorkflowDefinitionSchema } from './workflow/validation';
 export * from './workflow';
 
 export * from './state';
+
+export * from './testing';

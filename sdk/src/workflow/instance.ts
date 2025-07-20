@@ -9,6 +9,7 @@ import {
 } from './types';
 import { validateWorkflow } from './validation';
 import { parseDuration, generateId } from '../utils';
+import { createTestHarness } from '../testing/harness';
 
 export class WorkflowInstance {
   private _workflow: WorkflowDefinition;
@@ -27,6 +28,10 @@ export class WorkflowInstance {
     private readonly _cronflowInstance: any // Will be typed properly later
   ) {
     this._workflow = workflow;
+  }
+
+  test() {
+    return createTestHarness(this._workflow);
   }
 
   step(

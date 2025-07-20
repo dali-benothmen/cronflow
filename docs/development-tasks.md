@@ -918,14 +918,70 @@ const version = await cronflow.getGlobalState('app-version');
 
 **Actions**:
 
-- [ ] Implement `workflow.test()` method in SDK
-- [ ] Create test runner with in-memory execution
-- [ ] Add step mocking capabilities
-- [ ] Implement basic test assertions
-- [ ] Test the testing framework
-- [ ] Add test utilities
+- [x] Implement `workflow.test()` method in SDK
+- [x] Create test runner with in-memory execution
+- [x] Add step mocking capabilities
+- [x] Implement basic test assertions
+- [x] Test the testing framework
+- [x] Add test utilities
 
 **Expected Result**: Workflows can be tested in isolation
+
+**Implementation Details**:
+- ✅ **TestHarness Class**: Comprehensive testing framework with in-memory execution
+- ✅ **TestHarness.test() Method**: Entry point for workflow testing with fluent API
+- ✅ **Step Mocking**: `.mockStep()` method for replacing step implementations during testing
+- ✅ **Test Assertions**: `.expectStep()` with `.toSucceed()`, `.toFail()`, and `.toFailWith()` methods
+- ✅ **In-Memory Execution**: Complete workflow execution without external dependencies
+- ✅ **Context Integration**: Full context object with payload, steps, services, and state
+- ✅ **Error Handling**: Comprehensive error handling and failure assertions
+- ✅ **Performance Monitoring**: Step-by-step timing and duration tracking
+- ✅ **Test Result Reporting**: Detailed test run results with status, duration, and step outputs
+- ✅ **Fluent API**: Chainable test composition for complex test scenarios
+- ✅ **State Management**: State persistence and management during test execution
+- ✅ **Service Integration**: Service mocking and integration in test environment
+
+**Key Features**:
+1. **Basic Testing**: `workflow.test().trigger(payload).expectStep('step').toSucceed().run()`
+2. **Step Mocking**: Replace external dependencies with mock implementations
+3. **Error Assertions**: Test expected failures with specific error messages
+4. **Complex Workflows**: Support for conditional logic, state management, and services
+5. **Performance Monitoring**: Track execution time for each step and overall workflow
+6. **Comprehensive Reporting**: Detailed test results with step-by-step analysis
+7. **Fluent API**: Chainable test composition for readable test code
+8. **In-Memory Execution**: Fast, isolated testing without external dependencies
+
+**Example Usage**:
+```typescript
+const testRun = await workflow
+  .test()
+  .trigger({ orderId: 'ord_123', amount: 100 })
+  .mockStep('external-api', async (ctx) => {
+    return { status: 'success', data: 'mocked' };
+  })
+  .expectStep('validate-order')
+  .toSucceed()
+  .expectStep('process-payment')
+  .toFailWith('Payment failed')
+  .run();
+
+expect(testRun.status).toBe('completed');
+```
+
+**Testing**:
+- Created comprehensive test suite (`tests/testing-framework.test.ts`) with 8 test scenarios
+- Verified all testing framework features including mocking, assertions, and performance
+- Created real-world example (`examples/testing-framework-example.ts`) demonstrating complex testing patterns
+- All tests pass successfully
+
+**Files Created**:
+- `sdk/src/testing/harness.ts` - Core testing framework implementation
+- `sdk/src/testing/index.ts` - Testing module exports
+- `tests/testing-framework.test.ts` - Comprehensive test suite
+- `examples/testing-framework-example.ts` - Real-world testing example
+
+**Next Steps**:
+- Task 8.2: Add Advanced Testing Features (service mocking, trigger mocking, test data generators)
 
 ---
 
