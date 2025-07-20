@@ -1,7 +1,7 @@
 {
   "compilerOptions": {
     "target": "ES2022",
-    "module": "CommonJS",
+    "module": "ES2022",
     "moduleResolution": "node",
     "lib": ["ES2022", "DOM"],
     "outDir": "./dist",
@@ -20,15 +20,15 @@
       "@node-cronflow/sdk": ["sdk"],
       "@node-cronflow/services": ["services"],
       "@node-cronflow/core": ["core"]
-    }
+    },
+    "downlevelIteration": true
   },
-  "include": ["src/**/*", "sdk/**/*", "services/**/*"],
-  "exclude": [
-    "node_modules",
-    "dist",
-    "**/*.test.ts",
-    "**/*.spec.ts",
-    "packages",
-    "core/**/*.rs"
-  ]
+  "include": [
+    "src/**/*",
+    "sdk/**/*",
+    "services/**/*",
+    "tests/**/*",
+    "examples/**/*"
+  ],
+  "exclude": ["node_modules", "dist", "packages", "core/**/*.rs"]
 }

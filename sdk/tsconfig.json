@@ -1,7 +1,7 @@
 {
   "compilerOptions": {
     "target": "ES2022",
-    "module": "CommonJS",
+    "module": "ES2022",
     "moduleResolution": "node",
     "lib": ["ES2022", "DOM"],
     "outDir": "../dist/sdk",
@@ -14,7 +14,8 @@
     "declarationMap": true,
     "sourceMap": true,
     "types": ["node"],
-    "noEmit": false
+    "noEmit": false,
+    "downlevelIteration": true
   },
   "include": ["./**/*"],
   "exclude": ["node_modules", "**/*.test.ts", "**/*.spec.ts"]

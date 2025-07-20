@@ -992,14 +992,71 @@ expect(testRun.status).toBe('completed');
 
 **Actions**:
 
-- [ ] Add service mocking
-- [ ] Implement trigger mocking
-- [ ] Create test data generators
-- [ ] Add test coverage reporting
-- [ ] Test advanced testing features
-- [ ] Add integration test utilities
+- [x] Add service mocking
+- [x] Implement trigger mocking
+- [x] Create test data generators
+- [x] Add test coverage reporting
+- [x] Test advanced testing features
+- [x] Add integration test utilities
 
 **Expected Result**: Comprehensive testing capabilities
+
+**Implementation Details**:
+- ✅ **AdvancedTestHarness Class**: Extended TestHarness with advanced features
+- ✅ **Enhanced Service Mocking**: `.mockService()` and `.mockServiceAction()` methods
+- ✅ **Trigger Mocking**: `.mockTrigger()` method for webhook, schedule, and manual triggers
+- ✅ **Test Data Generators**: `DefaultTestDataGenerator` with realistic data generation
+- ✅ **Custom Data Generators**: `.withDataGenerator()` method for custom test data
+- ✅ **Test Coverage Reporting**: Comprehensive coverage tracking with step, service, and overall metrics
+- ✅ **Integration Test Utilities**: Complete integration testing framework
+- ✅ **Performance Monitoring**: Step-by-step timing and duration analysis
+- ✅ **Fluent API**: Chainable advanced test composition
+- ✅ **Real-World Examples**: E-commerce workflow testing with complex scenarios
+- ✅ **Comprehensive Testing**: 8 test scenarios covering all advanced features
+
+**Key Features**:
+1. **Enhanced Service Mocking**: Mock entire services or individual actions with custom implementations
+2. **Trigger Mocking**: Mock webhook, schedule, and manual triggers with payload and configuration
+3. **Test Data Generators**: Generate realistic test data for users, orders, payments, products, and events
+4. **Custom Data Generators**: Support for custom data generation patterns
+5. **Test Coverage Reporting**: Track step execution, service calls, and overall coverage percentages
+6. **Integration Test Utilities**: Complete framework for testing complex workflows with multiple services
+7. **Performance Monitoring**: Step-by-step timing and duration analysis
+8. **Complex Workflow Support**: Test workflows with conditional logic, state management, and services
+9. **Error Handling**: Comprehensive error testing and validation
+10. **Real-World Patterns**: E-commerce order processing example with multiple test scenarios
+
+**Example Usage**:
+```typescript
+const testRun = await workflow
+  .advancedTest()
+  .trigger({ orderId: 'ord_123', amount: 100 })
+  .mockService('payment-service', {
+    charge: async (params) => ({ id: 'pay_123', status: 'succeeded' })
+  })
+  .mockServiceAction('email-service', 'send', { id: 'email_123' })
+  .mockTrigger('webhook', { payload: { event: 'order.created' } })
+  .withDataGenerator(customGenerator)
+  .expectStep('process-payment')
+  .toSucceed()
+  .run();
+
+console.log(`Coverage: ${testRun.coverage.overall.coveragePercentage}%`);
+```
+
+**Testing**:
+- Created comprehensive test suite (`tests/advanced-testing-features.test.ts`) with 8 test scenarios
+- Verified all advanced testing features including service mocking, trigger mocking, data generators
+- Created real-world example (`examples/advanced-testing-features-example.ts`) demonstrating e-commerce workflow testing
+- All tests pass successfully with proper coverage reporting and performance monitoring
+
+**Files Created**:
+- `sdk/src/testing/advanced.ts` - Advanced testing framework implementation
+- `tests/advanced-testing-features.test.ts` - Comprehensive test suite
+- `examples/advanced-testing-features-example.ts` - Real-world testing example
+
+**Next Steps**:
+- Task 9.1: Implement Retry Logic
 
 ---
 

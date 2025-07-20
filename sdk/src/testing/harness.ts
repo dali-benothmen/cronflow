@@ -37,7 +37,7 @@ export interface TestAssertion {
 }
 
 export class TestHarness {
-  private workflow: WorkflowDefinition;
+  protected workflow: WorkflowDefinition;
   private testSteps: Map<string, TestStep> = new Map();
   private assertions: TestAssertion[] = [];
   private payload: any = {};

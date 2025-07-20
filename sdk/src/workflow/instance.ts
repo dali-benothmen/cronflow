@@ -10,6 +10,10 @@ import {
 import { validateWorkflow } from './validation';
 import { parseDuration, generateId } from '../utils';
 import { createTestHarness } from '../testing/harness';
+import {
+  createAdvancedTestHarness,
+  AdvancedTestHarness,
+} from '../testing/advanced';
 
 export class WorkflowInstance {
   private _workflow: WorkflowDefinition;
@@ -32,6 +36,10 @@ export class WorkflowInstance {
 
   test() {
     return createTestHarness(this._workflow);
+  }
+
+  advancedTest(): AdvancedTestHarness {
+    return createAdvancedTestHarness(this._workflow);
   }
 
   step(
