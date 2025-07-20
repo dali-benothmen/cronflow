@@ -1,6 +1,7 @@
 import { Context, StepDefinition, StepOptions } from '../workflow/types';
 import { RetryExecutor, RetryOptions } from '../retry';
 import { CircuitBreakerManager } from '../circuit-breaker';
+import { PerformanceOptimizer } from '../performance';
 
 export interface StepExecutionResult {
   success: boolean;
@@ -13,6 +14,7 @@ export interface StepExecutionResult {
 
 export class StepExecutor {
   private static circuitBreakerManager = new CircuitBreakerManager();
+  private static performanceOptimizer = new PerformanceOptimizer();
 
   static async executeStep(
     step: StepDefinition,
@@ -24,9 +26,12 @@ export class StepExecutor {
     if (!options?.retry && !options?.circuitBreaker) {
       try {
         const output = await step.handler(context);
+        const serializedOutput =
+          this.performanceOptimizer.optimizeSerialization(output);
+
         return {
           success: true,
-          output,
+          output: JSON.parse(serializedOutput), // Parse back to object
           attempts: 1,
           totalDuration: Date.now() - startTime,
           retryDelays: [],
@@ -58,9 +63,12 @@ export class StepExecutor {
     if (!options?.retry) {
       try {
         const output = await executeWithCircuitBreaker();
+        const serializedOutput =
+          this.performanceOptimizer.optimizeSerialization(output);
+
         return {
           success: true,
-          output,
+          output: JSON.parse(serializedOutput), // Parse back to object
           attempts: 1,
           totalDuration: Date.now() - startTime,
           retryDelays: [],
@@ -91,9 +99,17 @@ export class StepExecutor {
       context
     );
 
+    let optimizedOutput = retryResult.result;
+    if (retryResult.success && retryResult.result) {
+      const serialized = this.performanceOptimizer.optimizeSerialization(
+        retryResult.result
+      );
+      optimizedOutput = JSON.parse(serialized);
+    }
+
     return {
       success: retryResult.success,
-      output: retryResult.result,
+      output: optimizedOutput,
       error: retryResult.error,
       attempts: retryResult.attempts,
       totalDuration: retryResult.totalDuration,
@@ -181,6 +197,24 @@ export class StepExecutor {
     return retryResult;
   }
 
+  static async executeOptimizedDatabaseQuery<T>(
+    queryFn: () => Promise<T>,
+    cacheKey?: string
+  ): Promise<T> {
+    return await this.performanceOptimizer.optimizeDatabaseQuery(
+      queryFn,
+      cacheKey
+    );
+  }
+
+  static async getDatabaseConnection(): Promise<string> {
+    return await this.performanceOptimizer.getConnection();
+  }
+
+  static releaseDatabaseConnection(connectionId: string): void {
+    this.performanceOptimizer.releaseConnection(connectionId);
+  }
+
   private static parseDuration(duration: string | number): number {
     if (typeof duration === 'number') {
       return duration;
@@ -225,5 +259,9 @@ export class StepExecutor {
 
   static getCircuitBreakerManager(): CircuitBreakerManager {
     return this.circuitBreakerManager;
+  }
+
+  static getPerformanceOptimizer(): PerformanceOptimizer {
+    return this.performanceOptimizer;
   }
 }
