@@ -1,5 +1,6 @@
 import { describe, it, expect, beforeEach } from 'vitest';
-import { cronflow, WorkflowInstance } from './index';
+import { cronflow, WorkflowInstance } from '../sdk/index';
+import { Context } from '../sdk/src/workflow/types';
 
 describe('Workflow Builder', () => {
   beforeEach(() => {

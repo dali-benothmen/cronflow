@@ -1,11 +1,10 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
-import { Cronflow } from './src/cronflow';
-import { Context } from './src/workflow/types';
+import * as cronflow from '../sdk/src/cronflow';
+import { Context } from '../sdk/src/workflow/types';
 import fs from 'fs';
 import path from 'path';
 
 describe('SDK to Rust Engine Integration', () => {
-  let cronflow: Cronflow;
   const testDbPath = './test-cronflow.db';
 
   beforeEach(() => {
@@ -13,8 +12,6 @@ describe('SDK to Rust Engine Integration', () => {
     if (fs.existsSync(testDbPath)) {
       fs.unlinkSync(testDbPath);
     }
-
-    cronflow = new Cronflow(testDbPath);
   });
 
   afterEach(() => {
@@ -74,7 +71,7 @@ describe('SDK to Rust Engine Integration', () => {
       await cronflow.start();
 
       // The engine should handle errors gracefully
-      expect(cronflow.getState()).toBe('STARTED');
+      expect(cronflow.getEngineState()).toBe('STARTED');
     });
   });
 
@@ -198,38 +195,23 @@ describe('SDK to Rust Engine Integration', () => {
 
   describe('Engine State Management', () => {
     it('should manage engine state correctly', async () => {
-      expect(cronflow.getState()).toBe('STOPPED');
+      expect(cronflow.getEngineState()).toBe('STOPPED');
 
       await cronflow.start();
-      expect(cronflow.getState()).toBe('STARTED');
+      expect(cronflow.getEngineState()).toBe('STARTED');
 
       await cronflow.stop();
-      expect(cronflow.getState()).toBe('STOPPED');
+      expect(cronflow.getEngineState()).toBe('STOPPED');
     });
 
     it('should handle multiple start/stop calls gracefully', async () => {
       await cronflow.start();
       await cronflow.start(); // Should not cause issues
-      expect(cronflow.getState()).toBe('STARTED');
+      expect(cronflow.getEngineState()).toBe('STARTED');
 
       await cronflow.stop();
       await cronflow.stop(); // Should not cause issues
-      expect(cronflow.getState()).toBe('STOPPED');
-    });
-  });
-
-  describe('Database Integration', () => {
-    it('should use specified database path', () => {
-      const customDbPath = './custom-test-db.db';
-      const customCronflow = new Cronflow(customDbPath);
-
-      // The database file should be created when the engine starts
-      expect(customCronflow.getState()).toBe('STOPPED');
-
-      // Clean up
-      if (fs.existsSync(customDbPath)) {
-        fs.unlinkSync(customDbPath);
-      }
+      expect(cronflow.getEngineState()).toBe('STOPPED');
     });
   });
 });

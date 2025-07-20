@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { cronflow, VERSION, WorkflowDefinitionSchema } from './index';
+import { cronflow, VERSION } from '../sdk/index';
 
 describe('Node-Cronflow SDK', () => {
   it('should export correct version', () => {
@@ -12,30 +12,15 @@ describe('Node-Cronflow SDK', () => {
     expect(typeof cronflow.start).toBe('function');
   });
 
-  it('should validate workflow definitions', () => {
-    const validWorkflow = {
-      id: 'test-workflow',
-      name: 'Test Workflow',
-      description: 'A test workflow',
-      steps: [],
-      triggers: [],
-      created_at: new Date(),
-      updated_at: new Date(),
-    };
-
-    expect(() => WorkflowDefinitionSchema.parse(validWorkflow)).not.toThrow();
-  });
-
   it('should define a workflow', () => {
-    const workflow = cronflow.define('test', {
+    const workflow = cronflow.define({
+      id: 'test',
       name: 'Test Workflow',
       description: 'A test workflow',
-      steps: [],
-      triggers: [],
     });
 
     expect(workflow).toBeDefined();
-    expect(workflow.getDefinition().id).toBe('test');
+    expect(workflow.getId()).toBe('test');
   });
 
   it('should get defined workflows', () => {
