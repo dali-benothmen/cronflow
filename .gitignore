@@ -26,7 +26,6 @@ build/
 *.swp
 *.swo
 *~
-*.jpeg
 # OS
 .DS_Store
 Thumbs.db
