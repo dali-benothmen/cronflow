@@ -21,7 +21,7 @@ Thank you for your interest in contributing to Cronflow! This document provides 
 ## 🚀 Quick Start
 
 1. **Fork** the repository
-2. **Clone** your fork: `git clone https://github.com/YOUR_USERNAME/node-cronflow.git`
+2. **Clone** your fork: `git clone https://github.com/YOUR_USERNAME/cronflow.git`
 3. **Install dependencies**: `bun install`
 4. **Build the project**: `bun run build:all`
 5. **Run tests**: `bun test`
@@ -44,8 +44,8 @@ Thank you for your interest in contributing to Cronflow! This document provides 
 
 ```bash
 # Clone the repository
-git clone https://github.com/node-cronflow/node-cronflow.git
-cd node-cronflow
+git clone https://github.com/dali-benothmen/cronflow.git
+cd cronflow
 
 # Install dependencies
 bun install
@@ -121,7 +121,7 @@ bun run examples
 ## 🏗️ Project Structure
 
 ```
-node-cronflow/
+cronflow/
 ├── core/                 # Rust core components
 ├── src/                  # Main TypeScript source
 ├── sdk/                  # SDK components
