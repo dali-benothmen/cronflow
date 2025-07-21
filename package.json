@@ -1,6 +1,6 @@
 {
   "name": "cronflow",
-  "version": "0.0.0",
+  "version": "1.0.0",
   "description": "The fastestworkflow automation engine built on Bun.js + Rust, providing a code-first alternative to tools like n8n",
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
@@ -90,9 +90,9 @@
   },
   "license": "MIT",
   "bugs": {
-    "url": "https://github.com/node-cronflow/node-cronflow/issues"
+    "url": "https://github.com/dali-benothmen/cronflow/issues"
   },
-  "homepage": "https://github.com/node-cronflow/node-cronflow#readme",
+  "homepage": "https://github.com/dali-benothmen/cronflow",
   "engines": {
     "node": ">=18.0.0",
     "bun": ">=1.0.0"
