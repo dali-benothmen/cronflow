@@ -25,9 +25,7 @@ _Built with Rust + Bun for unparalleled performance_
 - [🚀 Quick Start](#-quick-start)
 - [⚡ Performance Comparison](#-performance-comparison)
 - [🎯 Key Features](#-key-features)
-- [📚 Examples](#-examples)
 - [📖 Documentation](#-documentation)
-- [🛠️ Use Cases](#️-use-cases)
 - [🤝 Contributing](#-contributing)
 - [📄 License](#-license)
 
