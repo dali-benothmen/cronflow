@@ -30,5 +30,12 @@
     "tests/**/*",
     "examples/**/*"
   ],
-  "exclude": ["node_modules", "dist", "packages", "core/**/*.rs"]
+  "exclude": [
+    "node_modules",
+    "dist",
+    "packages",
+    "core/**/*.rs",
+    "examples/**/*",
+    "tests/**/*"
+  ]
 }
