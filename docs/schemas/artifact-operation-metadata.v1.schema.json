@@ -1,0 +1,31 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://woml.dev/schemas/artifact-operation-metadata/v1",
+  "title": "WOML Artifact Operation Metadata v1",
+  "description": "Bounded body-free metadata permitted in durable events, progress, inspection, logs, and metrics.",
+  "x-status": "durable-artifacts-da1-frozen",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["profile", "operation", "outcome"],
+  "properties": {
+    "profile": { "const": "woml.artifact-operation-metadata/v1" },
+    "operation": { "enum": ["put", "head", "materialize"] },
+    "outcome": { "enum": ["started", "succeeded", "failed", "cancelled", "interrupted"] },
+    "artifactId": { "type": "string", "pattern": "^artifact_[0-9a-hjkmnp-tv-z]{26}$" },
+    "contentDigest": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" },
+    "size": { "type": "integer", "minimum": 0, "maximum": 1099511627776 },
+    "durationMs": { "type": "number", "minimum": 0, "maximum": 86400000 },
+    "errorCode": { "type": "string", "pattern": "^WOML_ARTIFACT_[A-Z0-9_]+$", "maxLength": 128 },
+    "ambiguous": { "type": "boolean" }
+  },
+  "allOf": [
+    {
+      "if": { "properties": { "outcome": { "const": "succeeded" } }, "required": ["outcome"] },
+      "then": { "required": ["artifactId", "contentDigest", "size", "durationMs"] }
+    },
+    {
+      "if": { "properties": { "outcome": { "enum": ["failed", "cancelled", "interrupted"] } }, "required": ["outcome"] },
+      "then": { "required": ["durationMs", "errorCode", "ambiguous"] }
+    }
+  ]
+}

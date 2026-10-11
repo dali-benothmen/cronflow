@@ -1,0 +1,65 @@
+{
+  "request": {
+    "contract": "woml.capability-call",
+    "contractVersion": 1,
+    "messageType": "request",
+    "invocationId": "invocation-artifact-a",
+    "callId": "call-artifact-put-a",
+    "runId": "run-artifact-a",
+    "nodeId": "createPlan",
+    "attemptNumber": 1,
+    "capability": "artifacts",
+    "operation": "put",
+    "inputContractVersion": 1,
+    "resultContractVersion": 1,
+    "identity": {
+      "mode": "named",
+      "stepIdempotencyKey": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "operationName": "production-terraform-plan",
+      "operationKey": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+    },
+    "limits": {
+      "inputBytes": 1048576,
+      "resultBytes": 16384,
+      "timeoutMs": 3601000
+    },
+    "input": {
+      "contract": "woml.artifacts",
+      "contractVersion": 1,
+      "kind": "request",
+      "operation": "put",
+      "input": {
+        "sourcePath": "infrastructure/release.tfplan",
+        "name": "production-terraform-plan",
+        "contentType": "application/octet-stream",
+        "retentionMs": 2592000000
+      }
+    }
+  },
+  "result": {
+    "contract": "woml.capability-call",
+    "contractVersion": 1,
+    "messageType": "result",
+    "invocationId": "invocation-artifact-a",
+    "callId": "call-artifact-put-a",
+    "outcome": "succeeded",
+    "resultContractVersion": 1,
+    "resultBytes": 312,
+    "durationMs": 48.5,
+    "result": {
+      "contract": "woml.artifacts",
+      "contractVersion": 1,
+      "kind": "result",
+      "operation": "put",
+      "data": {
+        "contract": "woml.artifact-reference",
+        "contractVersion": 1,
+        "id": "artifact_01k7qh7s00a1b2c3d4e5f6g7h8",
+        "name": "production-terraform-plan",
+        "size": 184320,
+        "sha256": "c742b8669e07a0ca8a2a8d79b22b17504c51f7b0d81623a8045fece436f02942",
+        "contentType": "application/octet-stream"
+      }
+    }
+  }
+}

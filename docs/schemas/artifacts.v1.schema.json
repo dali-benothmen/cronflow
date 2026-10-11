@@ -1,0 +1,129 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://woml.dev/schemas/artifacts/v1",
+  "title": "WOML Durable Artifacts v1",
+  "description": "Normalized request and result contract for services.artifacts.",
+  "x-status": "durable-artifacts-da1-frozen",
+  "oneOf": [
+    { "$ref": "#/$defs/request" },
+    { "$ref": "#/$defs/result" }
+  ],
+  "$defs": {
+    "portableSourcePath": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 4096,
+      "x-maxUtf8Bytes": 4096,
+      "pattern": "^(?!/)(?![A-Za-z]:)(?!.*\\\\)(?!.*//)(?!.*(?:^|/)\\.\\.?($|/))(?!.*[\\u0000-\\u001F\\u007F]).+$"
+    },
+    "artifactName": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 256,
+      "x-maxUtf8Bytes": 256,
+      "pattern": "^[^\\u0000-\\u001F\\u007F]+$"
+    },
+    "contentType": {
+      "type": "string",
+      "minLength": 3,
+      "maxLength": 255,
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9!#$&^_.+-]{0,126}/[A-Za-z0-9][A-Za-z0-9!#$&^_.+-]{0,126}$"
+    },
+    "putInput": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["sourcePath", "name", "contentType", "retentionMs"],
+      "properties": {
+        "sourcePath": { "$ref": "#/$defs/portableSourcePath" },
+        "name": { "$ref": "#/$defs/artifactName" },
+        "contentType": { "$ref": "#/$defs/contentType" },
+        "retentionMs": {
+          "type": "integer",
+          "minimum": 3600000,
+          "maximum": 31536000000
+        }
+      }
+    },
+    "referenceInput": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["artifact"],
+      "properties": {
+        "artifact": { "$ref": "https://woml.dev/schemas/artifact-reference/v1" }
+      }
+    },
+    "request": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["contract", "contractVersion", "kind", "operation", "input"],
+      "properties": {
+        "contract": { "const": "woml.artifacts" },
+        "contractVersion": { "const": 1 },
+        "kind": { "const": "request" },
+        "operation": { "enum": ["put", "head", "materialize"] },
+        "input": {}
+      },
+      "allOf": [
+        {
+          "if": { "properties": { "operation": { "const": "put" } }, "required": ["operation"] },
+          "then": { "properties": { "input": { "$ref": "#/$defs/putInput" } } }
+        },
+        {
+          "if": { "properties": { "operation": { "enum": ["head", "materialize"] } }, "required": ["operation"] },
+          "then": { "properties": { "input": { "$ref": "#/$defs/referenceInput" } } }
+        }
+      ]
+    },
+    "headData": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["artifact", "createdAt", "expiresAt", "integrity"],
+      "properties": {
+        "artifact": { "$ref": "https://woml.dev/schemas/artifact-reference/v1" },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "expiresAt": { "type": "string", "format": "date-time" },
+        "integrity": { "const": "verified" }
+      }
+    },
+    "materializeData": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["artifact", "path"],
+      "properties": {
+        "artifact": { "$ref": "https://woml.dev/schemas/artifact-reference/v1" },
+        "path": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 4096,
+          "pattern": "^[^\\u0000-\\u001F\\u007F]+$"
+        }
+      }
+    },
+    "result": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["contract", "contractVersion", "kind", "operation", "data"],
+      "properties": {
+        "contract": { "const": "woml.artifacts" },
+        "contractVersion": { "const": 1 },
+        "kind": { "const": "result" },
+        "operation": { "enum": ["put", "head", "materialize"] },
+        "data": {}
+      },
+      "allOf": [
+        {
+          "if": { "properties": { "operation": { "const": "put" } }, "required": ["operation"] },
+          "then": { "properties": { "data": { "$ref": "https://woml.dev/schemas/artifact-reference/v1" } } }
+        },
+        {
+          "if": { "properties": { "operation": { "const": "head" } }, "required": ["operation"] },
+          "then": { "properties": { "data": { "$ref": "#/$defs/headData" } } }
+        },
+        {
+          "if": { "properties": { "operation": { "const": "materialize" } }, "required": ["operation"] },
+          "then": { "properties": { "data": { "$ref": "#/$defs/materializeData" } } }
+        }
+      ]
+    }
+  }
+}

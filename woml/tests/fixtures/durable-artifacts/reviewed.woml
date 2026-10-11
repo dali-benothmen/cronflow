@@ -1,0 +1,49 @@
+<woml>
+  <workflow
+    id="durable-artifact-review"
+    name="Create and inspect a durable Terraform plan"
+    description="Preserves an immutable plan outside workflow context and verifies it in a later step."
+    version="1.0.0"
+  >
+    <triggers>
+      <manual id="start" />
+    </triggers>
+
+    <steps>
+      <step id="createPlan" name="Create Terraform plan">
+        <script>
+          await services.process.run({
+            executable: "terraform",
+            args: ["plan", "-out", "release.tfplan"],
+            cwd: "./infrastructure"
+          }, { name: "create-plan" });
+
+          const plan = await services.artifacts.put(
+            "infrastructure/release.tfplan",
+            {
+              name: "production-terraform-plan",
+              contentType: "application/octet-stream",
+              retention: "30d"
+            }
+          );
+
+          return { plan };
+        </script>
+      </step>
+
+      <step id="inspectPlan" name="Inspect preserved plan">
+        <script>
+          const path = await services.artifacts.materialize(
+            context.steps.createPlan.plan
+          );
+          const result = await services.process.run({
+            executable: "terraform",
+            args: ["show", "-json", path],
+            cwd: "./infrastructure"
+          }, { name: "inspect-plan" });
+          return { inspected: result.exitCode === 0 };
+        </script>
+      </step>
+    </steps>
+  </workflow>
+</woml>

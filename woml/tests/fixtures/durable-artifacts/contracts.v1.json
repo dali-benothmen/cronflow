@@ -1,0 +1,114 @@
+{
+  "reference": {
+    "contract": "woml.artifact-reference",
+    "contractVersion": 1,
+    "id": "artifact_01k7qh7s00a1b2c3d4e5f6g7h8",
+    "name": "Plan de producción 🌍",
+    "size": 184320,
+    "sha256": "c742b8669e07a0ca8a2a8d79b22b17504c51f7b0d81623a8045fece436f02942",
+    "contentType": "application/octet-stream"
+  },
+  "requests": {
+    "put": {
+      "contract": "woml.artifacts",
+      "contractVersion": 1,
+      "kind": "request",
+      "operation": "put",
+      "input": {
+        "sourcePath": "infrastructure/release.tfplan",
+        "name": "Plan de producción 🌍",
+        "contentType": "application/octet-stream",
+        "retentionMs": 2592000000
+      }
+    },
+    "head": {
+      "contract": "woml.artifacts",
+      "contractVersion": 1,
+      "kind": "request",
+      "operation": "head",
+      "input": {
+        "artifact": {
+          "contract": "woml.artifact-reference",
+          "contractVersion": 1,
+          "id": "artifact_01k7qh7s00a1b2c3d4e5f6g7h8",
+          "name": "Plan de producción 🌍",
+          "size": 184320,
+          "sha256": "c742b8669e07a0ca8a2a8d79b22b17504c51f7b0d81623a8045fece436f02942",
+          "contentType": "application/octet-stream"
+        }
+      }
+    },
+    "materialize": {
+      "contract": "woml.artifacts",
+      "contractVersion": 1,
+      "kind": "request",
+      "operation": "materialize",
+      "input": {
+        "artifact": {
+          "contract": "woml.artifact-reference",
+          "contractVersion": 1,
+          "id": "artifact_01k7qh7s00a1b2c3d4e5f6g7h8",
+          "name": "Plan de producción 🌍",
+          "size": 184320,
+          "sha256": "c742b8669e07a0ca8a2a8d79b22b17504c51f7b0d81623a8045fece436f02942",
+          "contentType": "application/octet-stream"
+        }
+      }
+    }
+  },
+  "results": {
+    "put": {
+      "contract": "woml.artifacts",
+      "contractVersion": 1,
+      "kind": "result",
+      "operation": "put",
+      "data": {
+        "contract": "woml.artifact-reference",
+        "contractVersion": 1,
+        "id": "artifact_01k7qh7s00a1b2c3d4e5f6g7h8",
+        "name": "Plan de producción 🌍",
+        "size": 184320,
+        "sha256": "c742b8669e07a0ca8a2a8d79b22b17504c51f7b0d81623a8045fece436f02942",
+        "contentType": "application/octet-stream"
+      }
+    },
+    "head": {
+      "contract": "woml.artifacts",
+      "contractVersion": 1,
+      "kind": "result",
+      "operation": "head",
+      "data": {
+        "artifact": {
+          "contract": "woml.artifact-reference",
+          "contractVersion": 1,
+          "id": "artifact_01k7qh7s00a1b2c3d4e5f6g7h8",
+          "name": "Plan de producción 🌍",
+          "size": 184320,
+          "sha256": "c742b8669e07a0ca8a2a8d79b22b17504c51f7b0d81623a8045fece436f02942",
+          "contentType": "application/octet-stream"
+        },
+        "createdAt": "2026-10-11T10:00:00.000Z",
+        "expiresAt": "2026-11-10T10:00:00.000Z",
+        "integrity": "verified"
+      }
+    },
+    "materialize": {
+      "contract": "woml.artifacts",
+      "contractVersion": 1,
+      "kind": "result",
+      "operation": "materialize",
+      "data": {
+        "artifact": {
+          "contract": "woml.artifact-reference",
+          "contractVersion": 1,
+          "id": "artifact_01k7qh7s00a1b2c3d4e5f6g7h8",
+          "name": "Plan de producción 🌍",
+          "size": 184320,
+          "sha256": "c742b8669e07a0ca8a2a8d79b22b17504c51f7b0d81623a8045fece436f02942",
+          "contentType": "application/octet-stream"
+        },
+        "path": "/private/woml/materialized/run-a/attempt-1/release.tfplan"
+      }
+    }
+  }
+}

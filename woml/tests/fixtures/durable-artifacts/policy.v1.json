@@ -1,0 +1,38 @@
+{
+  "contract": "woml.artifact-policy",
+  "contractVersion": 1,
+  "enabled": true,
+  "modes": {
+    "foreground": true,
+    "background": true
+  },
+  "projectRoot": "/srv/woml/project",
+  "readRoots": [".", "./infrastructure", "./reports"],
+  "materialization": {
+    "directory": "/srv/woml/private/materialized-v1",
+    "cleanupOnStart": true,
+    "maxBytesPerAttempt": 2147483648
+  },
+  "limits": {
+    "maxArtifactBytes": 1073741824,
+    "maxRunBytes": 10737418240,
+    "maxStoreBytes": 107374182400,
+    "maxConcurrentTransfers": 4,
+    "transferTimeoutMs": 3600000
+  },
+  "retention": {
+    "defaultMs": 2592000000,
+    "minimumMs": 3600000,
+    "maximumMs": 31536000000
+  },
+  "secretScanning": {
+    "knownSecretAction": "reject",
+    "minimumSecretBytes": 8
+  },
+  "backend": {
+    "contract": "woml.artifact-backend",
+    "contractVersion": 1,
+    "kind": "local",
+    "directory": "/srv/woml/state/artifacts-v1"
+  }
+}

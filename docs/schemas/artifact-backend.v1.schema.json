@@ -1,0 +1,87 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://woml.dev/schemas/artifact-backend/v1",
+  "title": "WOML Artifact Backend Configuration v1",
+  "description": "Operator-owned local or S3-compatible byte-backend configuration. Credential values are forbidden.",
+  "x-status": "durable-artifacts-da1-frozen",
+  "oneOf": [
+    { "$ref": "#/$defs/local" },
+    { "$ref": "#/$defs/s3" }
+  ],
+  "$defs": {
+    "secretName": {
+      "type": "string",
+      "pattern": "^[A-Z][A-Z0-9_]{0,127}$"
+    },
+    "local": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["contract", "contractVersion", "kind", "directory"],
+      "properties": {
+        "contract": { "const": "woml.artifact-backend" },
+        "contractVersion": { "const": 1 },
+        "kind": { "const": "local" },
+        "directory": { "type": "string", "minLength": 1, "maxLength": 4096 }
+      }
+    },
+    "ambientAuth": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["mode"],
+      "properties": { "mode": { "const": "ambient" } }
+    },
+    "secretAuth": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["mode", "accessKeySecret", "secretKeySecret"],
+      "properties": {
+        "mode": { "const": "secrets" },
+        "accessKeySecret": { "$ref": "#/$defs/secretName" },
+        "secretKeySecret": { "$ref": "#/$defs/secretName" },
+        "sessionTokenSecret": { "$ref": "#/$defs/secretName" }
+      }
+    },
+    "aes256": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["mode"],
+      "properties": { "mode": { "const": "aes256" } }
+    },
+    "kms": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["mode", "keyId"],
+      "properties": {
+        "mode": { "const": "aws-kms" },
+        "keyId": { "type": "string", "minLength": 1, "maxLength": 2048 }
+      }
+    },
+    "s3": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["contract", "contractVersion", "kind", "bucket", "region", "prefix", "forcePathStyle", "authentication", "serverSideEncryption"],
+      "properties": {
+        "contract": { "const": "woml.artifact-backend" },
+        "contractVersion": { "const": 1 },
+        "kind": { "const": "s3" },
+        "bucket": { "type": "string", "pattern": "^[a-z0-9][a-z0-9.-]{1,61}[a-z0-9]$" },
+        "region": { "type": "string", "minLength": 1, "maxLength": 128 },
+        "prefix": { "type": "string", "maxLength": 512, "pattern": "^(?:[A-Za-z0-9!_.*'()/-]+)?$" },
+        "endpoint": { "type": "string", "format": "uri", "pattern": "^https://", "maxLength": 2048 },
+        "forcePathStyle": { "type": "boolean" },
+        "authentication": {
+          "oneOf": [
+            { "$ref": "#/$defs/ambientAuth" },
+            { "$ref": "#/$defs/secretAuth" }
+          ]
+        },
+        "serverSideEncryption": {
+          "oneOf": [
+            { "$ref": "#/$defs/aes256" },
+            { "$ref": "#/$defs/kms" }
+          ]
+        }
+      }
+    }
+  }
+}

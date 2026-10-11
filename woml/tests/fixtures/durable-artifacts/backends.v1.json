@@ -1,0 +1,28 @@
+[
+  {
+    "contract": "woml.artifact-backend",
+    "contractVersion": 1,
+    "kind": "local",
+    "directory": "/srv/woml/state/artifacts-v1"
+  },
+  {
+    "contract": "woml.artifact-backend",
+    "contractVersion": 1,
+    "kind": "s3",
+    "bucket": "woml-production-artifacts",
+    "region": "eu-central-1",
+    "prefix": "runtime-a/",
+    "endpoint": "https://s3.eu-central-1.amazonaws.com",
+    "forcePathStyle": false,
+    "authentication": {
+      "mode": "secrets",
+      "accessKeySecret": "ARTIFACTS_AWS_ACCESS_KEY_ID",
+      "secretKeySecret": "ARTIFACTS_AWS_SECRET_ACCESS_KEY",
+      "sessionTokenSecret": "ARTIFACTS_AWS_SESSION_TOKEN"
+    },
+    "serverSideEncryption": {
+      "mode": "aws-kms",
+      "keyId": "alias/woml-artifacts"
+    }
+  }
+]
