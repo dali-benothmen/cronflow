@@ -1712,10 +1712,23 @@ mod tests {
       )
       .await
       .expect("approved process succeeds");
-    assert!(value["stdout"]
-      .as_str()
-      .expect("stdout")
-      .contains(root.to_string_lossy().as_ref()));
+    let stdout = value["stdout"].as_str().expect("stdout");
+    let canonical_root = root.canonicalize().expect("canonical policy project root");
+    #[cfg(windows)]
+    {
+      let reported = stdout
+        .replace(r"\\?\", "")
+        .replace('\\', "/")
+        .to_ascii_lowercase();
+      let expected = canonical_root
+        .to_string_lossy()
+        .replace(r"\\?\", "")
+        .replace('\\', "/")
+        .to_ascii_lowercase();
+      assert!(reported.contains(&expected));
+    }
+    #[cfg(not(windows))]
+    assert!(stdout.contains(canonical_root.to_string_lossy().as_ref()));
     let _ = std::fs::remove_dir(root);
   }
 
