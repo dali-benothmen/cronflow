@@ -1,0 +1,41 @@
+{
+  "contract": "woml.capability-call",
+  "contractVersion": 1,
+  "messageType": "request",
+  "invocationId": "invocation-process-a",
+  "callId": "call-process-a",
+  "runId": "run-process-a",
+  "nodeId": "runChecks",
+  "attemptNumber": 1,
+  "capability": "process",
+  "operation": "run",
+  "inputContractVersion": 1,
+  "resultContractVersion": 1,
+  "identity": {
+    "mode": "named",
+    "stepIdempotencyKey": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "operationName": "process.run.project-tests",
+    "operationKey": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+  },
+  "limits": {
+    "inputBytes": 1048576,
+    "resultBytes": 4194304,
+    "timeoutMs": 301000
+  },
+  "input": {
+    "contract": "woml.process",
+    "contractVersion": 1,
+    "kind": "request",
+    "executable": "bun",
+    "args": ["test"],
+    "cwd": ".",
+    "env": { "CI": "true" },
+    "timeoutMs": 300000,
+    "acceptExitCodes": [0],
+    "output": {
+      "stdout": "capture",
+      "stderr": "capture",
+      "maxBytes": 65536
+    }
+  }
+}

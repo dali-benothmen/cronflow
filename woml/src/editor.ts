@@ -199,6 +199,41 @@ interface WomlStateService {
   readonly setIfAbsent: (key: string, value: WomlJsonValue, options: Readonly<{ readonly name: string }>) => Promise<{ readonly stored: boolean; readonly value: WomlJsonValue; readonly version: number; readonly updatedAt: string }>;
 }
 
+interface WomlProcessOutputOptions {
+  readonly stdout?: 'capture' | 'discard';
+  readonly stderr?: 'capture' | 'discard';
+  readonly maxBytes?: number;
+}
+
+interface WomlProcessRunRequest {
+  readonly executable: string;
+  readonly args?: readonly string[];
+  readonly cwd?: string;
+  readonly env?: Readonly<Record<string, string>>;
+  readonly timeout?: number | string;
+  readonly acceptExitCodes?: readonly number[];
+  readonly output?: WomlProcessOutputOptions;
+}
+
+interface WomlProcessRunResult {
+  readonly exitCode: number | null;
+  readonly signal: string | null;
+  readonly stdout: string;
+  readonly stderr: string;
+  readonly stdoutBytes: number;
+  readonly stderrBytes: number;
+  readonly stdoutTruncated: boolean;
+  readonly stderrTruncated: boolean;
+  readonly durationMs: number;
+}
+
+interface WomlProcessService {
+  readonly run: (
+    input: WomlProcessRunRequest,
+    options?: WomlOperationOptions
+  ) => Promise<WomlProcessRunResult>;
+}
+
 interface WomlBuiltinServices {
   readonly http: {
     readonly request: <T = WomlJsonValue>(input: WomlHttpRequest, options?: WomlOperationOptions) => Promise<WomlHttpResponse<T>>;
@@ -210,6 +245,7 @@ interface WomlBuiltinServices {
   readonly storage: WomlStorageService;
   readonly cache: WomlCacheService;
   readonly state: WomlStateService;
+  readonly process: WomlProcessService;
   readonly events: {
     readonly emit: (name: string, payload: WomlJsonValue, options?: WomlOperationOptions) => Promise<any>;
   };

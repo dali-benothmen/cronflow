@@ -3483,6 +3483,7 @@ const builtInServiceNames = new Set([
   'telegram',
   'discord',
   'whatsapp',
+  'process',
 ]);
 
 function collectValidatedSteps(

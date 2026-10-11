@@ -1,0 +1,148 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://woml.dev/schemas/process/v1",
+  "title": "WOML Process v1",
+  "description": "Request and result contract for the supervised services.process.run capability.",
+  "x-status": "secure-process-sp0-frozen",
+  "x-defaults": {
+    "args": [],
+    "cwd": ".",
+    "env": {},
+    "timeoutMs": 30000,
+    "acceptExitCodes": [0],
+    "output": { "stdout": "capture", "stderr": "capture", "maxBytes": 65536 }
+  },
+  "oneOf": [
+    { "$ref": "#/$defs/request" },
+    { "$ref": "#/$defs/result" }
+  ],
+  "$defs": {
+    "alias": {
+      "type": "string",
+      "pattern": "^[a-zA-Z0-9][a-zA-Z0-9._-]{0,127}$"
+    },
+    "environment": {
+      "type": "object",
+      "maxProperties": 128,
+      "propertyNames": {
+        "pattern": "^[A-Za-z_][A-Za-z0-9_]{0,127}$"
+      },
+      "additionalProperties": {
+        "type": "string",
+        "maxLength": 32768,
+        "pattern": "^[^\\u0000]*$"
+      }
+    },
+    "output": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["stdout", "stderr", "maxBytes"],
+      "properties": {
+        "stdout": { "enum": ["capture", "discard"] },
+        "stderr": { "enum": ["capture", "discard"] },
+        "maxBytes": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 262144
+        }
+      }
+    },
+    "request": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "contract",
+        "contractVersion",
+        "kind",
+        "executable",
+        "args",
+        "cwd",
+        "env",
+        "timeoutMs",
+        "acceptExitCodes",
+        "output"
+      ],
+      "properties": {
+        "contract": { "const": "woml.process" },
+        "contractVersion": { "const": 1 },
+        "kind": { "const": "request" },
+        "executable": { "$ref": "#/$defs/alias" },
+        "args": {
+          "type": "array",
+          "maxItems": 256,
+          "items": {
+            "type": "string",
+            "maxLength": 32768,
+            "pattern": "^[^\\u0000]*$"
+          }
+        },
+        "cwd": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 4096,
+          "pattern": "^(?!.*\\u0000)(?![A-Za-z]:[\\\\/])(?![\\\\/])(?!.*(?:^|[\\\\/])\\.\\.(?:[\\\\/]|$)).+$"
+        },
+        "env": { "$ref": "#/$defs/environment" },
+        "timeoutMs": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 86400000
+        },
+        "acceptExitCodes": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 32,
+          "uniqueItems": true,
+          "items": { "type": "integer", "minimum": 0, "maximum": 255 }
+        },
+        "output": { "$ref": "#/$defs/output" }
+      }
+    },
+    "result": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "contract",
+        "contractVersion",
+        "kind",
+        "exitCode",
+        "signal",
+        "stdout",
+        "stderr",
+        "stdoutBytes",
+        "stderrBytes",
+        "stdoutTruncated",
+        "stderrTruncated",
+        "durationMs"
+      ],
+      "properties": {
+        "contract": { "const": "woml.process" },
+        "contractVersion": { "const": 1 },
+        "kind": { "const": "result" },
+        "exitCode": {
+          "oneOf": [
+            { "type": "integer", "minimum": 0, "maximum": 255 },
+            { "type": "null" }
+          ]
+        },
+        "signal": {
+          "oneOf": [
+            { "type": "string", "minLength": 1, "maxLength": 128 },
+            { "type": "null" }
+          ]
+        },
+        "stdout": { "type": "string" },
+        "stderr": { "type": "string" },
+        "stdoutBytes": { "type": "integer", "minimum": 0 },
+        "stderrBytes": { "type": "integer", "minimum": 0 },
+        "stdoutTruncated": { "type": "boolean" },
+        "stderrTruncated": { "type": "boolean" },
+        "durationMs": { "type": "number", "minimum": 0 }
+      },
+      "anyOf": [
+        { "required": ["exitCode"], "properties": { "exitCode": { "type": "integer" } } },
+        { "required": ["signal"], "properties": { "signal": { "type": "string" } } }
+      ]
+    }
+  }
+}

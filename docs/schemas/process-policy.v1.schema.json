@@ -1,0 +1,88 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://woml.dev/schemas/process-policy/v1",
+  "title": "WOML Process Policy v1",
+  "description": "Runtime-owned least-authority policy for services.process. Workflows cannot modify this document.",
+  "x-status": "secure-process-sp0-frozen",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "contract",
+    "contractVersion",
+    "enabled",
+    "modes",
+    "projectRoot",
+    "executables",
+    "workingDirectories",
+    "environment",
+    "limits"
+  ],
+  "properties": {
+    "contract": { "const": "woml.process-policy" },
+    "contractVersion": { "const": 1 },
+    "enabled": { "type": "boolean" },
+    "modes": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["foreground", "background"],
+      "properties": {
+        "foreground": { "type": "boolean" },
+        "background": { "type": "boolean" }
+      }
+    },
+    "projectRoot": { "type": "string", "minLength": 1, "maxLength": 4096 },
+    "executables": {
+      "type": "array",
+      "maxItems": 128,
+      "uniqueItems": true,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["alias", "path"],
+        "properties": {
+          "alias": {
+            "type": "string",
+            "pattern": "^[a-zA-Z0-9][a-zA-Z0-9._-]{0,127}$"
+          },
+          "path": { "type": "string", "minLength": 1, "maxLength": 4096 }
+        }
+      }
+    },
+    "workingDirectories": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 128,
+      "uniqueItems": true,
+      "items": { "type": "string", "minLength": 1, "maxLength": 4096 }
+    },
+    "environment": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["inherit", "allow"],
+      "properties": {
+        "inherit": {
+          "type": "array",
+          "maxItems": 128,
+          "uniqueItems": true,
+          "items": { "type": "string", "pattern": "^[A-Za-z_][A-Za-z0-9_]{0,127}$" }
+        },
+        "allow": {
+          "type": "array",
+          "maxItems": 128,
+          "uniqueItems": true,
+          "items": { "type": "string", "pattern": "^[A-Za-z_][A-Za-z0-9_]{0,127}$" }
+        }
+      }
+    },
+    "limits": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["maxTimeoutMs", "maxOutputBytes", "maxConcurrent"],
+      "properties": {
+        "maxTimeoutMs": { "type": "integer", "minimum": 1, "maximum": 86400000 },
+        "maxOutputBytes": { "type": "integer", "minimum": 1, "maximum": 262144 },
+        "maxConcurrent": { "type": "integer", "minimum": 1, "maximum": 64 }
+      }
+    }
+  }
+}

@@ -51,6 +51,8 @@ async function validators() {
     'storage.v1.schema.json',
     'cache.v1.schema.json',
     'events-service.v1.schema.json',
+    'process.v1.schema.json',
+    'process-policy.v1.schema.json',
     'script-host-protocol.v4.schema.json',
   ];
   for (const name of schemaNames)
@@ -71,6 +73,8 @@ async function validators() {
     storage: get('https://cronflow.dev/schemas/storage/v1'),
     cache: get('https://cronflow.dev/schemas/cache/v1'),
     events: get('https://cronflow.dev/schemas/events-service/v1'),
+    process: get('https://woml.dev/schemas/process/v1'),
+    processPolicy: get('https://woml.dev/schemas/process-policy/v1'),
     host: get('https://cronflow.dev/schemas/script-host-protocol/v4'),
   };
 }
@@ -166,7 +170,7 @@ describe('Frozen service and capability contracts', () => {
     const names = (await readdir(fixtureDirectory))
       .filter(name => name.endsWith('.json'))
       .sort();
-    expect(names.length).toBe(25);
+    expect(names.length).toBe(35);
     for (const name of names) {
       const fixture = await json(join(fixtureDirectory, name));
       if (name === 'script-host-messages.v4.json') {
@@ -216,6 +220,10 @@ describe('Frozen service and capability contracts', () => {
                   ? schemas.cache
                   : name.startsWith('events-')
                     ? schemas.events
+                    : name.startsWith('process-policy.')
+                      ? schemas.processPolicy
+                      : name.startsWith('process-')
+                        ? schemas.process
                     : schemas.http;
       expect(
         validator(fixture),

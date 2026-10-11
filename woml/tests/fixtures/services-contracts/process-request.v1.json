@@ -1,0 +1,16 @@
+{
+  "contract": "woml.process",
+  "contractVersion": 1,
+  "kind": "request",
+  "executable": "bun",
+  "args": ["test", "--timeout", "5000"],
+  "cwd": ".",
+  "env": { "CI": "true" },
+  "timeoutMs": 300000,
+  "acceptExitCodes": [0],
+  "output": {
+    "stdout": "capture",
+    "stderr": "capture",
+    "maxBytes": 65536
+  }
+}

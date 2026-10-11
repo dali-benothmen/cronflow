@@ -1,0 +1,19 @@
+{
+  "contract": "woml.capability-call",
+  "contractVersion": 1,
+  "messageType": "result",
+  "invocationId": "invocation-process-denied",
+  "callId": "call-process-denied",
+  "outcome": "failed",
+  "durationMs": 0.2,
+  "error": {
+    "kind": "service_rejected",
+    "code": "WOML_PROCESS_EXECUTABLE_DENIED",
+    "message": "Process policy does not allow executable alias \"terraform\".",
+    "retryable": false,
+    "ambiguous": false,
+    "details": {
+      "executable": "terraform"
+    }
+  }
+}

@@ -1,0 +1,17 @@
+{
+  "contract": "woml.capability-call",
+  "contractVersion": 1,
+  "messageType": "result",
+  "invocationId": "invocation-process-timeout",
+  "callId": "call-process-timeout",
+  "outcome": "failed",
+  "durationMs": 30000,
+  "error": {
+    "kind": "timed_out",
+    "code": "WOML_PROCESS_TIMED_OUT",
+    "message": "The supervised process exceeded 30000 ms.",
+    "retryable": false,
+    "ambiguous": true,
+    "details": { "timeoutMs": 30000 }
+  }
+}

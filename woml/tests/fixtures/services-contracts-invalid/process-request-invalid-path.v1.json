@@ -1,0 +1,16 @@
+{
+  "contract": "woml.process",
+  "contractVersion": 1,
+  "kind": "request",
+  "executable": "bun",
+  "args": ["test"],
+  "cwd": "../outside-project",
+  "env": {},
+  "timeoutMs": 30000,
+  "acceptExitCodes": [0],
+  "output": {
+    "stdout": "capture",
+    "stderr": "capture",
+    "maxBytes": 65536
+  }
+}
