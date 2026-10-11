@@ -609,6 +609,8 @@ const reservedModuleAliases = new Set([
   'queue',
   'workflows',
   'state',
+  'process',
+  'artifacts',
   'context',
   'attempt',
   'services',
@@ -3484,6 +3486,7 @@ const builtInServiceNames = new Set([
   'discord',
   'whatsapp',
   'process',
+  'artifacts',
 ]);
 
 function collectValidatedSteps(

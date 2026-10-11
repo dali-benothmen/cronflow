@@ -937,6 +937,220 @@ function publicProcessResult(
   });
 }
 
+const artifactIdPattern = /^artifact_[0-9a-hjkmnp-tv-z]{26}$/;
+const artifactDigestPattern = /^[0-9a-f]{64}$/;
+const artifactContentTypePattern =
+  /^[A-Za-z0-9][A-Za-z0-9!#$&^_.+-]{0,126}\/[A-Za-z0-9][A-Za-z0-9!#$&^_.+-]{0,126}$/;
+
+function portableArtifactSourcePath(value: string): boolean {
+  if (
+    value.length === 0 ||
+    Buffer.byteLength(value, 'utf8') > 4_096 ||
+    value.startsWith('/') ||
+    /^[A-Za-z]:/.test(value) ||
+    value.includes('\\') ||
+    value.includes('//') ||
+    /[\u0000-\u001F\u007F]/.test(value)
+  ) {
+    return false;
+  }
+  return value
+    .split('/')
+    .every(segment => segment.length > 0 && segment !== '.' && segment !== '..');
+}
+
+function artifactRetentionMilliseconds(value: JsonValue | undefined): number {
+  const retention = value ?? '30d';
+  if (typeof retention !== 'string') {
+    throw new TypeError('Artifact retention must be a duration string.');
+  }
+  const match = /^([1-9][0-9]*)(h|d|w)$/.exec(retention);
+  if (match === null) {
+    throw new TypeError(
+      'Artifact retention must be a whole positive duration such as "24h", "30d", or "4w".'
+    );
+  }
+  const amount = Number(match[1]);
+  const multiplier =
+    match[2] === 'h'
+      ? 3_600_000
+      : match[2] === 'd'
+        ? 86_400_000
+        : 604_800_000;
+  const milliseconds = amount * multiplier;
+  if (
+    !Number.isSafeInteger(milliseconds) ||
+    milliseconds < 3_600_000 ||
+    milliseconds > 31_536_000_000
+  ) {
+    throw new TypeError(
+      'Artifact retention must be between one hour and 365 days.'
+    );
+  }
+  return milliseconds;
+}
+
+function normalizeArtifactReference(value: JsonValue): JsonObject {
+  const object = plainObject(value);
+  const allowed = new Set([
+    'contract',
+    'contractVersion',
+    'id',
+    'name',
+    'size',
+    'sha256',
+    'contentType',
+  ]);
+  if (
+    object?.contract !== 'woml.artifact-reference' ||
+    object.contractVersion !== 1 ||
+    Object.keys(object).some(field => !allowed.has(field)) ||
+    typeof object.id !== 'string' ||
+    !artifactIdPattern.test(object.id) ||
+    typeof object.name !== 'string' ||
+    object.name.length === 0 ||
+    Buffer.byteLength(object.name, 'utf8') > 256 ||
+    /[\u0000-\u001F\u007F]/.test(object.name) ||
+    !Number.isSafeInteger(object.size) ||
+    Number(object.size) < 0 ||
+    Number(object.size) > 1_099_511_627_776 ||
+    typeof object.sha256 !== 'string' ||
+    !artifactDigestPattern.test(object.sha256) ||
+    typeof object.contentType !== 'string' ||
+    !artifactContentTypePattern.test(object.contentType)
+  ) {
+    throw new TypeError('Expected an exact Artifact Reference v1 value.');
+  }
+  return deepFreezeJson({ ...object });
+}
+
+function normalizeArtifactPut(
+  sourcePath: unknown,
+  rawOptions: unknown
+): JsonObject {
+  if (
+    typeof sourcePath !== 'string' ||
+    !portableArtifactSourcePath(sourcePath)
+  ) {
+    throw new TypeError(
+      'Artifact source path must be project-relative POSIX syntax without traversal.'
+    );
+  }
+  const options = plainObject(rawOptions as JsonValue);
+  if (options === undefined) {
+    throw new TypeError(
+      'services.artifacts.put() requires { name, contentType?, retention? }.'
+    );
+  }
+  const unknown = Object.keys(options).find(
+    field => !['name', 'contentType', 'retention'].includes(field)
+  );
+  if (unknown !== undefined) {
+    throw new TypeError(`Unknown Artifact v1 put option "${unknown}".`);
+  }
+  if (
+    typeof options.name !== 'string' ||
+    options.name.length === 0 ||
+    Buffer.byteLength(options.name, 'utf8') > 256 ||
+    /[\u0000-\u001F\u007F]/.test(options.name)
+  ) {
+    throw new TypeError(
+      'Artifact name must contain 1 to 256 UTF-8 bytes without control characters.'
+    );
+  }
+  const contentType = options.contentType ?? 'application/octet-stream';
+  if (
+    typeof contentType !== 'string' ||
+    !artifactContentTypePattern.test(contentType)
+  ) {
+    throw new TypeError(
+      'Artifact contentType must be a portable MIME type such as application/json.'
+    );
+  }
+  return deepFreezeJson({
+    contract: 'woml.artifacts',
+    contractVersion: 1,
+    kind: 'request',
+    operation: 'put',
+    input: {
+      sourcePath,
+      name: options.name,
+      contentType,
+      retentionMs: artifactRetentionMilliseconds(options.retention),
+    },
+  });
+}
+
+function normalizeArtifactReferenceRequest(
+  operation: 'head' | 'materialize',
+  value: unknown
+): JsonObject {
+  return deepFreezeJson({
+    contract: 'woml.artifacts',
+    contractVersion: 1,
+    kind: 'request',
+    operation,
+    input: { artifact: normalizeArtifactReference(value as JsonValue) },
+  });
+}
+
+function publicArtifactResult(
+  result: JsonValue,
+  operation: 'put' | 'head' | 'materialize'
+): JsonValue {
+  const object = plainObject(result);
+  if (
+    object?.contract !== 'woml.artifacts' ||
+    object.contractVersion !== 1 ||
+    object.kind !== 'result' ||
+    object.operation !== operation ||
+    Object.keys(object).some(
+      field =>
+        !['contract', 'contractVersion', 'kind', 'operation', 'data'].includes(
+          field
+        )
+    )
+  ) {
+    throw new TypeError('Rust returned an invalid Artifact v1 result.');
+  }
+  if (operation === 'put') return normalizeArtifactReference(object.data);
+  const data = plainObject(object.data);
+  if (operation === 'head') {
+    if (
+      data === undefined ||
+      Object.keys(data).some(
+        field =>
+          !['artifact', 'createdAt', 'expiresAt', 'integrity'].includes(field)
+      ) ||
+      typeof data.createdAt !== 'string' ||
+      typeof data.expiresAt !== 'string' ||
+      Number.isNaN(Date.parse(data.createdAt)) ||
+      Number.isNaN(Date.parse(data.expiresAt)) ||
+      data.integrity !== 'verified'
+    ) {
+      throw new TypeError('Rust returned invalid Artifact v1 metadata.');
+    }
+    return deepFreezeJson({
+      artifact: normalizeArtifactReference(data.artifact as JsonValue),
+      createdAt: data.createdAt,
+      expiresAt: data.expiresAt,
+      integrity: 'verified',
+    });
+  }
+  if (
+    data === undefined ||
+    Object.keys(data).some(field => !['artifact', 'path'].includes(field)) ||
+    typeof data.path !== 'string' ||
+    data.path.length === 0 ||
+    data.path.length > 4_096 ||
+    /[\u0000-\u001F\u007F]/.test(data.path)
+  ) {
+    throw new TypeError('Rust returned an invalid artifact materialization.');
+  }
+  normalizeArtifactReference(data.artifact as JsonValue);
+  return data.path;
+}
+
 function normalizeTelegramSend(input: JsonValue): JsonObject {
   const object = plainObject(input);
   if (object === undefined) {
@@ -1257,6 +1471,7 @@ function publicDatabaseResult(result: JsonValue, operation: string): JsonValue {
 }
 
 const storageOperations = new Set(['put', 'get', 'head', 'list', 'delete']);
+const artifactOperations = new Set(['put', 'head', 'materialize']);
 const cacheOperations = new Set([
   'get',
   'set',
@@ -1900,6 +2115,8 @@ function deeplyReadonlyServiceFacade(
       capability === 'db' && databaseOperations.has(operation);
     const managedStorage =
       capability === 'storage' && storageOperations.has(operation);
+    const managedArtifacts =
+      capability === 'artifacts' && artifactOperations.has(operation);
     const managedCache =
       capability === 'cache' && cacheWireOperations.has(operation);
     const managedState =
@@ -1917,6 +2134,7 @@ function deeplyReadonlyServiceFacade(
       !managedHttp &&
       !managedDatabase &&
       !managedStorage &&
+      !managedArtifacts &&
       !managedCache &&
       !managedState &&
       !managedEvents &&
@@ -1948,7 +2166,15 @@ function deeplyReadonlyServiceFacade(
         details: { actualBytes: inputBytes, limitBytes: inputLimit },
       });
     }
-    const identity = namedOperation(capability, operation, callOptions);
+    const artifactPutInput = managedArtifacts && operation === 'put'
+      ? plainObject(plainObject(input)?.input)
+      : undefined;
+    const identity = artifactPutInput === undefined
+      ? namedOperation(capability, operation, callOptions)
+      : {
+          mode: 'named' as const,
+          name: String(artifactPutInput.name),
+        };
     const method = managedHttp
       ? String((input as JsonObject).method)
       : undefined;
@@ -1970,7 +2196,8 @@ function deeplyReadonlyServiceFacade(
         managedTelegram ||
         managedDiscord ||
         managedWhatsApp ||
-        managedProcess) &&
+        managedProcess ||
+        (managedArtifacts && operation === 'put')) &&
       identity.mode === 'automatic'
     ) {
       const key = `${capability}.${operation}`;
@@ -2004,7 +2231,12 @@ function deeplyReadonlyServiceFacade(
               Number((input as JsonObject).timeoutMs) + 1_000,
               Math.max(1, Math.floor(executionDeadline - performance.now()))
             )
-          : 30_000;
+          : managedArtifacts
+            ? Math.min(
+                3_601_000,
+                Math.max(1, Math.floor(executionDeadline - performance.now()))
+              )
+            : 30_000;
     const id = callId();
     const call: CapabilityCallRequest = {
       contract: 'woml.capability-call',
@@ -2030,7 +2262,11 @@ function deeplyReadonlyServiceFacade(
       },
       limits: {
         inputBytes: inputLimit,
-        resultBytes: managedWorkflows ? 4_198_400 : 4_194_304,
+        resultBytes: managedArtifacts
+          ? 16_384
+          : managedWorkflows
+            ? 4_198_400
+            : 4_194_304,
         timeoutMs,
       },
       input,
@@ -2048,6 +2284,11 @@ function deeplyReadonlyServiceFacade(
         ? publicDatabaseResult(result, operation)
         : managedStorage
           ? publicStorageResult(result, operation)
+          : managedArtifacts
+            ? publicArtifactResult(
+                result,
+                operation as 'put' | 'head' | 'materialize'
+              )
           : managedCache
             ? publicCacheResult(result, operation)
             : managedState
@@ -2283,6 +2524,50 @@ function deeplyReadonlyServiceFacade(
         const process = Object.freeze({ run });
         capabilityCache.set(capabilityProperty, process);
         return process;
+      }
+      if (capabilityProperty === 'artifacts') {
+        const put = async (...args: unknown[]): Promise<JsonValue> => {
+          if (args.length !== 2) {
+            throw new TypeError(
+              'services.artifacts.put() requires a source path and artifact options.'
+            );
+          }
+          return invokeCapability(
+            'artifacts',
+            'put',
+            normalizeArtifactPut(args[0], args[1])
+          );
+        };
+        const head = async (...args: unknown[]): Promise<JsonValue> => {
+          if (args.length !== 1) {
+            throw new TypeError(
+              'services.artifacts.head() requires exactly one Artifact Reference v1 value.'
+            );
+          }
+          return invokeCapability(
+            'artifacts',
+            'head',
+            normalizeArtifactReferenceRequest('head', args[0])
+          );
+        };
+        const materialize = async (...args: unknown[]): Promise<JsonValue> => {
+          if (args.length !== 1) {
+            throw new TypeError(
+              'services.artifacts.materialize() requires exactly one Artifact Reference v1 value.'
+            );
+          }
+          return invokeCapability(
+            'artifacts',
+            'materialize',
+            normalizeArtifactReferenceRequest('materialize', args[0])
+          );
+        };
+        Object.freeze(put);
+        Object.freeze(head);
+        Object.freeze(materialize);
+        const artifacts = Object.freeze({ put, head, materialize });
+        capabilityCache.set(capabilityProperty, artifacts);
+        return artifacts;
       }
       const operationCache = new Map<string, unknown>();
       const capability = new Proxy(Object.freeze({}), {
