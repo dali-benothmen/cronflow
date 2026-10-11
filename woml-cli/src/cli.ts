@@ -97,6 +97,7 @@ import {
   type WorkflowCallProgressV1,
   type RustApprovalRuntimeOutcome,
   type RustRuntimeModuleArtifact,
+  type RuntimeCapabilitiesV1,
   type StoredRunRequirementsV1,
 } from './rust-executor';
 import {
@@ -117,8 +118,12 @@ import {
   loadProcessPolicy,
   processGrantSummary,
   ProcessPolicyError,
-  type ProcessRuntimeAuthorityV1,
 } from './process-policy';
+import {
+  artifactGrantSummary,
+  ArtifactPolicyError,
+  loadArtifactPolicy,
+} from './artifact-policy';
 import {
   CommunicationProviderRegistry,
   CommunicationTriggerHost,
@@ -257,11 +262,11 @@ class CliInputError extends Error {
 }
 
 function runUsage(): string {
-  return 'Usage: woml run <workflow.woml|directory>... [--config <path>] [--process-policy <path>|--allow-process <aliases>] [--host <address>] [--port <port>] [--state <path>] [--trigger <manualTriggerId>] [--resume <runId>] [--approval-port <port>] [--json] [--verbose] [--color=auto|always|never] [--background|-d]';
+  return 'Usage: woml run <workflow.woml|directory>... [--config <path>] [--process-policy <path>|--allow-process <aliases>] [--artifact-policy <path>] [--host <address>] [--port <port>] [--state <path>] [--trigger <manualTriggerId>] [--resume <runId>] [--approval-port <port>] [--json] [--verbose] [--color=auto|always|never] [--background|-d]';
 }
 
 function testUsage(): string {
-  return 'Usage: woml test <workflow.woml> [--process-policy <path>|--allow-process <aliases>] [--state <path>] [--trigger <manualTriggerId>] [--resume <runId>] [--approval-port <port>]';
+  return 'Usage: woml test <workflow.woml> [--process-policy <path>|--allow-process <aliases>] [--artifact-policy <path>] [--state <path>] [--trigger <manualTriggerId>] [--resume <runId>] [--approval-port <port>]';
 }
 
 function listUsage(): string {
@@ -294,7 +299,7 @@ function emitUsage(): string {
 }
 
 function checkUsage(): string {
-  return 'Usage: woml check <workflow.woml|directory>... [--config <path>] [--process-policy <path>] [--json]';
+  return 'Usage: woml check <workflow.woml|directory>... [--config <path>] [--process-policy <path>] [--artifact-policy <path>] [--json]';
 }
 
 function typesUsage(): string {
@@ -317,8 +322,9 @@ interface RunArguments {
   readonly triggerId?: string;
   readonly configPath?: string;
   readonly processPolicyPath?: string;
+  readonly artifactPolicyPath?: string;
   readonly allowProcess?: string;
-  readonly runtimeCapabilities?: ProcessRuntimeAuthorityV1;
+  readonly runtimeCapabilities?: RuntimeCapabilitiesV1;
   readonly stateExplicit: boolean;
   readonly hostExplicit: boolean;
   readonly portExplicit: boolean;
@@ -366,6 +372,7 @@ function parseRunArguments(args: readonly string[]): RunArguments {
   let triggerId: string | undefined;
   let configPath: string | undefined;
   let processPolicyPath: string | undefined;
+  let artifactPolicyPath: string | undefined;
   let allowProcess: string | undefined;
   let stateExplicit = false;
   let hostExplicit = false;
@@ -401,6 +408,7 @@ function parseRunArguments(args: readonly string[]): RunArguments {
       (option !== '--state' &&
         option !== '--config' &&
         option !== '--process-policy' &&
+        option !== '--artifact-policy' &&
         option !== '--allow-process' &&
         option !== '--resume' &&
         option !== '--approval-port' &&
@@ -439,6 +447,14 @@ function parseRunArguments(args: readonly string[]): RunArguments {
         );
       }
       processPolicyPath = value;
+    } else if (option === '--artifact-policy') {
+      if (value.length === 0) {
+        throw new CliInputError(
+          'WOML_CLI_ARGUMENTS_INVALID',
+          '--artifact-policy requires a non-empty JSON file path.'
+        );
+      }
+      artifactPolicyPath = value;
     } else if (option === '--allow-process') {
       if (value.length === 0) {
         throw new CliInputError(
@@ -529,6 +545,7 @@ function parseRunArguments(args: readonly string[]): RunArguments {
     ...(triggerId === undefined ? {} : { triggerId }),
     ...(configPath === undefined ? {} : { configPath }),
     ...(processPolicyPath === undefined ? {} : { processPolicyPath }),
+    ...(artifactPolicyPath === undefined ? {} : { artifactPolicyPath }),
     ...(allowProcess === undefined ? {} : { allowProcess }),
     stateExplicit,
     hostExplicit,
@@ -558,7 +575,7 @@ async function resolveRunArgumentsConfiguration(
       '--allow-process is a temporary foreground grant. Use --process-policy for a background runtime.'
     );
   }
-  const runtimeCapabilities =
+  const processCapabilities =
     args.processPolicyPath !== undefined
       ? await loadProcessPolicy(
           args.processPolicyPath,
@@ -567,6 +584,17 @@ async function resolveRunArgumentsConfiguration(
       : args.allowProcess !== undefined
         ? await createForegroundProcessGrant(args.allowProcess)
         : undefined;
+  const artifactCapabilities =
+    args.artifactPolicyPath === undefined
+      ? undefined
+      : await loadArtifactPolicy(
+          args.artifactPolicyPath,
+          background ? 'background' : 'foreground'
+        );
+  const runtimeCapabilities: RuntimeCapabilitiesV1 | undefined =
+    processCapabilities === undefined && artifactCapabilities === undefined
+      ? undefined
+      : { ...processCapabilities, ...artifactCapabilities };
   if (args.command !== 'run') {
     return {
       ...args,
@@ -1176,6 +1204,10 @@ function formatError(
 
   if (error instanceof ProcessPolicyError) {
     return `WOML process policy error [${error.code}]: ${error.message}`;
+  }
+
+  if (error instanceof ArtifactPolicyError) {
+    return `WOML artifact policy error [${error.code}]: ${error.message}`;
   }
 
   if (error instanceof RuntimeControlError) {
@@ -2550,6 +2582,7 @@ interface CheckArguments {
   readonly inputPaths: readonly string[];
   readonly configPath?: string;
   readonly processPolicyPath?: string;
+  readonly artifactPolicyPath?: string;
   readonly json: boolean;
 }
 
@@ -2560,6 +2593,7 @@ function parseCheckArguments(args: readonly string[]): CheckArguments {
   const inputPaths: string[] = [];
   let configPath: string | undefined;
   let processPolicyPath: string | undefined;
+  let artifactPolicyPath: string | undefined;
   let json = false;
   for (let index = 1; index < args.length; index += 1) {
     const argument = args[index]!;
@@ -2595,6 +2629,19 @@ function parseCheckArguments(args: readonly string[]): CheckArguments {
       index += 1;
       continue;
     }
+    if (argument === '--artifact-policy') {
+      const value = args[index + 1];
+      if (
+        artifactPolicyPath !== undefined ||
+        value === undefined ||
+        value.startsWith('--')
+      ) {
+        throw new CliInputError('WOML_CLI_ARGUMENTS_INVALID', checkUsage());
+      }
+      artifactPolicyPath = value;
+      index += 1;
+      continue;
+    }
     if (argument.startsWith('--')) {
       throw new CliInputError('WOML_CLI_ARGUMENTS_INVALID', checkUsage());
     }
@@ -2607,6 +2654,7 @@ function parseCheckArguments(args: readonly string[]): CheckArguments {
     inputPaths,
     ...(configPath === undefined ? {} : { configPath }),
     ...(processPolicyPath === undefined ? {} : { processPolicyPath }),
+    ...(artifactPolicyPath === undefined ? {} : { artifactPolicyPath }),
     json,
   };
 }
@@ -2664,12 +2712,25 @@ async function runDeploymentCheckCommand(
         'process'
       )
     );
+    const artifactUsage = sources.filter(source =>
+      inspectWomlModuleUsage(source.document).referencedServices.includes(
+        'artifacts'
+      )
+    );
     if (parsed.processPolicyPath !== undefined) {
       await loadProcessPolicy(parsed.processPolicyPath, 'background');
+    }
+    if (parsed.artifactPolicyPath !== undefined) {
+      await loadArtifactPolicy(parsed.artifactPolicyPath, 'background');
     }
     if (processUsage.length > 0 && parsed.processPolicyPath === undefined) {
       io.stderr(
         'WOML check: services.process is valid but disabled at runtime unless --allow-process or --process-policy is provided to woml run.\n'
+      );
+    }
+    if (artifactUsage.length > 0 && parsed.artifactPolicyPath === undefined) {
+      io.stderr(
+        'WOML check: services.artifacts is valid but disabled at runtime unless --artifact-policy is provided to woml run.\n'
       );
     }
     printMigrationDiagnostics(
@@ -2779,6 +2840,7 @@ async function runCheckCommand(
     parsed.inputPaths.length === 1 &&
     parsed.configPath === undefined &&
     parsed.processPolicyPath === undefined &&
+    parsed.artifactPolicyPath === undefined &&
     onlyInputIsFile
   ) {
     return await runSingleCheckCommand(
@@ -3347,7 +3409,12 @@ async function executeOneShot(
   runtimeModules: readonly RustRuntimeModuleArtifact[] = []
 ): Promise<void> {
   if (args.runtimeCapabilities !== undefined) {
-    io.stderr(`${processGrantSummary(args.runtimeCapabilities)}\n`);
+    if (args.runtimeCapabilities.process !== undefined) {
+      io.stderr(`${processGrantSummary({ process: args.runtimeCapabilities.process })}\n`);
+    }
+    if (args.runtimeCapabilities.artifacts !== undefined) {
+      io.stderr(`${artifactGrantSummary({ artifacts: args.runtimeCapabilities.artifacts })}\n`);
+    }
   }
   if (args.command === 'run') {
     presentationOutput(
@@ -4116,7 +4183,12 @@ async function activateWorkflows(
   dependencies: CliDependencies
 ): Promise<void> {
   if (args.runtimeCapabilities !== undefined) {
-    io.stderr(`${processGrantSummary(args.runtimeCapabilities)}\n`);
+    if (args.runtimeCapabilities.process !== undefined) {
+      io.stderr(`${processGrantSummary({ process: args.runtimeCapabilities.process })}\n`);
+    }
+    if (args.runtimeCapabilities.artifacts !== undefined) {
+      io.stderr(`${artifactGrantSummary({ artifacts: args.runtimeCapabilities.artifacts })}\n`);
+    }
   }
   const activationInputPaths = sources[0]?.activationInputPaths ?? [];
   if (
@@ -5875,11 +5947,24 @@ async function runCliUnprofiled(
           'process'
         )
       ) &&
-      runArguments.runtimeCapabilities === undefined
+      runArguments.runtimeCapabilities?.process === undefined
     ) {
       throw new CliInputError(
         'WOML_PROCESS_DISABLED',
         'This workflow uses services.process, which is disabled by default. Use --allow-process <aliases> for a foreground run or --process-policy <path> for durable runtime authority.'
+      );
+    }
+    if (
+      sources.some(source =>
+        inspectWomlModuleUsage(source.document).referencedServices.includes(
+          'artifacts'
+        )
+      ) &&
+      runArguments.runtimeCapabilities?.artifacts === undefined
+    ) {
+      throw new CliInputError(
+        'WOML_ARTIFACT_SERVICE_DISABLED',
+        'This workflow uses services.artifacts, which is disabled by default. Use --artifact-policy <path> to grant durable artifact authority.'
       );
     }
     printMigrationDiagnostics(

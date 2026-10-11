@@ -17,6 +17,11 @@ import {
 } from './native-platform';
 import { profileAsync, profileSync } from './performance-profiler';
 import type { ProcessRuntimeAuthorityV1 } from './process-policy';
+import type { ArtifactRuntimeAuthorityV1 } from './artifact-policy';
+
+export type RuntimeCapabilitiesV1 = Partial<
+  ProcessRuntimeAuthorityV1 & ArtifactRuntimeAuthorityV1
+>;
 
 export interface RustRunEvent {
   readonly eventSchemaVersion:
@@ -69,7 +74,7 @@ export interface RustExecutorOptions {
   readonly onProgress?: (progress: ExecutionProgressV1) => void;
   readonly resolvedSecrets?: Readonly<Record<string, string>>;
   readonly runtimeModules?: readonly RustRuntimeModuleArtifact[];
-  readonly runtimeCapabilities?: ProcessRuntimeAuthorityV1;
+  readonly runtimeCapabilities?: RuntimeCapabilitiesV1;
 }
 
 export interface RustRuntimeModuleArtifact {

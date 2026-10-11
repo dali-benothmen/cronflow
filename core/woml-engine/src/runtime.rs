@@ -267,6 +267,8 @@ pub struct RuntimeExecutionOptions {
   managed_storage_store: Option<Arc<crate::ManagedStorageStore>>,
   managed_cache_store: Option<Arc<crate::ManagedCacheStore>>,
   managed_durable_state_store: Option<Arc<crate::ManagedDurableStateStore>>,
+  managed_artifact_store: Option<Arc<crate::ManagedArtifactStore>>,
+  artifact_policy: Option<Arc<crate::artifacts::PreparedArtifactPolicy>>,
   policy_execution: Option<Arc<PolicyExecutionCoordinator>>,
   policy_execution_registry: PolicyExecutionRegistry,
 }
@@ -427,6 +429,8 @@ impl RuntimeExecutionOptions {
       managed_storage_store: Some(managed_storage_store),
       managed_cache_store: Some(managed_cache_store),
       managed_durable_state_store: Some(managed_durable_state_store),
+      managed_artifact_store: None,
+      artifact_policy: None,
       policy_execution: None,
       policy_execution_registry: Arc::new(tokio::sync::RwLock::new(HashMap::new())),
     }
@@ -555,6 +559,8 @@ impl RuntimeExecutionOptions {
     self.managed_storage_store = None;
     self.managed_cache_store = None;
     self.managed_durable_state_store = None;
+    self.managed_artifact_store = None;
+    self.artifact_policy = None;
     self
   }
 
@@ -570,6 +576,28 @@ impl RuntimeExecutionOptions {
       .capability_registry
       .register(Arc::new(handler))
       .map_err(|error| crate::ProcessPolicyError::Invalid(error.to_string()))?;
+    Ok(self)
+  }
+
+  /// Enables durable artifacts only after Rust validates Artifact Policy v1.
+  pub fn with_artifact_policy(
+    mut self,
+    policy: crate::ArtifactPolicyV1,
+    mode: crate::ArtifactRuntimeMode,
+  ) -> Result<Self, crate::ArtifactPolicyError> {
+    let store = Arc::new(crate::ManagedArtifactStore::default());
+    let handler = crate::ManagedArtifactPutHandler::new(
+      Arc::clone(&store),
+      policy,
+      mode,
+      &self.resolved_secrets,
+    )?;
+    self.artifact_policy = Some(handler.policy());
+    self
+      .capability_registry
+      .register(Arc::new(handler))
+      .map_err(|error| crate::ArtifactPolicyError::Invalid(error.to_string()))?;
+    self.managed_artifact_store = Some(store);
     Ok(self)
   }
 
@@ -1720,6 +1748,13 @@ fn attach_durable_capability_authority(
   if let Some(state) = &options.managed_durable_state_store {
     state
       .configure_for_state(database_path)
+      .map_err(|failure| RuntimeExecutionError::InvalidConfiguration(failure.message))?;
+  }
+  if let (Some(artifacts), Some(policy)) =
+    (&options.managed_artifact_store, &options.artifact_policy)
+  {
+    artifacts
+      .configure_for_state(database_path, Arc::clone(policy))
       .map_err(|failure| RuntimeExecutionError::InvalidConfiguration(failure.message))?;
   }
   if let Some(pool) = &options.managed_database_pool {

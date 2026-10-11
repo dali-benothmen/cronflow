@@ -502,7 +502,41 @@ export function renderWorkflowStartup(
   return `${lines.join('\n')}\n`;
 }
 
+function artifactReferenceSummary(value: JsonValue): string | undefined {
+  if (
+    value === null ||
+    Array.isArray(value) ||
+    typeof value !== 'object'
+  ) {
+    return undefined;
+  }
+  // JsonValue uses readonly arrays, which Array.isArray does not narrow away
+  // in every supported TypeScript version. Normalize the proven object shape
+  // before reading the frozen artifact-reference fields.
+  const artifact = value as Readonly<Record<string, JsonValue>>;
+  if (
+    artifact.contract !== 'woml.artifact-reference' ||
+    artifact.contractVersion !== 1 ||
+    typeof artifact.id !== 'string' ||
+    typeof artifact.name !== 'string' ||
+    typeof artifact.size !== 'number' ||
+    typeof artifact.sha256 !== 'string' ||
+    typeof artifact.contentType !== 'string'
+  ) {
+    return undefined;
+  }
+  const size = artifact.size < 1024
+    ? `${artifact.size} B`
+    : artifact.size < 1024 * 1024
+      ? `${(artifact.size / 1024).toFixed(1)} KiB`
+      : `${(artifact.size / (1024 * 1024)).toFixed(1)} MiB`;
+  const id = artifact.id.length <= 20 ? artifact.id : `${artifact.id.slice(0, 20)}…`;
+  return `Artifact ${JSON.stringify(artifact.name)} · ${size} · ${artifact.contentType} · sha256:${artifact.sha256.slice(0, 12)}… · ${id}`;
+}
+
 function compactValue(value: JsonValue): string {
+  const artifact = artifactReferenceSummary(value);
+  if (artifact !== undefined) return artifact;
   if (value === null || typeof value === 'boolean' || typeof value === 'number' || typeof value === 'string') {
     return JSON.stringify(value);
   }

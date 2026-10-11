@@ -20,15 +20,15 @@ use woml_engine::{
   recover_durable_runs, resolve_human_approval_durable, resume_workflow_durable,
   resume_workflow_durable_any_outcome, resume_workflow_durable_outcome,
   run_notification_provider_journey_with_custom, run_presentation_from_store_v1,
-  settle_approval_timeout_durable, ApprovalDecision, ApprovalDecisionOutcome, BackupError,
-  CompiledReusableInvocation, CompiledWorkflowDefinition, CustomNotificationJourneyOptions,
-  CustomProviderScriptArtifact, DurableEventStore, DurableStoreError,
-  ExternalTriggerAdmissionCommand, IntervalProgress, IntervalProgressReporter, LifecycleProgress,
-  NotificationHostClientError, NotificationHostProcessOptions, NotificationJourneyDiagnostics,
-  NotificationJourneyError, ParallelFailurePolicy, ProcessPolicyV1, ProcessRuntimeMode,
-  RetentionError, RetentionPolicyV1, RunFailure, RunPresentationError, RunStatus,
-  RuntimeExecutionError, RuntimeExecutionOptions, RuntimeModuleArtifact, RuntimePolicyProgress,
-  RuntimePolicyProgressReporter, ScheduleProgress, ScheduleProgressReporter,
+  settle_approval_timeout_durable, ApprovalDecision, ApprovalDecisionOutcome, ArtifactPolicyV1,
+  ArtifactRuntimeMode, BackupError, CompiledReusableInvocation, CompiledWorkflowDefinition,
+  CustomNotificationJourneyOptions, CustomProviderScriptArtifact, DurableEventStore,
+  DurableStoreError, ExternalTriggerAdmissionCommand, IntervalProgress, IntervalProgressReporter,
+  LifecycleProgress, NotificationHostClientError, NotificationHostProcessOptions,
+  NotificationJourneyDiagnostics, NotificationJourneyError, ParallelFailurePolicy, ProcessPolicyV1,
+  ProcessRuntimeMode, RetentionError, RetentionPolicyV1, RunFailure, RunPresentationError,
+  RunStatus, RuntimeExecutionError, RuntimeExecutionOptions, RuntimeModuleArtifact,
+  RuntimePolicyProgress, RuntimePolicyProgressReporter, ScheduleProgress, ScheduleProgressReporter,
   ScriptHostProcessOptions, SystemEngineClock, TriggerAdmissionRequest, TriggerProgress,
   TriggerProgressReporter, WebhookDefinitionRegistration, WebhookRuntimeError, WomlWebhookServer,
   WomlWebhookServerConfig, WorkflowCallProgress, WorkflowCallProgressReporter,
@@ -756,6 +756,8 @@ fn runtime_options_with_secrets(
 struct NativeRuntimeCapabilities {
   #[serde(default)]
   process: Option<NativeProcessRuntime>,
+  #[serde(default)]
+  artifacts: Option<NativeArtifactRuntime>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -763,6 +765,13 @@ struct NativeRuntimeCapabilities {
 struct NativeProcessRuntime {
   mode: ProcessRuntimeMode,
   policy: ProcessPolicyV1,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct NativeArtifactRuntime {
+  mode: ArtifactRuntimeMode,
+  policy: ArtifactPolicyV1,
 }
 
 fn apply_runtime_capabilities(
@@ -775,9 +784,15 @@ fn apply_runtime_capabilities(
   let capabilities: NativeRuntimeCapabilities = serde_json::from_str(&source).map_err(|error| {
     napi::Error::from_reason(format!("Invalid runtime capabilities JSON: {error}"))
   })?;
-  match capabilities.process {
+  let options = match capabilities.process {
     Some(process) => options
       .with_process_policy(process.policy, process.mode)
+      .map_err(|error| napi::Error::from_reason(error.to_string())),
+    None => Ok(options),
+  }?;
+  match capabilities.artifacts {
+    Some(artifacts) => options
+      .with_artifact_policy(artifacts.policy, artifacts.mode)
       .map_err(|error| napi::Error::from_reason(error.to_string())),
     None => Ok(options),
   }
