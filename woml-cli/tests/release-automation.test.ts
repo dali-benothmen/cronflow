@@ -48,6 +48,7 @@ describe('WOML release automation', () => {
       'documentation',
       'frontend',
       'package',
+      'process-containment',
       'rust',
     ]);
     expect(document.permissions).toEqual({ contents: 'read' });

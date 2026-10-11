@@ -861,7 +861,7 @@ struct WindowsJob {
 #[cfg(windows)]
 impl WindowsJob {
   fn attach(child: &Child) -> io::Result<Self> {
-    use std::{mem::size_of, os::windows::io::AsRawHandle, ptr};
+    use std::{mem::size_of, ptr};
     use windows_sys::Win32::{
       Foundation::CloseHandle,
       System::JobObjects::{
@@ -872,6 +872,12 @@ impl WindowsJob {
     // SAFETY: every handle is checked, the info pointer and byte size match,
     // and ownership of the created job is retained by WindowsJob.
     unsafe {
+      let child_handle = child.raw_handle().ok_or_else(|| {
+        io::Error::new(
+          io::ErrorKind::InvalidInput,
+          "the child process exited before containment was attached",
+        )
+      })?;
       let handle =
         windows_sys::Win32::System::JobObjects::CreateJobObjectW(ptr::null(), ptr::null());
       if handle.is_null() {
@@ -885,7 +891,7 @@ impl WindowsJob {
         &information as *const _ as *const _,
         size_of::<JOBOBJECT_EXTENDED_LIMIT_INFORMATION>() as u32,
       ) == 0
-        || AssignProcessToJobObject(handle, child.as_raw_handle() as _) == 0
+        || AssignProcessToJobObject(handle, child_handle as _) == 0
       {
         let error = io::Error::last_os_error();
         CloseHandle(handle);
@@ -1178,7 +1184,11 @@ fn verify_executable_policy(
       "executable alias '{alias}' does not point to an executable file"
     )));
   }
-  Ok(executable_identity(&metadata))
+  executable_identity(path, &metadata).map_err(|_| {
+    ProcessPolicyError::Invalid(format!(
+      "executable alias '{alias}' identity could not be inspected"
+    ))
+  })
 }
 
 fn verify_executable(executable: &ApprovedExecutable) -> Result<(), CapabilityFailure> {
@@ -1194,10 +1204,16 @@ fn verify_executable(executable: &ApprovedExecutable) -> Result<(), CapabilityFa
       "The approved executable is no longer available.",
     )
   })?;
+  let identity = executable_identity(&canonical, &metadata).map_err(|_| {
+    rejected(
+      "WOML_PROCESS_EXECUTABLE_CHANGED",
+      "The approved executable identity can no longer be verified.",
+    )
+  })?;
   if canonical != executable.path
     || !metadata.is_file()
     || !platform_executable(&metadata)
-    || executable_identity(&metadata) != executable.identity
+    || identity != executable.identity
   {
     return Err(rejected(
       "WOML_PROCESS_EXECUTABLE_CHANGED",
@@ -1207,12 +1223,17 @@ fn verify_executable(executable: &ApprovedExecutable) -> Result<(), CapabilityFa
   Ok(())
 }
 
-fn executable_identity(metadata: &std::fs::Metadata) -> ExecutableIdentity {
+fn executable_identity(
+  path: &Path,
+  metadata: &std::fs::Metadata,
+) -> io::Result<ExecutableIdentity> {
   #[cfg(unix)]
   use std::os::unix::fs::MetadataExt;
+  #[cfg(unix)]
+  let _ = path;
   #[cfg(windows)]
-  use std::os::windows::fs::MetadataExt;
-  ExecutableIdentity {
+  let (volume_serial_number, file_index) = windows_file_identity(path)?;
+  Ok(ExecutableIdentity {
     length: metadata.len(),
     modified: metadata.modified().ok(),
     #[cfg(unix)]
@@ -1220,10 +1241,28 @@ fn executable_identity(metadata: &std::fs::Metadata) -> ExecutableIdentity {
     #[cfg(unix)]
     inode: metadata.ino(),
     #[cfg(windows)]
-    volume_serial_number: metadata.volume_serial_number(),
+    volume_serial_number: Some(volume_serial_number),
     #[cfg(windows)]
-    file_index: metadata.file_index(),
+    file_index: Some(file_index),
+  })
+}
+
+#[cfg(windows)]
+fn windows_file_identity(path: &Path) -> io::Result<(u32, u64)> {
+  use std::os::windows::io::AsRawHandle;
+  use windows_sys::Win32::Storage::FileSystem::{
+    GetFileInformationByHandle, BY_HANDLE_FILE_INFORMATION,
+  };
+
+  let file = std::fs::File::open(path)?;
+  let mut information: BY_HANDLE_FILE_INFORMATION = unsafe { std::mem::zeroed() };
+  // SAFETY: file owns a valid readable handle for the duration of the call and
+  // information points to the correctly sized output structure.
+  if unsafe { GetFileInformationByHandle(file.as_raw_handle() as _, &mut information) } == 0 {
+    return Err(io::Error::last_os_error());
   }
+  let file_index = ((information.nFileIndexHigh as u64) << 32) | information.nFileIndexLow as u64;
+  Ok((information.dwVolumeSerialNumber, file_index))
 }
 
 #[cfg(unix)]
