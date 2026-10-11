@@ -1,0 +1,34 @@
+<woml>
+  <workflow
+    id="kubernetes-rollout-check"
+    name="Kubernetes rollout check"
+    description="Wait for an existing deployment rollout without changing cluster state."
+    version="1.0.0"
+  >
+    <triggers><manual id="start" /></triggers>
+    <steps>
+      <step id="rollout" name="Check API rollout">
+        <script>
+          const result = await services.process.run({
+            executable: "kubectl",
+            args: [
+              "rollout",
+              "status",
+              "deployment/api",
+              "--namespace",
+              "production",
+              "--timeout=120s"
+            ],
+            timeout: "130s",
+            output: { stdout: "capture", stderr: "capture", maxBytes: 32768 }
+          }, { name: "production-api-rollout" });
+          return {
+            healthy: result.exitCode === 0,
+            message: result.stdout.trim(),
+            checkedInMs: result.durationMs
+          };
+        </script>
+      </step>
+    </steps>
+  </workflow>
+</woml>

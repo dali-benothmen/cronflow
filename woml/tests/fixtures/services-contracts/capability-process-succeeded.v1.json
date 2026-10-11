@@ -1,0 +1,25 @@
+{
+  "contract": "woml.capability-call",
+  "contractVersion": 1,
+  "messageType": "result",
+  "invocationId": "invocation-process-a",
+  "callId": "call-process-a",
+  "outcome": "succeeded",
+  "resultContractVersion": 1,
+  "resultBytes": 256,
+  "durationMs": 42.5,
+  "result": {
+    "contract": "woml.process",
+    "contractVersion": 1,
+    "kind": "result",
+    "exitCode": 0,
+    "signal": null,
+    "stdout": "2 tests passed\n",
+    "stderr": "",
+    "stdoutBytes": 15,
+    "stderrBytes": 0,
+    "stdoutTruncated": false,
+    "stderrTruncated": false,
+    "durationMs": 42.5
+  }
+}

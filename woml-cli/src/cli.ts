@@ -113,6 +113,13 @@ import {
 } from './secrets';
 import { readSecretFromTerminal } from './secrets/prompt';
 import {
+  createForegroundProcessGrant,
+  loadProcessPolicy,
+  processGrantSummary,
+  ProcessPolicyError,
+  type ProcessRuntimeAuthorityV1,
+} from './process-policy';
+import {
   CommunicationProviderRegistry,
   CommunicationTriggerHost,
 } from './communication-provider';
@@ -250,11 +257,11 @@ class CliInputError extends Error {
 }
 
 function runUsage(): string {
-  return 'Usage: woml run <workflow.woml|directory>... [--config <path>] [--host <address>] [--port <port>] [--state <path>] [--trigger <manualTriggerId>] [--resume <runId>] [--approval-port <port>] [--json] [--verbose] [--color=auto|always|never] [--background|-d]';
+  return 'Usage: woml run <workflow.woml|directory>... [--config <path>] [--process-policy <path>|--allow-process <aliases>] [--host <address>] [--port <port>] [--state <path>] [--trigger <manualTriggerId>] [--resume <runId>] [--approval-port <port>] [--json] [--verbose] [--color=auto|always|never] [--background|-d]';
 }
 
 function testUsage(): string {
-  return 'Usage: woml test <workflow.woml> [--state <path>] [--trigger <manualTriggerId>] [--resume <runId>] [--approval-port <port>]';
+  return 'Usage: woml test <workflow.woml> [--process-policy <path>|--allow-process <aliases>] [--state <path>] [--trigger <manualTriggerId>] [--resume <runId>] [--approval-port <port>]';
 }
 
 function listUsage(): string {
@@ -287,7 +294,7 @@ function emitUsage(): string {
 }
 
 function checkUsage(): string {
-  return 'Usage: woml check <workflow.woml|directory>... [--config <path>] [--json]';
+  return 'Usage: woml check <workflow.woml|directory>... [--config <path>] [--process-policy <path>] [--json]';
 }
 
 function typesUsage(): string {
@@ -309,6 +316,9 @@ interface RunArguments {
   readonly port: number;
   readonly triggerId?: string;
   readonly configPath?: string;
+  readonly processPolicyPath?: string;
+  readonly allowProcess?: string;
+  readonly runtimeCapabilities?: ProcessRuntimeAuthorityV1;
   readonly stateExplicit: boolean;
   readonly hostExplicit: boolean;
   readonly portExplicit: boolean;
@@ -355,6 +365,8 @@ function parseRunArguments(args: readonly string[]): RunArguments {
   let port = 3_000;
   let triggerId: string | undefined;
   let configPath: string | undefined;
+  let processPolicyPath: string | undefined;
+  let allowProcess: string | undefined;
   let stateExplicit = false;
   let hostExplicit = false;
   let portExplicit = false;
@@ -388,6 +400,8 @@ function parseRunArguments(args: readonly string[]): RunArguments {
       value === undefined ||
       (option !== '--state' &&
         option !== '--config' &&
+        option !== '--process-policy' &&
+        option !== '--allow-process' &&
         option !== '--resume' &&
         option !== '--approval-port' &&
         option !== '--trigger' &&
@@ -417,6 +431,22 @@ function parseRunArguments(args: readonly string[]): RunArguments {
         );
       }
       configPath = value;
+    } else if (option === '--process-policy') {
+      if (value.length === 0) {
+        throw new CliInputError(
+          'WOML_CLI_ARGUMENTS_INVALID',
+          '--process-policy requires a non-empty JSON file path.'
+        );
+      }
+      processPolicyPath = value;
+    } else if (option === '--allow-process') {
+      if (value.length === 0) {
+        throw new CliInputError(
+          'WOML_CLI_ARGUMENTS_INVALID',
+          '--allow-process requires a comma-separated executable alias list.'
+        );
+      }
+      allowProcess = value;
     } else if (option === '--resume') {
       if (value.length === 0) {
         throw new CliInputError(
@@ -481,6 +511,12 @@ function parseRunArguments(args: readonly string[]): RunArguments {
       '--resume requires exactly one workflow file, not multiple inputs.'
     );
   }
+  if (processPolicyPath !== undefined && allowProcess !== undefined) {
+    throw new CliInputError(
+      'WOML_PROCESS_GRANT_CONFLICT',
+      'Use either --process-policy or --allow-process, not both.'
+    );
+  }
   return {
     command,
     filePath,
@@ -492,6 +528,8 @@ function parseRunArguments(args: readonly string[]): RunArguments {
     port,
     ...(triggerId === undefined ? {} : { triggerId }),
     ...(configPath === undefined ? {} : { configPath }),
+    ...(processPolicyPath === undefined ? {} : { processPolicyPath }),
+    ...(allowProcess === undefined ? {} : { allowProcess }),
     stateExplicit,
     hostExplicit,
     portExplicit,
@@ -509,9 +547,32 @@ function parseRunArguments(args: readonly string[]): RunArguments {
 }
 
 async function resolveRunArgumentsConfiguration(
-  args: RunArguments
+  args: RunArguments,
+  backgroundOverride?: boolean
 ): Promise<RunArguments> {
-  if (args.command !== 'run') return args;
+  const background =
+    backgroundOverride ?? process.env.WOML_BACKGROUND_HANDOFF !== undefined;
+  if (background && args.allowProcess !== undefined) {
+    throw new CliInputError(
+      'WOML_PROCESS_FOREGROUND_GRANT_BACKGROUND_DENIED',
+      '--allow-process is a temporary foreground grant. Use --process-policy for a background runtime.'
+    );
+  }
+  const runtimeCapabilities =
+    args.processPolicyPath !== undefined
+      ? await loadProcessPolicy(
+          args.processPolicyPath,
+          background ? 'background' : 'foreground'
+        )
+      : args.allowProcess !== undefined
+        ? await createForegroundProcessGrant(args.allowProcess)
+        : undefined;
+  if (args.command !== 'run') {
+    return {
+      ...args,
+      ...(runtimeCapabilities === undefined ? {} : { runtimeCapabilities }),
+    };
+  }
   const configuration = await resolveRuntimeConfiguration(args.configPath, {
     ...(args.stateExplicit ? { statePath: args.statePath } : {}),
     ...(args.hostExplicit ? { publicHost: args.host } : {}),
@@ -535,6 +596,7 @@ async function resolveRunArgumentsConfiguration(
     ...(configuration.retention === undefined
       ? {}
       : { retention: configuration.retention }),
+    ...(runtimeCapabilities === undefined ? {} : { runtimeCapabilities }),
   };
 }
 
@@ -1110,6 +1172,10 @@ function formatError(
 
   if (error instanceof SecretStoreError) {
     return `WOML secrets error [${error.code}]: ${error.message}`;
+  }
+
+  if (error instanceof ProcessPolicyError) {
+    return `WOML process policy error [${error.code}]: ${error.message}`;
   }
 
   if (error instanceof RuntimeControlError) {
@@ -2483,6 +2549,7 @@ async function runSingleCheckCommand(
 interface CheckArguments {
   readonly inputPaths: readonly string[];
   readonly configPath?: string;
+  readonly processPolicyPath?: string;
   readonly json: boolean;
 }
 
@@ -2492,6 +2559,7 @@ function parseCheckArguments(args: readonly string[]): CheckArguments {
   }
   const inputPaths: string[] = [];
   let configPath: string | undefined;
+  let processPolicyPath: string | undefined;
   let json = false;
   for (let index = 1; index < args.length; index += 1) {
     const argument = args[index]!;
@@ -2514,6 +2582,19 @@ function parseCheckArguments(args: readonly string[]): CheckArguments {
       index += 1;
       continue;
     }
+    if (argument === '--process-policy') {
+      const value = args[index + 1];
+      if (
+        processPolicyPath !== undefined ||
+        value === undefined ||
+        value.startsWith('--')
+      ) {
+        throw new CliInputError('WOML_CLI_ARGUMENTS_INVALID', checkUsage());
+      }
+      processPolicyPath = value;
+      index += 1;
+      continue;
+    }
     if (argument.startsWith('--')) {
       throw new CliInputError('WOML_CLI_ARGUMENTS_INVALID', checkUsage());
     }
@@ -2525,6 +2606,7 @@ function parseCheckArguments(args: readonly string[]): CheckArguments {
   return {
     inputPaths,
     ...(configPath === undefined ? {} : { configPath }),
+    ...(processPolicyPath === undefined ? {} : { processPolicyPath }),
     json,
   };
 }
@@ -2577,6 +2659,19 @@ async function runDeploymentCheckCommand(
   const displayPath = parsed.inputPaths[0];
   try {
     const sources = await compileWorkflowInputs(parsed.inputPaths, io);
+    const processUsage = sources.filter(source =>
+      inspectWomlModuleUsage(source.document).referencedServices.includes(
+        'process'
+      )
+    );
+    if (parsed.processPolicyPath !== undefined) {
+      await loadProcessPolicy(parsed.processPolicyPath, 'background');
+    }
+    if (processUsage.length > 0 && parsed.processPolicyPath === undefined) {
+      io.stderr(
+        'WOML check: services.process is valid but disabled at runtime unless --allow-process or --process-policy is provided to woml run.\n'
+      );
+    }
     printMigrationDiagnostics(
       io,
       sources.flatMap(source => source.migrationDiagnostics)
@@ -2683,6 +2778,7 @@ async function runCheckCommand(
   if (
     parsed.inputPaths.length === 1 &&
     parsed.configPath === undefined &&
+    parsed.processPolicyPath === undefined &&
     onlyInputIsFile
   ) {
     return await runSingleCheckCommand(
@@ -2796,6 +2892,7 @@ async function runApprovalWorkflow(
     resolvedSecrets: secrets,
     onProgress: durableRetryProgress(io, args),
     runtimeModules,
+    runtimeCapabilities: args.runtimeCapabilities,
   };
   let outcome =
     args.resumeRunId === undefined
@@ -2967,6 +3064,7 @@ async function runNotificationWorkflow(
           onProgress: runtimeProgress,
           resolvedSecrets: secrets,
           runtimeModules,
+          runtimeCapabilities: args.runtimeCapabilities,
         })
       : await resumeApprovalWorkflowWithRust(
           workflow,
@@ -2977,6 +3075,7 @@ async function runNotificationWorkflow(
             onProgress: runtimeProgress,
             resolvedSecrets: secrets,
             runtimeModules,
+            runtimeCapabilities: args.runtimeCapabilities,
           }
         );
   while (outcome.status === 'waiting') {
@@ -3055,6 +3154,7 @@ async function runNotificationWorkflow(
         onProgress: runtimeProgress,
         resolvedSecrets: secrets,
         runtimeModules,
+        runtimeCapabilities: args.runtimeCapabilities,
       }
     );
   }
@@ -3104,6 +3204,7 @@ async function resumeStoredRun(
     nativeCorePath: dependencies.nativeCorePath,
     resolvedSecrets: secrets,
     onProgress: durableRetryProgress(io, args),
+    runtimeCapabilities: args.runtimeCapabilities,
   };
 
   io.stderr(
@@ -3245,6 +3346,9 @@ async function executeOneShot(
   dependencies: CliDependencies,
   runtimeModules: readonly RustRuntimeModuleArtifact[] = []
 ): Promise<void> {
+  if (args.runtimeCapabilities !== undefined) {
+    io.stderr(`${processGrantSummary(args.runtimeCapabilities)}\n`);
+  }
   if (args.command === 'run') {
     presentationOutput(
       args,
@@ -3330,6 +3434,7 @@ async function executeOneShot(
             onProgress,
             resolvedSecrets: secrets,
             runtimeModules,
+            runtimeCapabilities: args.runtimeCapabilities,
           })
         : await resumeWorkflowWithRustDurable(
             workflow,
@@ -3340,6 +3445,7 @@ async function executeOneShot(
               onProgress,
               resolvedSecrets: secrets,
               runtimeModules,
+              runtimeCapabilities: args.runtimeCapabilities,
             }
           );
     printSettledOneShot(
@@ -3354,6 +3460,7 @@ async function executeOneShot(
   const execution = await executeWorkflowWithRust(workflow, {
     nativeCorePath: dependencies.nativeCorePath,
     runtimeModules,
+    runtimeCapabilities: args.runtimeCapabilities,
   });
   // Historical pre-durable models have no event-backed presentation. Keep
   // their established result contract until they are migrated.
@@ -4008,6 +4115,9 @@ async function activateWorkflows(
   io: CliIo,
   dependencies: CliDependencies
 ): Promise<void> {
+  if (args.runtimeCapabilities !== undefined) {
+    io.stderr(`${processGrantSummary(args.runtimeCapabilities)}\n`);
+  }
   const activationInputPaths = sources[0]?.activationInputPaths ?? [];
   if (
     sources.some(
@@ -4240,6 +4350,7 @@ async function activateWorkflows(
           activationId: currentActivationId,
           shutdownTimeoutMs: args.shutdownTimeoutMs,
           startSuspended: true,
+          runtimeCapabilities: args.runtimeCapabilities,
           onTriggerProgress: progress => {
             observe(progress);
             if (
@@ -5224,13 +5335,20 @@ async function runInBackground(
   args: readonly string[],
   io: CliIo
 ): Promise<number> {
+  if (args.includes('--allow-process')) {
+    io.stderr(
+      'WOML_PROCESS_FOREGROUND_GRANT_BACKGROUND_DENIED: --allow-process is a temporary foreground grant. Use --process-policy for a background runtime.\n'
+    );
+    return 2;
+  }
   const foregroundArgs = args.filter(
     argument => argument !== '--background' && argument !== '-d'
   );
   let parsed: RunArguments;
   try {
     parsed = await resolveRunArgumentsConfiguration(
-      parseRunArguments(foregroundArgs)
+      parseRunArguments(foregroundArgs),
+      true
     );
   } catch (error) {
     io.stderr(`${formatError(error)}\n`);
@@ -5751,6 +5869,19 @@ async function runCliUnprofiled(
   let sources: readonly CompiledWorkflowSource[] | undefined;
   try {
     sources = await compileWorkflowInputs(inputPaths, io);
+    if (
+      sources.some(source =>
+        inspectWomlModuleUsage(source.document).referencedServices.includes(
+          'process'
+        )
+      ) &&
+      runArguments.runtimeCapabilities === undefined
+    ) {
+      throw new CliInputError(
+        'WOML_PROCESS_DISABLED',
+        'This workflow uses services.process, which is disabled by default. Use --allow-process <aliases> for a foreground run or --process-policy <path> for durable runtime authority.'
+      );
+    }
     printMigrationDiagnostics(
       io,
       sources.flatMap(source => source.migrationDiagnostics)

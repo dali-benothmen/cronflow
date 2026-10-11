@@ -67,3 +67,19 @@ Bun JavaScript is a hostile multi-tenant sandbox. Run untrusted workloads in a
 dedicated OS account or container with memory, CPU, process, open-file,
 read-only-filesystem, and egress limits. Keep the state, descriptor, mounted
 secrets, logs, backups, and crash dumps outside other tenants' reach.
+
+`services.process.run()` adds an operator-controlled boundary for approved
+native tools; it does not turn arbitrary native code into a safe sandbox.
+Process Policy v1 starts commands with an empty environment, permits only
+reviewed inherited or explicit names, resolves working directories beneath a
+canonical project root, pins executable identity, bounds output, time, and
+concurrency, and terminates the supervised process tree on timeout or
+cancellation.
+
+Known secret values are redacted from captured process output, but a program
+can transform or write a secret in ways WOML cannot recognize. Do not pass
+secrets as command-line arguments, because privileged host inspection may
+expose them. Prefer owner-readable credential files or narrowly allowed
+environment names, discard unneeded output, and never return
+credential-bearing output as durable step context. See
+[Running Local Tools Safely](woml-process.md).

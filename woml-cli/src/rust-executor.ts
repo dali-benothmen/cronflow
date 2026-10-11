@@ -16,6 +16,7 @@ import {
   nativeTargetForRuntime,
 } from './native-platform';
 import { profileAsync, profileSync } from './performance-profiler';
+import type { ProcessRuntimeAuthorityV1 } from './process-policy';
 
 export interface RustRunEvent {
   readonly eventSchemaVersion:
@@ -68,6 +69,7 @@ export interface RustExecutorOptions {
   readonly onProgress?: (progress: ExecutionProgressV1) => void;
   readonly resolvedSecrets?: Readonly<Record<string, string>>;
   readonly runtimeModules?: readonly RustRuntimeModuleArtifact[];
+  readonly runtimeCapabilities?: ProcessRuntimeAuthorityV1;
 }
 
 export interface RustRuntimeModuleArtifact {
@@ -818,7 +820,8 @@ interface NativeCore {
     scriptHostPath: string,
     scriptTimeoutMs: number,
     resolvedSecretsJson: string,
-    runtimeModulesJson?: string
+    runtimeModulesJson?: string,
+    runtimeCapabilitiesJson?: string
   ) => Promise<string>;
   readonly executeWomlWorkflowDurable: (
     compiledModelJson: string,
@@ -829,7 +832,8 @@ interface NativeCore {
     scriptTimeoutMs: number,
     eventStorePath: string,
     resolvedSecretsJson: string,
-    runtimeModulesJson?: string
+    runtimeModulesJson?: string,
+    runtimeCapabilitiesJson?: string
   ) => Promise<string>;
   readonly executeWomlWorkflowDurableWithProgress: (
     compiledModelJson: string,
@@ -841,7 +845,8 @@ interface NativeCore {
     eventStorePath: string,
     progressCallback: (message: string) => void,
     resolvedSecretsJson: string,
-    runtimeModulesJson?: string
+    runtimeModulesJson?: string,
+    runtimeCapabilitiesJson?: string
   ) => Promise<string>;
   readonly resumeWomlWorkflowDurableWithProgress: (
     compiledModelJson: string,
@@ -853,7 +858,8 @@ interface NativeCore {
     eventStorePath: string,
     progressCallback: (message: string) => void,
     resolvedSecretsJson: string,
-    runtimeModulesJson?: string
+    runtimeModulesJson?: string,
+    runtimeCapabilitiesJson?: string
   ) => Promise<string>;
   readonly recoverWomlRuns: (eventStorePath: string) => string;
   readonly startWomlWebhookRuntime: (
@@ -868,6 +874,7 @@ interface NativeCore {
     deploymentId: string,
     activationId: string,
     startSuspended: boolean,
+    runtimeCapabilitiesJson: string | undefined,
     progressCallback: (message: string) => void
   ) => Promise<string>;
   readonly activateWomlWebhookRuntime: (runtimeId: string) => Promise<void>;
@@ -959,7 +966,8 @@ interface NativeCore {
     scriptTimeoutMs: number,
     eventStorePath: string,
     progressCallback: (message: string) => void,
-    resolvedSecretsJson: string
+    resolvedSecretsJson: string,
+    runtimeCapabilitiesJson?: string
   ) => Promise<string>;
   readonly executeWomlWorkflowDurableOutcome: (
     compiledModelJson: string,
@@ -970,7 +978,8 @@ interface NativeCore {
     scriptTimeoutMs: number,
     eventStorePath: string,
     resolvedSecretsJson: string,
-    runtimeModulesJson?: string
+    runtimeModulesJson?: string,
+    runtimeCapabilitiesJson?: string
   ) => Promise<string>;
   readonly executeWomlWorkflowDurableOutcomeWithProgress: (
     compiledModelJson: string,
@@ -982,7 +991,8 @@ interface NativeCore {
     eventStorePath: string,
     progressCallback: (message: string) => void,
     resolvedSecretsJson: string,
-    runtimeModulesJson?: string
+    runtimeModulesJson?: string,
+    runtimeCapabilitiesJson?: string
   ) => Promise<string>;
   readonly resumeWomlWorkflowDurableOutcome: (
     compiledModelJson: string,
@@ -993,7 +1003,8 @@ interface NativeCore {
     scriptTimeoutMs: number,
     eventStorePath: string,
     resolvedSecretsJson: string,
-    runtimeModulesJson?: string
+    runtimeModulesJson?: string,
+    runtimeCapabilitiesJson?: string
   ) => Promise<string>;
   readonly resumeWomlWorkflowDurableOutcomeWithProgress: (
     compiledModelJson: string,
@@ -1005,7 +1016,8 @@ interface NativeCore {
     eventStorePath: string,
     progressCallback: (message: string) => void,
     resolvedSecretsJson: string,
-    runtimeModulesJson?: string
+    runtimeModulesJson?: string,
+    runtimeCapabilitiesJson?: string
   ) => Promise<string>;
   readonly resolveWomlApproval: (
     eventStorePath: string,
@@ -2052,7 +2064,10 @@ export async function executeWorkflowWithRust(
       scriptHostPath,
       timeoutMs,
       JSON.stringify(options.resolvedSecrets ?? {}),
-      JSON.stringify(options.runtimeModules ?? [])
+      JSON.stringify(options.runtimeModules ?? []),
+      options.runtimeCapabilities === undefined
+        ? undefined
+        : JSON.stringify(options.runtimeCapabilities)
     );
   } catch (error) {
     decodeNativeExecutionError(error);
@@ -2131,13 +2146,19 @@ export async function executeWorkflowWithRustDurable(
           ? native.executeWomlWorkflowDurable(
               ...request.arguments,
               request.secretsJson,
-              request.runtimeModulesJson
+              request.runtimeModulesJson,
+              options.runtimeCapabilities === undefined
+                ? undefined
+                : JSON.stringify(options.runtimeCapabilities)
             )
           : native.executeWomlWorkflowDurableWithProgress(
               ...request.arguments,
               progressCallback,
               request.secretsJson,
-              request.runtimeModulesJson
+              request.runtimeModulesJson,
+              options.runtimeCapabilities === undefined
+                ? undefined
+                : JSON.stringify(options.runtimeCapabilities)
             )
       ).catch(decodeNativeExecutionError);
       if (measurements !== undefined) {
@@ -2189,7 +2210,10 @@ export async function resumeWorkflowWithRustDurable(
       eventStorePath,
       message => options.onProgress?.(parseExecutionProgress(message)),
       JSON.stringify(options.resolvedSecrets ?? {}),
-      JSON.stringify(options.runtimeModules ?? [])
+      JSON.stringify(options.runtimeModules ?? []),
+      options.runtimeCapabilities === undefined
+        ? undefined
+        : JSON.stringify(options.runtimeCapabilities)
     )
     .catch(decodeNativeExecutionError);
   return JSON.parse(resultJson) as RustWorkflowExecutionResult;
@@ -2249,13 +2273,19 @@ export async function executeApprovalWorkflowWithRust(
       ? native.executeWomlWorkflowDurableOutcome(
           ...arguments_,
           JSON.stringify(options.resolvedSecrets ?? {}),
-          JSON.stringify(options.runtimeModules ?? [])
+          JSON.stringify(options.runtimeModules ?? []),
+          options.runtimeCapabilities === undefined
+            ? undefined
+            : JSON.stringify(options.runtimeCapabilities)
         )
       : native.executeWomlWorkflowDurableOutcomeWithProgress(
           ...arguments_,
           message => options.onProgress?.(parseExecutionProgress(message)),
           JSON.stringify(options.resolvedSecrets ?? {}),
-          JSON.stringify(options.runtimeModules ?? [])
+          JSON.stringify(options.runtimeModules ?? []),
+          options.runtimeCapabilities === undefined
+            ? undefined
+            : JSON.stringify(options.runtimeCapabilities)
         )
   ).catch(decodeNativeExecutionError);
   return parseApprovalRuntimeOutcome(resultJson);
@@ -2286,13 +2316,19 @@ export async function resumeApprovalWorkflowWithRust(
       ? native.resumeWomlWorkflowDurableOutcome(
           ...arguments_,
           JSON.stringify(options.resolvedSecrets ?? {}),
-          JSON.stringify(options.runtimeModules ?? [])
+          JSON.stringify(options.runtimeModules ?? []),
+          options.runtimeCapabilities === undefined
+            ? undefined
+            : JSON.stringify(options.runtimeCapabilities)
         )
       : native.resumeWomlWorkflowDurableOutcomeWithProgress(
           ...arguments_,
           message => options.onProgress?.(parseExecutionProgress(message)),
           JSON.stringify(options.resolvedSecrets ?? {}),
-          JSON.stringify(options.runtimeModules ?? [])
+          JSON.stringify(options.runtimeModules ?? []),
+          options.runtimeCapabilities === undefined
+            ? undefined
+            : JSON.stringify(options.runtimeCapabilities)
         )
   ).catch(decodeNativeExecutionError);
   return parseApprovalRuntimeOutcome(resultJson);
@@ -2493,6 +2529,9 @@ export async function startWebhookRuntimeWithRust(
       deploymentId,
       activationId,
       options.startSuspended ?? false,
+      options.runtimeCapabilities === undefined
+        ? undefined
+        : JSON.stringify(options.runtimeCapabilities),
       message => {
         const decoded: unknown = JSON.parse(message);
         if (record(decoded) && decoded.contract === 'woml.schedule-progress') {
@@ -3810,7 +3849,10 @@ export async function resumeStoredRunWithRust(
       runtime.timeoutMs,
       eventStorePath,
       message => options.onProgress?.(parseExecutionProgress(message)),
-      JSON.stringify(options.resolvedSecrets ?? {})
+      JSON.stringify(options.resolvedSecrets ?? {}),
+      options.runtimeCapabilities === undefined
+        ? undefined
+        : JSON.stringify(options.runtimeCapabilities)
     )
     .catch(decodeNativeExecutionError);
   return parseApprovalRuntimeOutcome(json);

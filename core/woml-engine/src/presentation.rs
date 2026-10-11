@@ -980,6 +980,105 @@ fn workflow_operation(
   Some((kind, bounded(&details, MAX_MESSAGE)))
 }
 
+fn process_operation(node_id: &str, projection: &RunProjection) -> Option<String> {
+  let operations = projection
+    .operations
+    .values()
+    .filter(|operation| {
+      operation.node_id == node_id
+        && operation.capability == "process"
+        && operation.operation == "run"
+    })
+    .map(|operation| {
+      let executable = operation
+        .metadata
+        .get("executable")
+        .and_then(Value::as_str)
+        .unwrap_or("approved executable");
+      let (outcome, duration_ms) = match &operation.status {
+        crate::projection::OperationStatus::Started => ("running", None),
+        crate::projection::OperationStatus::Succeeded { duration_ms, .. } => {
+          ("succeeded", Some(*duration_ms))
+        }
+        crate::projection::OperationStatus::Failed {
+          duration_ms,
+          failure,
+        } => {
+          let outcome = operation
+            .metadata
+            .get("outcome")
+            .and_then(Value::as_str)
+            .unwrap_or(match failure.kind {
+              crate::CapabilityFailureKind::Cancelled => "cancelled",
+              crate::CapabilityFailureKind::TimedOut => "timed out",
+              crate::CapabilityFailureKind::Interrupted => "interrupted",
+              _ => "failed",
+            });
+          (outcome, Some(*duration_ms))
+        }
+      };
+      let mut parts = vec![format!("Process {executable}"), outcome.to_string()];
+      if let Some(exit_code) = operation.metadata.get("exitCode").and_then(Value::as_i64) {
+        parts.push(format!("exit {exit_code}"));
+      }
+      if let Some(signal) = operation.metadata.get("signal").and_then(Value::as_str) {
+        parts.push(format!("signal {signal}"));
+      }
+      if let Some(duration_ms) = duration_ms {
+        parts.push(format!("{duration_ms:.1} ms"));
+      }
+      for (stream, bytes_field, truncated_field) in [
+        ("stdout", "stdoutBytes", "stdoutTruncated"),
+        ("stderr", "stderrBytes", "stderrTruncated"),
+      ] {
+        if let Some(bytes) = operation.metadata.get(bytes_field).and_then(Value::as_u64) {
+          let truncated = operation
+            .metadata
+            .get(truncated_field)
+            .and_then(Value::as_bool)
+            .unwrap_or(false);
+          parts.push(format!(
+            "{stream} {}{}",
+            display_bytes(bytes),
+            if truncated {
+              " (truncated; raise output.maxBytes within policy to capture more)"
+            } else {
+              ""
+            }
+          ));
+        }
+      }
+      if matches!(
+        operation.status,
+        crate::projection::OperationStatus::Started
+      ) {
+        if let Some(limit) = operation
+          .metadata
+          .get("outputMaxBytes")
+          .and_then(Value::as_u64)
+        {
+          parts.push(format!(
+            "output bounded to {} per stream",
+            display_bytes(limit)
+          ));
+        }
+      }
+      parts.join(" · ")
+    })
+    .collect::<Vec<_>>();
+  (!operations.is_empty()).then(|| bounded(&operations.join("; "), MAX_MESSAGE))
+}
+
+fn display_bytes(bytes: u64) -> String {
+  if bytes < 1_024 {
+    format!("{bytes} B")
+  } else if bytes < 1_048_576 {
+    format!("{:.1} KiB", bytes as f64 / 1_024.0)
+  } else {
+    format!("{:.1} MiB", bytes as f64 / 1_048_576.0)
+  }
+}
+
 fn runtime_policy_detail(
   workflow: &CompiledWorkflowDefinition,
   projection: &RunProjection,
@@ -1944,6 +2043,7 @@ fn steps(
       kind = *operation_kind;
     }
     let mut detail = combine_details([
+      process_operation(&node.id, projection),
       runtime_policy_detail(workflow, projection, &node.id),
       selected_choice(workflow, &node.id, projection),
       workflow_operation.map(|(_, detail)| detail),
@@ -2444,4 +2544,85 @@ pub fn recent_run_presentations_from_store_v1(
     return Err(RunPresentationError::TooLarge);
   }
   Ok(list)
+}
+
+#[cfg(test)]
+mod tests {
+  use super::*;
+  use crate::{
+    projection::{OperationIdentity, OperationProjection, OperationStatus},
+    OperationExecutionMode,
+  };
+  use serde_json::{json, Map};
+
+  #[test]
+  fn process_activity_uses_only_safe_metadata_and_reports_terminal_details() {
+    let mut projection = RunProjection::default();
+    projection.operations.insert(
+      OperationIdentity {
+        invocation_id: "invocation-1".to_string(),
+        call_id: "call-1".to_string(),
+      },
+      OperationProjection {
+        identity: OperationIdentity {
+          invocation_id: "invocation-1".to_string(),
+          call_id: "call-1".to_string(),
+        },
+        node_id: "check".to_string(),
+        attempt_number: 1,
+        operation_key: "project-check".to_string(),
+        capability: "process".to_string(),
+        operation: "run".to_string(),
+        execution_mode: OperationExecutionMode::Managed,
+        metadata: Map::from_iter([
+          ("executable".to_string(), json!("bun")),
+          ("exitCode".to_string(), json!(0)),
+          ("stdoutBytes".to_string(), json!(1_536)),
+          ("stderrBytes".to_string(), json!(0)),
+          ("stdoutTruncated".to_string(), json!(true)),
+        ]),
+        status: OperationStatus::Succeeded {
+          duration_ms: 24.5,
+          result_bytes: 0,
+          result_digest: "sha256:safe".to_string(),
+        },
+      },
+    );
+    let detail = process_operation("check", &projection).expect("process detail");
+    assert!(detail.contains("Process bun · succeeded · exit 0 · 24.5 ms"));
+    assert!(detail.contains("stdout 1.5 KiB (truncated"));
+    assert!(detail.contains("stderr 0 B"));
+    assert!(!detail.contains("project-check"));
+    assert!(!detail.contains('/'));
+  }
+
+  #[test]
+  fn running_process_activity_exposes_only_the_bounded_progress_contract() {
+    let mut projection = RunProjection::default();
+    let identity = OperationIdentity {
+      invocation_id: "invocation-1".to_string(),
+      call_id: "call-1".to_string(),
+    };
+    projection.operations.insert(
+      identity.clone(),
+      OperationProjection {
+        identity,
+        node_id: "check".to_string(),
+        attempt_number: 1,
+        operation_key: "project-check".to_string(),
+        capability: "process".to_string(),
+        operation: "run".to_string(),
+        execution_mode: OperationExecutionMode::Managed,
+        metadata: Map::from_iter([
+          ("executable".to_string(), json!("kubectl")),
+          ("outputMaxBytes".to_string(), json!(65_536)),
+        ]),
+        status: OperationStatus::Started,
+      },
+    );
+    assert_eq!(
+      process_operation("check", &projection).as_deref(),
+      Some("Process kubectl · running · output bounded to 64.0 KiB per stream")
+    );
+  }
 }

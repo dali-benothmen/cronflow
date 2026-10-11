@@ -2162,6 +2162,268 @@ return {
       })
     ).toThrow('unknown call ID');
   });
+
+  test('Process v1 normalizes one supervised call and exposes an immutable public result', async () => {
+    const completed: CompletedMessage[] = [];
+    const calls: CapabilityCallMessage[] = [];
+    let host!: ScriptHost;
+    host = new ScriptHost({
+      workerUrl: new URL('../src/script-host-worker.ts', import.meta.url),
+      protocolVersion: 4,
+      send: async message => {
+        if (message.messageType === 'completed') {
+          completed.push(message);
+          return;
+        }
+        if (message.messageType !== 'capability_call') return;
+        calls.push(message);
+        const processResult = {
+          contract: 'woml.process',
+          contractVersion: 1,
+          kind: 'result',
+          exitCode: 0,
+          signal: null,
+          stdout: 'ok top-secret-value then top-secr',
+          stderr: '',
+          stdoutBytes: 33,
+          stderrBytes: 0,
+          stdoutTruncated: true,
+          stderrTruncated: false,
+          durationMs: 12.5,
+        } as const;
+        host.accept({
+          protocol: 'woml.script-host',
+          protocolVersion: 4,
+          messageType: 'capability_result',
+          invocationId: message.invocationId,
+          callId: message.callId,
+          result: {
+            contract: 'woml.capability-call',
+            contractVersion: 1,
+            messageType: 'result',
+            invocationId: message.invocationId,
+            callId: message.callId,
+            outcome: 'succeeded',
+            resultContractVersion: 1,
+            resultBytes: Buffer.byteLength(JSON.stringify(processResult)),
+            durationMs: 13,
+            result: processResult,
+          },
+        });
+      },
+    });
+
+    host.accept(
+      executeV4(
+        'inv_v4_process',
+        `
+          const facadeFrozen = Object.isFrozen(services.process);
+          const methodFrozen = Object.isFrozen(services.process.run);
+          const value = await services.process.run({
+            executable: 'bun',
+            args: ['test', '--watch=false'],
+            cwd: './packages/runtime',
+            env: { CI: 'true', API_TOKEN: secrets.API_TOKEN },
+            timeout: '5s',
+            acceptExitCodes: [0, 2],
+            output: { stdout: 'capture', stderr: 'discard', maxBytes: 4096 }
+          }, { name: 'project-tests' });
+          return {
+            facadeFrozen,
+            methodFrozen,
+            resultFrozen: Object.isFrozen(value),
+            hasContractField: Object.hasOwn(value, 'contract'),
+            value
+          };
+        `,
+        { API_TOKEN: 'top-secret-value' }
+      )
+    );
+    await host.drain();
+
+    expect(calls).toHaveLength(1);
+    expect(calls[0]?.call).toMatchObject({
+      capability: 'process',
+      operation: 'run',
+      inputContractVersion: 1,
+      resultContractVersion: 1,
+      identity: {
+        mode: 'named',
+        operationName: 'process.run.project-tests',
+      },
+      input: {
+        contract: 'woml.process',
+        contractVersion: 1,
+        kind: 'request',
+        executable: 'bun',
+        args: ['test', '--watch=false'],
+        cwd: './packages/runtime',
+        env: { CI: 'true', API_TOKEN: 'top-secret-value' },
+        acceptExitCodes: [0, 2],
+        output: {
+          stdout: 'capture',
+          stderr: 'discard',
+          maxBytes: 4096,
+        },
+      },
+    });
+    expect(calls[0]!.call.limits.timeoutMs).toBeGreaterThan(0);
+    expect(Number((calls[0]!.call.input as Record<string, unknown>).timeoutMs)).toBeLessThanOrEqual(
+      2_000
+    );
+    expect(calls[0]!.call.limits.timeoutMs).toBeLessThanOrEqual(2_000);
+    expect(calls[0]!.call.identity.operationKey).toMatch(/^sha256:[a-f0-9]{64}$/);
+    expect(completed[0]?.outcome).toEqual({
+      kind: 'success',
+      value: {
+        facadeFrozen: true,
+        methodFrozen: true,
+        resultFrozen: true,
+        hasContractField: false,
+        value: {
+          exitCode: 0,
+          signal: null,
+          stdout: 'ok [REDACTED] then ********',
+          stderr: '',
+          stdoutBytes: 33,
+          stderrBytes: 0,
+          stdoutTruncated: true,
+          stderrTruncated: false,
+          durationMs: 12.5,
+        },
+      },
+    });
+  });
+
+  test('Process v1 rejects unsafe and malformed requests before a capability call', async () => {
+    const completed: CompletedMessage[] = [];
+    let callCount = 0;
+    const host = new ScriptHost({
+      workerUrl: new URL('../src/script-host-worker.ts', import.meta.url),
+      protocolVersion: 4,
+      send: async message => {
+        if (message.messageType === 'completed') completed.push(message);
+        if (message.messageType === 'capability_call') callCount += 1;
+      },
+    });
+    host.accept(
+      executeV4(
+        'inv_v4_process_invalid',
+        `
+          const requests = [
+            [],
+            [{ executable: 'bun', unknown: true }],
+            [{ executable: 'sh -c' }],
+            [{ executable: 'bun', args: [() => null] }],
+            [{ executable: 'bun', cwd: '../outside' }],
+            [{ executable: 'bun', env: { 'BAD-NAME': 'value' } }],
+            [{ executable: 'bun', timeout: '25h' }],
+            [{ executable: 'bun', acceptExitCodes: [0, 0] }],
+            [{ executable: 'bun', output: { maxBytes: 262145 } }],
+            [{ executable: 'bun', env: new Map([['CI', 'true']]) }]
+          ];
+          const errors = [];
+          for (const args of requests) {
+            try {
+              await services.process.run(...args);
+              errors.push('accepted');
+            } catch (error) {
+              errors.push(error.message);
+            }
+          }
+          return errors;
+        `
+      )
+    );
+    await host.drain();
+
+    expect(callCount).toBe(0);
+    expect(completed[0]?.outcome.kind).toBe('success');
+    if (completed[0]?.outcome.kind !== 'success') {
+      throw new Error('Expected local Process validation to be catchable.');
+    }
+    const errors = completed[0].outcome.value as string[];
+    expect(errors).toHaveLength(10);
+    expect(errors).not.toContain('accepted');
+    expect(errors.join('\n')).toContain('runtime-approved alias');
+    expect(errors.join('\n')).toContain('relative project directory');
+    expect(errors.join('\n')).toContain('unique integers');
+  });
+
+  test('Process v1 requires stable names for multiple calls in one step', async () => {
+    const completed: CompletedMessage[] = [];
+    let callCount = 0;
+    let host!: ScriptHost;
+    host = new ScriptHost({
+      workerUrl: new URL('../src/script-host-worker.ts', import.meta.url),
+      protocolVersion: 4,
+      send: async message => {
+        if (message.messageType === 'completed') {
+          completed.push(message);
+          return;
+        }
+        if (message.messageType !== 'capability_call') return;
+        callCount += 1;
+        const processResult = {
+          contract: 'woml.process',
+          contractVersion: 1,
+          kind: 'result',
+          exitCode: 0,
+          signal: null,
+          stdout: '',
+          stderr: '',
+          stdoutBytes: 0,
+          stderrBytes: 0,
+          stdoutTruncated: false,
+          stderrTruncated: false,
+          durationMs: 1,
+        } as const;
+        host.accept({
+          protocol: 'woml.script-host',
+          protocolVersion: 4,
+          messageType: 'capability_result',
+          invocationId: message.invocationId,
+          callId: message.callId,
+          result: {
+            contract: 'woml.capability-call',
+            contractVersion: 1,
+            messageType: 'result',
+            invocationId: message.invocationId,
+            callId: message.callId,
+            outcome: 'succeeded',
+            resultContractVersion: 1,
+            resultBytes: Buffer.byteLength(JSON.stringify(processResult)),
+            durationMs: 1,
+            result: processResult,
+          },
+        });
+      },
+    });
+    host.accept(
+      executeV4(
+        'inv_v4_process_names',
+        `
+          await services.process.run({ executable: 'bun' });
+          try {
+            await services.process.run({ executable: 'bun' });
+            return { rejected: false };
+          } catch (error) {
+            return { rejected: true, message: error.message };
+          }
+        `
+      )
+    );
+    await host.drain();
+
+    expect(callCount).toBe(1);
+    expect(completed[0]?.outcome).toMatchObject({
+      kind: 'success',
+      value: {
+        rejected: true,
+        message: expect.stringContaining('require stable names'),
+      },
+    });
+  });
 });
 
 describe('Script Host v5 module runtime', () => {

@@ -1,0 +1,17 @@
+{
+  "contract": "woml.capability-call",
+  "contractVersion": 1,
+  "messageType": "result",
+  "invocationId": "invocation-process-cancelled",
+  "callId": "call-process-cancelled",
+  "outcome": "cancelled",
+  "durationMs": 800,
+  "error": {
+    "kind": "cancelled",
+    "code": "WOML_PROCESS_CANCELLED",
+    "message": "The supervised process was cancelled.",
+    "retryable": false,
+    "ambiguous": true,
+    "details": { "terminationRequested": true }
+  }
+}

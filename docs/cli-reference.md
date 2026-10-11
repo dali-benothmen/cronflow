@@ -18,7 +18,8 @@ store is `.woml/state.sqlite`.
 ### `woml check`
 
 ```bash
-woml check <workflow.woml|directory>... [--config <path>] [--json]
+woml check <workflow.woml|directory>... [--config <path>] \
+  [--process-policy <path>] [--json]
 ```
 
 Parses, validates, and compiles one deployment without activating triggers or
@@ -30,7 +31,8 @@ secret names, and optional production configuration.
 
 ```bash
 woml run <workflow.woml|directory>... \
-  [--config <path>] [--host <address>] [--port <port>] \
+  [--config <path>] [--process-policy <path>|--allow-process <aliases>] \
+  [--host <address>] [--port <port>] \
   [--state <path>] [--trigger <manualTriggerId>] [--resume <runId>] \
   [--approval-port <port>] [--json] [--verbose] \
   [--color=auto|always|never] [--background|-d]
@@ -46,16 +48,38 @@ and stop command. `--resume` continues a recoverable existing run against its
 stored immutable definition. Use `--state` consistently when selecting a
 non-default store.
 
+`--allow-process bun,git` grants only those resolved executable aliases to a
+reviewed foreground run. It is rejected with `--background`. Use
+`--process-policy <path>` for long-lived or background Process v1 authority.
+
 ### `woml test`
 
 ```bash
-woml test <workflow.woml> [--state <path>] \
+woml test <workflow.woml> [--process-policy <path>|--allow-process <aliases>] \
+  [--state <path>] \
   [--trigger <manualTriggerId>] [--resume <runId>] \
   [--approval-port <port>]
 ```
 
 Runs one manual occurrence and exits. This is intended for automated tests and
 CI, not as the normal automation host.
+
+## Process permissions
+
+Workflows using `services.process.run()` compile normally but execution is
+disabled until an operator supplies one of these explicit grants:
+
+```bash
+# Short-lived local review; executable paths come from the operator PATH.
+woml test checks.woml --allow-process bun,git
+
+# Reviewed foreground/background policy with canonical paths and limits.
+woml run workflows/ --process-policy ./process-policy.json --background
+```
+
+The policy also controls working directories, inherited and explicit
+environment names, maximum timeout, captured output, and concurrency. See
+[Running Local Tools Safely](woml-process.md) before enabling it in production.
 
 ### `woml types`
 

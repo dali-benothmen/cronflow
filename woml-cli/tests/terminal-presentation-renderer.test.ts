@@ -63,6 +63,59 @@ describe('terminal presentation renderer', () => {
     expect(stripAnsi(colored)).toBe(plain);
   });
 
+  test('renders managed Process activity beneath its owning step without exposing a command', async () => {
+    const fixture = await success();
+    const processRun: RunPresentationV1 = {
+      ...structuredClone(fixture),
+      steps: [{
+        ...structuredClone(fixture.steps[0]!),
+        name: 'Run project checks',
+        detail: 'Process bun · succeeded · exit 0 · 24.5 ms · stdout 1.5 KiB (truncated; raise output.maxBytes within policy to capture more) · stderr 0 B',
+      }],
+      summary: { succeeded: 1, failed: 0, skipped: 0, cancelled: 0, total: 1 },
+    };
+    const plain = renderRunPresentation(processRun, {
+      format: 'plain', width: 100, unicode: true, timeZone: 'UTC',
+    });
+    expect(plain).toContain('Run project checks');
+    expect(plain).toContain('↳ Process bun · succeeded · exit 0 · 24.5 ms');
+    expect(plain).toContain('stdout 1.5 KiB (truncated');
+    expect(plain).not.toContain('/usr/');
+    expect(plain).not.toContain('bun test');
+
+    const colored = renderRunPresentation(processRun, {
+      format: 'tty', color: 'always', isTTY: true, width: 100, unicode: true,
+      timeZone: 'UTC',
+    });
+    expect(colored).toContain('\u001b[32m');
+    expect(stripAnsi(colored)).toBe(plain);
+
+    const machine = renderRunPresentation(processRun, { format: 'json' });
+    expect(machine).not.toContain('\u001b[');
+    expect(JSON.parse(machine).steps[0].detail).toStartWith('Process bun');
+
+    const running: RunPresentationV1 = {
+      ...processRun,
+      status: 'running',
+      completedAt: undefined,
+      steps: [{
+        ...processRun.steps[0]!,
+        status: 'running',
+        startedAt: '2026-08-16T07:00:00.000Z',
+        completedAt: undefined,
+        durationMs: undefined,
+        detail: 'Process bun · running · output bounded to 64.0 KiB per stream',
+      }],
+      summary: { succeeded: 0, failed: 0, skipped: 0, cancelled: 0, total: 1 },
+    };
+    const progress = renderRunPresentation(running, {
+      format: 'plain', width: 100, unicode: true, timeZone: 'UTC',
+      now: Date.parse('2026-08-16T07:00:01.250Z'),
+    });
+    expect(progress).toContain('↳ Process bun · running for 1.3 s');
+    expect(progress).toContain('output bounded to 64.0 KiB per stream');
+  });
+
   test('honors NO_COLOR, TERM=dumb, redirected output, and explicit color modes', async () => {
     const fixture = await success();
     const cases = [

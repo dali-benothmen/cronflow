@@ -1,0 +1,14 @@
+{
+  "contract": "woml.process",
+  "contractVersion": 1,
+  "kind": "result",
+  "exitCode": 0,
+  "signal": null,
+  "stdout": "first 16 bytes…",
+  "stderr": "",
+  "stdoutBytes": 524288,
+  "stderrBytes": 0,
+  "stdoutTruncated": true,
+  "stderrTruncated": false,
+  "durationMs": 87.25
+}

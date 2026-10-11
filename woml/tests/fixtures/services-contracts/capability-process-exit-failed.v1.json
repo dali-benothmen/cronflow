@@ -1,0 +1,23 @@
+{
+  "contract": "woml.capability-call",
+  "contractVersion": 1,
+  "messageType": "result",
+  "invocationId": "invocation-process-exit",
+  "callId": "call-process-exit",
+  "outcome": "failed",
+  "durationMs": 18.1,
+  "error": {
+    "kind": "service_rejected",
+    "code": "WOML_PROCESS_EXIT_CODE",
+    "message": "The supervised process exited with code 1.",
+    "retryable": false,
+    "ambiguous": false,
+    "details": {
+      "exitCode": 1,
+      "stdoutBytes": 0,
+      "stderrBytes": 84,
+      "stdoutTruncated": false,
+      "stderrTruncated": false
+    }
+  }
+}

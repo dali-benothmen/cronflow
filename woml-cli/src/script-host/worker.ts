@@ -640,6 +640,303 @@ function normalizeHttpRequest(input: JsonValue): JsonObject {
   return normalized;
 }
 
+const processExecutableAliasPattern = /^[a-zA-Z0-9][a-zA-Z0-9._-]{0,127}$/;
+const processEnvironmentNamePattern = /^[A-Za-z_][A-Za-z0-9_]{0,127}$/;
+
+function processTimeoutMilliseconds(value: JsonValue | undefined): number {
+  const timeout = value ?? 30_000;
+  if (typeof timeout === 'number' && Number.isSafeInteger(timeout)) {
+    return timeout;
+  }
+  if (typeof timeout !== 'string') {
+    throw new TypeError(
+      'Process timeout must be milliseconds or a duration string.'
+    );
+  }
+  const match = timeout.match(/^(\d+)(ms|s|m|h)$/);
+  if (match === null) {
+    throw new TypeError(
+      'Process timeout must look like 500ms, 10s, 2m, or 1h.'
+    );
+  }
+  const multiplier =
+    match[2] === 'ms'
+      ? 1
+      : match[2] === 's'
+        ? 1_000
+        : match[2] === 'm'
+          ? 60_000
+          : 3_600_000;
+  return Number(match[1]) * multiplier;
+}
+
+function portableRelativeProcessDirectory(value: string): boolean {
+  if (
+    value.length === 0 ||
+    value.length > 4_096 ||
+    value.includes('\0') ||
+    value.startsWith('/') ||
+    value.startsWith('\\') ||
+    /^[A-Za-z]:[\\/]/.test(value)
+  ) {
+    return false;
+  }
+  const segments = value.replaceAll('\\', '/').split('/');
+  return segments.every(segment => segment !== '..');
+}
+
+function normalizeProcessRequest(input: JsonValue): JsonObject {
+  const violation = findJsonViolation(input);
+  if (violation !== undefined) {
+    throw new TypeError(`${violation.path}: ${violation.reason}`);
+  }
+  const object = plainObject(input);
+  if (object === undefined) {
+    throw new TypeError('services.process.run() requires a request object.');
+  }
+  const allowed = new Set([
+    'executable',
+    'args',
+    'cwd',
+    'env',
+    'timeout',
+    'acceptExitCodes',
+    'output',
+  ]);
+  const unknown = Object.keys(object).find(key => !allowed.has(key));
+  if (unknown !== undefined) {
+    throw new TypeError(`Unknown Process v1 option "${unknown}".`);
+  }
+  if (
+    typeof object.executable !== 'string' ||
+    !processExecutableAliasPattern.test(object.executable)
+  ) {
+    throw new TypeError(
+      'Process executable must be a runtime-approved alias containing only letters, digits, dots, underscores, or hyphens.'
+    );
+  }
+
+  const args = object.args ?? [];
+  if (
+    !Array.isArray(args) ||
+    args.length > 256 ||
+    args.some(
+      argument =>
+        typeof argument !== 'string' ||
+        argument.length > 32_768 ||
+        argument.includes('\0')
+    )
+  ) {
+    throw new TypeError(
+      'Process args must be an array of at most 256 strings without NUL bytes.'
+    );
+  }
+
+  const cwd = object.cwd ?? '.';
+  if (typeof cwd !== 'string' || !portableRelativeProcessDirectory(cwd)) {
+    throw new TypeError(
+      'Process cwd must be a relative project directory without parent traversal.'
+    );
+  }
+
+  const env = plainObject(object.env ?? {});
+  if (
+    env === undefined ||
+    Object.keys(env).length > 128 ||
+    Object.entries(env).some(
+      ([name, value]) =>
+        !processEnvironmentNamePattern.test(name) ||
+        typeof value !== 'string' ||
+        value.length > 32_768 ||
+        value.includes('\0')
+    )
+  ) {
+    throw new TypeError(
+      'Process env must contain at most 128 portable environment names with string values.'
+    );
+  }
+
+  const timeoutMs = processTimeoutMilliseconds(object.timeout);
+  if (
+    !Number.isSafeInteger(timeoutMs) ||
+    timeoutMs < 1 ||
+    timeoutMs > 86_400_000
+  ) {
+    throw new TypeError(
+      'Process timeout must be between 1 ms and 24 hours.'
+    );
+  }
+
+  const acceptExitCodes = object.acceptExitCodes ?? [0];
+  if (
+    !Array.isArray(acceptExitCodes) ||
+    acceptExitCodes.length === 0 ||
+    acceptExitCodes.length > 32 ||
+    acceptExitCodes.some(
+      code =>
+        !Number.isSafeInteger(code) || Number(code) < 0 || Number(code) > 255
+    ) ||
+    new Set(acceptExitCodes).size !== acceptExitCodes.length
+  ) {
+    throw new TypeError(
+      'Process acceptExitCodes must contain 1 to 32 unique integers from 0 through 255.'
+    );
+  }
+
+  const rawOutput = plainObject(object.output ?? {});
+  if (rawOutput === undefined) {
+    throw new TypeError('Process output must be an object.');
+  }
+  const unknownOutput = Object.keys(rawOutput).find(
+    key => !['stdout', 'stderr', 'maxBytes'].includes(key)
+  );
+  if (unknownOutput !== undefined) {
+    throw new TypeError(`Unknown Process v1 output option "${unknownOutput}".`);
+  }
+  const stdout = rawOutput.stdout ?? 'capture';
+  const stderr = rawOutput.stderr ?? 'capture';
+  const maxBytes = rawOutput.maxBytes ?? 65_536;
+  if (stdout !== 'capture' && stdout !== 'discard') {
+    throw new TypeError('Process output.stdout must be "capture" or "discard".');
+  }
+  if (stderr !== 'capture' && stderr !== 'discard') {
+    throw new TypeError('Process output.stderr must be "capture" or "discard".');
+  }
+  if (
+    !Number.isSafeInteger(maxBytes) ||
+    Number(maxBytes) < 1 ||
+    Number(maxBytes) > 262_144
+  ) {
+    throw new TypeError(
+      'Process output.maxBytes must be an integer from 1 through 262144.'
+    );
+  }
+
+  return deepFreezeJson({
+    contract: 'woml.process',
+    contractVersion: 1,
+    kind: 'request',
+    executable: object.executable,
+    args: [...args],
+    cwd,
+    env: { ...env },
+    timeoutMs,
+    acceptExitCodes: [...acceptExitCodes],
+    output: { stdout, stderr, maxBytes },
+  });
+}
+
+function redactProcessOutput(
+  value: string,
+  secrets: readonly string[],
+  truncated: boolean
+): string {
+  let redacted = value;
+  for (const secret of [...secrets]
+    .filter(secret => secret.length > 0)
+    .sort((left, right) => right.length - left.length)) {
+    const secretBytes = Buffer.byteLength(secret, 'utf8');
+    const marker = secretBytes >= 10 ? '[REDACTED]' : '*'.repeat(secretBytes);
+    redacted = redacted.split(secret).join(marker);
+    if (truncated) {
+      const length = trailingSecretPrefixLength(redacted, secret);
+      if (length > 0) {
+        const prefix = secret.slice(0, length);
+        const prefixBytes = Buffer.byteLength(prefix, 'utf8');
+        const boundaryMarker = prefixBytes >= 10
+          ? '[REDACTED]'
+          : '*'.repeat(prefixBytes);
+        redacted = `${redacted.slice(0, -prefix.length)}${boundaryMarker}`;
+      }
+    }
+  }
+  return redacted;
+}
+
+function trailingSecretPrefixLength(value: string, secret: string): number {
+  if (secret.length < 2 || value.length === 0) return 0;
+  const failure = new Array<number>(secret.length).fill(0);
+  for (let index = 1, matched = 0; index < secret.length; index += 1) {
+    while (matched > 0 && secret[index] !== secret[matched]) {
+      matched = failure[matched - 1]!;
+    }
+    if (secret[index] === secret[matched]) matched += 1;
+    failure[index] = matched;
+  }
+  const tail = value.slice(-(secret.length - 1));
+  let matched = 0;
+  for (let index = 0; index < tail.length; index += 1) {
+    while (matched > 0 && tail[index] !== secret[matched]) {
+      matched = failure[matched - 1]!;
+    }
+    if (tail[index] === secret[matched]) matched += 1;
+    if (matched === secret.length) matched = failure[matched - 1]!;
+  }
+  return matched;
+}
+
+function publicProcessResult(
+  result: JsonValue,
+  secrets: readonly string[]
+): JsonValue {
+  const object = plainObject(result);
+  const fields = new Set([
+    'contract',
+    'contractVersion',
+    'kind',
+    'exitCode',
+    'signal',
+    'stdout',
+    'stderr',
+    'stdoutBytes',
+    'stderrBytes',
+    'stdoutTruncated',
+    'stderrTruncated',
+    'durationMs',
+  ]);
+  if (
+    object?.contract !== 'woml.process' ||
+    Object.keys(object).some(field => !fields.has(field)) ||
+    object.contractVersion !== 1 ||
+    object.kind !== 'result' ||
+    (object.exitCode !== null &&
+      (!Number.isSafeInteger(object.exitCode) ||
+        Number(object.exitCode) < 0 ||
+        Number(object.exitCode) > 255)) ||
+    (object.signal !== null &&
+      (typeof object.signal !== 'string' ||
+        object.signal.length === 0 ||
+        object.signal.length > 128)) ||
+    (object.exitCode === null && object.signal === null) ||
+    typeof object.stdout !== 'string' ||
+    typeof object.stderr !== 'string' ||
+    Buffer.byteLength(object.stdout, 'utf8') > 262_144 ||
+    Buffer.byteLength(object.stderr, 'utf8') > 262_144 ||
+    !Number.isSafeInteger(object.stdoutBytes) ||
+    Number(object.stdoutBytes) < 0 ||
+    !Number.isSafeInteger(object.stderrBytes) ||
+    Number(object.stderrBytes) < 0 ||
+    typeof object.stdoutTruncated !== 'boolean' ||
+    typeof object.stderrTruncated !== 'boolean' ||
+    typeof object.durationMs !== 'number' ||
+    !Number.isFinite(object.durationMs) ||
+    object.durationMs < 0
+  ) {
+    throw new TypeError('Rust returned an invalid Process v1 result.');
+  }
+  return Object.freeze({
+    exitCode: object.exitCode,
+    signal: object.signal,
+    stdout: redactProcessOutput(object.stdout, secrets, object.stdoutTruncated),
+    stderr: redactProcessOutput(object.stderr, secrets, object.stderrTruncated),
+    stdoutBytes: object.stdoutBytes,
+    stderrBytes: object.stderrBytes,
+    stdoutTruncated: object.stdoutTruncated,
+    stderrTruncated: object.stderrTruncated,
+    durationMs: object.durationMs,
+  });
+}
+
 function normalizeTelegramSend(input: JsonValue): JsonObject {
   const object = plainObject(input);
   if (object === undefined) {
@@ -1590,6 +1887,7 @@ function deeplyReadonlyServiceFacade(
     return Object.freeze({});
   }
   const attempt = request.attempt;
+  const resolvedSecretValues = Object.values(request.bindings.secrets);
   const capabilityCache = new Map<string, unknown>();
   const invokeCapability = async (
     capability: string,
@@ -1614,6 +1912,7 @@ function deeplyReadonlyServiceFacade(
     const managedTelegram = capability === 'telegram' && operation === 'send';
     const managedDiscord = capability === 'discord' && operation === 'send';
     const managedWhatsApp = capability === 'whatsapp' && operation === 'send';
+    const managedProcess = capability === 'process' && operation === 'run';
     if (
       !managedHttp &&
       !managedDatabase &&
@@ -1625,6 +1924,7 @@ function deeplyReadonlyServiceFacade(
       !managedTelegram &&
       !managedDiscord &&
       !managedWhatsApp &&
+      !managedProcess &&
       callOptions !== undefined
     ) {
       throw new TypeError(
@@ -1669,7 +1969,8 @@ function deeplyReadonlyServiceFacade(
         managedEvents ||
         managedTelegram ||
         managedDiscord ||
-        managedWhatsApp) &&
+        managedWhatsApp ||
+        managedProcess) &&
       identity.mode === 'automatic'
     ) {
       const key = `${capability}.${operation}`;
@@ -1697,7 +1998,13 @@ function deeplyReadonlyServiceFacade(
               plainObject((input as JsonObject).options)?.timeoutMs ?? 30_000
             ) + 1_000
           )
-        : 30_000;
+        : managedProcess
+          ? Math.min(
+              86_400_000,
+              Number((input as JsonObject).timeoutMs) + 1_000,
+              Math.max(1, Math.floor(executionDeadline - performance.now()))
+            )
+          : 30_000;
     const id = callId();
     const call: CapabilityCallRequest = {
       contract: 'woml.capability-call',
@@ -1745,17 +2052,19 @@ function deeplyReadonlyServiceFacade(
             ? publicCacheResult(result, operation)
             : managedState
               ? publicStateResult(result, operation)
-            : managedEvents
-              ? publicEventResult(result)
-              : managedWorkflows
-                ? publicWorkflowResult(result, operation as 'call' | 'start')
-                : managedTelegram
-                  ? publicTelegramResult(result)
-                  : managedDiscord
-                    ? publicDiscordResult(result)
-                    : managedWhatsApp
-                      ? publicWhatsAppResult(result)
-                : result;
+              : managedEvents
+                ? publicEventResult(result)
+                : managedWorkflows
+                  ? publicWorkflowResult(result, operation as 'call' | 'start')
+                  : managedTelegram
+                    ? publicTelegramResult(result)
+                    : managedDiscord
+                      ? publicDiscordResult(result)
+                      : managedWhatsApp
+                        ? publicWhatsAppResult(result)
+                        : managedProcess
+                          ? publicProcessResult(result, resolvedSecretValues)
+                          : result;
   };
   return new Proxy(Object.freeze({}), {
     get(_target, capabilityProperty) {
@@ -1939,6 +2248,41 @@ function deeplyReadonlyServiceFacade(
         const workflows = Object.freeze({ call, start });
         capabilityCache.set(capabilityProperty, workflows);
         return workflows;
+      }
+      if (capabilityProperty === 'process') {
+        const run = async (...args: unknown[]): Promise<JsonValue> => {
+          if (args.length < 1 || args.length > 2) {
+            throw new TypeError(
+              'services.process.run() requires a request and optional stable operation options.'
+            );
+          }
+          const normalized = normalizeProcessRequest(args[0] as JsonValue);
+          const remainingTimeoutMs = Math.max(
+            1,
+            Math.floor(executionDeadline - performance.now())
+          );
+          const requestedTimeoutMs = normalized.timeoutMs;
+          if (typeof requestedTimeoutMs !== 'number') {
+            throw new TypeError('Normalized Process timeout must be numeric.');
+          }
+          const effectiveRequest = deepFreezeJson({
+            ...(normalized as JsonObject),
+            timeoutMs:
+              requestedTimeoutMs < remainingTimeoutMs
+                ? requestedTimeoutMs
+                : remainingTimeoutMs,
+          });
+          return invokeCapability(
+            'process',
+            'run',
+            effectiveRequest,
+            args[1] as JsonValue | undefined
+          );
+        };
+        Object.freeze(run);
+        const process = Object.freeze({ run });
+        capabilityCache.set(capabilityProperty, process);
+        return process;
       }
       const operationCache = new Map<string, unknown>();
       const capability = new Proxy(Object.freeze({}), {

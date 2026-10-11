@@ -1,0 +1,21 @@
+{
+  "contract": "woml.process-policy",
+  "contractVersion": 1,
+  "enabled": true,
+  "modes": { "foreground": true, "background": true },
+  "projectRoot": "/srv/woml/project",
+  "executables": [
+    { "alias": "bun", "path": "/usr/local/bin/bun" },
+    { "alias": "kubectl", "path": "/usr/bin/kubectl" }
+  ],
+  "workingDirectories": [".", "./infrastructure"],
+  "environment": {
+    "inherit": ["HOME", "PATH"],
+    "allow": ["CI", "KUBECONFIG"]
+  },
+  "limits": {
+    "maxTimeoutMs": 1200000,
+    "maxOutputBytes": 262144,
+    "maxConcurrent": 4
+  }
+}

@@ -1,0 +1,16 @@
+{
+  "contract": "woml.process-policy",
+  "contractVersion": 1,
+  "enabled": true,
+  "modes": { "foreground": true, "background": false },
+  "projectRoot": "/srv/woml/project",
+  "executables": [{ "alias": "bun", "path": "/usr/local/bin/bun" }],
+  "workingDirectories": ["."],
+  "environment": { "inherit": [], "allow": ["CI"] },
+  "limits": {
+    "maxTimeoutMs": 30000,
+    "maxOutputBytes": 65536,
+    "maxConcurrent": 2
+  },
+  "allowShell": true
+}

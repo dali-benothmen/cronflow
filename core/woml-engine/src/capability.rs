@@ -40,6 +40,7 @@ pub const DEFAULT_CAPABILITY_TIMEOUT_MS: u64 = 30_000;
 pub const MAX_CAPABILITY_TIMEOUT_MS: u64 = 86_400_000;
 pub const DEFAULT_CAPABILITY_IN_FLIGHT_PER_INVOCATION: usize = 32;
 pub const DEFAULT_CAPABILITY_IN_FLIGHT_GLOBAL: usize = 256;
+const CAPABILITY_CANCELLATION_CLEANUP_MS: u64 = 3_000;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -320,6 +321,10 @@ pub trait CapabilityHandler: Send + Sync + 'static {
   }
 
   fn safe_result_metadata(&self, _result: &Value) -> Map<String, Value> {
+    Map::new()
+  }
+
+  fn safe_failure_metadata(&self, _failure: &CapabilityFailure) -> Map<String, Value> {
     Map::new()
   }
 
@@ -781,7 +786,7 @@ impl DurableCapabilityAuthority {
     let payload = match &result {
       CapabilityCallResult::Succeeded(success) => {
         let encoded = serde_json::to_vec(&success.result).unwrap_or_default();
-        let mut result_metadata = if request.capability == "state" {
+        let mut result_metadata = if matches!(request.capability.as_str(), "state" | "process") {
           metadata.clone()
         } else {
           Map::new()
@@ -812,6 +817,15 @@ impl DurableCapabilityAuthority {
       }
       CapabilityCallResult::Failed(failed) | CapabilityCallResult::Cancelled(failed) => {
         let mut metadata = metadata;
+        metadata.extend(
+          self
+            .registry
+            .safe_failure_metadata(&request, &failed.error)
+            .unwrap_or_default(),
+        );
+        if request.capability == "process" {
+          metadata.insert("durationMs".to_string(), Value::from(failed.duration_ms));
+        }
         if request.capability == "state" {
           let outcome = if failed.error.kind == CapabilityFailureKind::Cancelled {
             "cancelled"
@@ -1329,6 +1343,7 @@ impl CapabilityRegistry {
       }
     };
     let effect = handler.effect(&request.input);
+    let supports_cancellation = handler.descriptor().supports_cancellation;
     let may_have_effect = effect != CapabilityEffect::Read;
     let safe_to_retry = effect != CapabilityEffect::UnsafeWrite;
 
@@ -1343,20 +1358,47 @@ impl CapabilityRegistry {
     tokio::pin!(timeout);
     let outcome = tokio::select! {
       biased;
-      _ = cancellation.cancelled() => Err(failure(
-        CapabilityFailureKind::Cancelled,
-        "WOML_CAPABILITY_CANCELLED",
-        "The capability call was cancelled.",
-        false,
-        may_have_effect,
-      )),
-      _ = &mut timeout => Err(failure(
-        CapabilityFailureKind::TimedOut,
-        "WOML_CAPABILITY_TIMED_OUT",
-        "The capability call exceeded its deadline.",
-        safe_to_retry,
-        may_have_effect,
-      )),
+      _ = cancellation.cancelled() => {
+        let fallback = failure(
+          CapabilityFailureKind::Cancelled,
+          "WOML_CAPABILITY_CANCELLED",
+          "The capability call was cancelled.",
+          false,
+          may_have_effect,
+        );
+        if supports_cancellation {
+          match time::timeout(
+            time::Duration::from_millis(CAPABILITY_CANCELLATION_CLEANUP_MS),
+            &mut handler_future,
+          ).await {
+            Ok(Ok(Err(error))) if error.kind == CapabilityFailureKind::Cancelled => Err(error),
+            _ => Err(fallback),
+          }
+        } else {
+          Err(fallback)
+        }
+      },
+      _ = &mut timeout => {
+        let fallback = failure(
+          CapabilityFailureKind::TimedOut,
+          "WOML_CAPABILITY_TIMED_OUT",
+          "The capability call exceeded its deadline.",
+          safe_to_retry,
+          may_have_effect,
+        );
+        if supports_cancellation {
+          cancellation.cancel();
+          match time::timeout(
+            time::Duration::from_millis(CAPABILITY_CANCELLATION_CLEANUP_MS),
+            &mut handler_future,
+          ).await {
+            Ok(Ok(Err(error))) if error.kind == CapabilityFailureKind::TimedOut => Err(error),
+            _ => Err(fallback),
+          }
+        } else {
+          Err(fallback)
+        }
+      },
       result = &mut handler_future => match result {
         Ok(result) => result,
         Err(_) => Err(failure(
@@ -1474,6 +1516,25 @@ impl CapabilityRegistry {
       failure(
         CapabilityFailureKind::InvalidResult,
         "WOML_CAPABILITY_UNSAFE_RESULT_METADATA",
+        message,
+        false,
+        false,
+      )
+    })?;
+    Ok(metadata)
+  }
+
+  pub fn safe_failure_metadata(
+    &self,
+    request: &CapabilityCallRequest,
+    failure: &CapabilityFailure,
+  ) -> Result<Map<String, Value>, CapabilityFailure> {
+    let handler = self.lookup_and_validate(request)?;
+    let metadata = handler.safe_failure_metadata(failure);
+    validate_safe_metadata(&metadata).map_err(|message| {
+      crate::capability::failure(
+        CapabilityFailureKind::InvalidResult,
+        "WOML_CAPABILITY_UNSAFE_FAILURE_METADATA",
         message,
         false,
         false,

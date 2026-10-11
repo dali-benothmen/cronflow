@@ -25,12 +25,13 @@ use woml_engine::{
   CustomProviderScriptArtifact, DurableEventStore, DurableStoreError,
   ExternalTriggerAdmissionCommand, IntervalProgress, IntervalProgressReporter, LifecycleProgress,
   NotificationHostClientError, NotificationHostProcessOptions, NotificationJourneyDiagnostics,
-  NotificationJourneyError, ParallelFailurePolicy, RetentionError, RetentionPolicyV1, RunFailure,
-  RunPresentationError, RunStatus, RuntimeExecutionError, RuntimeExecutionOptions,
-  RuntimeModuleArtifact, RuntimePolicyProgress, RuntimePolicyProgressReporter, ScheduleProgress,
-  ScheduleProgressReporter, ScriptHostProcessOptions, SystemEngineClock, TriggerAdmissionRequest,
-  TriggerProgress, TriggerProgressReporter, WebhookDefinitionRegistration, WebhookRuntimeError,
-  WomlWebhookServer, WomlWebhookServerConfig, WorkflowCallProgress, WorkflowCallProgressReporter,
+  NotificationJourneyError, ParallelFailurePolicy, ProcessPolicyV1, ProcessRuntimeMode,
+  RetentionError, RetentionPolicyV1, RunFailure, RunPresentationError, RunStatus,
+  RuntimeExecutionError, RuntimeExecutionOptions, RuntimeModuleArtifact, RuntimePolicyProgress,
+  RuntimePolicyProgressReporter, ScheduleProgress, ScheduleProgressReporter,
+  ScriptHostProcessOptions, SystemEngineClock, TriggerAdmissionRequest, TriggerProgress,
+  TriggerProgressReporter, WebhookDefinitionRegistration, WebhookRuntimeError, WomlWebhookServer,
+  WomlWebhookServerConfig, WorkflowCallProgress, WorkflowCallProgressReporter,
   WorkflowCallRunRelations,
 };
 
@@ -750,18 +751,51 @@ fn runtime_options_with_secrets(
   )
 }
 
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct NativeRuntimeCapabilities {
+  #[serde(default)]
+  process: Option<NativeProcessRuntime>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct NativeProcessRuntime {
+  mode: ProcessRuntimeMode,
+  policy: ProcessPolicyV1,
+}
+
+fn apply_runtime_capabilities(
+  options: RuntimeExecutionOptions,
+  runtime_capabilities_json: Option<String>,
+) -> napi::Result<RuntimeExecutionOptions> {
+  let Some(source) = runtime_capabilities_json else {
+    return Ok(options);
+  };
+  let capabilities: NativeRuntimeCapabilities = serde_json::from_str(&source).map_err(|error| {
+    napi::Error::from_reason(format!("Invalid runtime capabilities JSON: {error}"))
+  })?;
+  match capabilities.process {
+    Some(process) => options
+      .with_process_policy(process.policy, process.mode)
+      .map_err(|error| napi::Error::from_reason(error.to_string())),
+    None => Ok(options),
+  }
+}
+
 fn runtime_options_with_modules(
   bun_executable: String,
   script_host_path: String,
   script_timeout_ms: u32,
   resolved_secrets_json: String,
   runtime_modules_json: Option<String>,
+  runtime_capabilities_json: Option<String>,
 ) -> napi::Result<RuntimeExecutionOptions> {
   let modules: Vec<RuntimeModuleArtifact> =
     serde_json::from_str(runtime_modules_json.as_deref().unwrap_or("[]")).map_err(|error| {
       napi::Error::from_reason(format!("Invalid runtime modules JSON: {error}"))
     })?;
-  Ok(
+  apply_runtime_capabilities(
     runtime_options_with_secrets(
       bun_executable,
       script_host_path,
@@ -769,6 +803,7 @@ fn runtime_options_with_modules(
       resolved_secrets_json,
     )?
     .with_runtime_modules(modules),
+    runtime_capabilities_json,
   )
 }
 
@@ -779,6 +814,7 @@ fn runtime_options_with_progress(
   script_timeout_ms: u32,
   progress_callback: JsFunction,
   resolved_secrets_json: String,
+  runtime_capabilities_json: Option<String>,
 ) -> napi::Result<RuntimeExecutionOptions> {
   let mut progress = progress_callback
     .create_threadsafe_function::<String, String, _, ErrorStrategy::Fatal>(0, |context| {
@@ -787,7 +823,7 @@ fn runtime_options_with_progress(
   progress.unref(env)?;
   let lifecycle_progress = progress.clone();
   let runtime_policy_progress = lifecycle_progress.clone();
-  Ok(
+  apply_runtime_capabilities(
     runtime_options_with_secrets(
       bun_executable,
       script_host_path,
@@ -809,6 +845,7 @@ fn runtime_options_with_progress(
         let _ = runtime_policy_progress.call(json, ThreadsafeFunctionCallMode::Blocking);
       }
     })),
+    runtime_capabilities_json,
   )
 }
 
@@ -822,6 +859,7 @@ pub async fn execute_woml_workflow(
   script_timeout_ms: u32,
   resolved_secrets_json: String,
   runtime_modules_json: Option<String>,
+  runtime_capabilities_json: Option<String>,
 ) -> napi::Result<String> {
   let workflow: CompiledWorkflowDefinition =
     serde_json::from_str(&compiled_model_json).map_err(|error| {
@@ -835,6 +873,7 @@ pub async fn execute_woml_workflow(
     script_timeout_ms,
     resolved_secrets_json,
     runtime_modules_json,
+    runtime_capabilities_json,
   )?;
   let result = execute_workflow(workflow, definition_hash, trigger, options)
     .await
@@ -854,6 +893,7 @@ pub async fn execute_woml_workflow_durable(
   event_store_path: String,
   resolved_secrets_json: String,
   runtime_modules_json: Option<String>,
+  runtime_capabilities_json: Option<String>,
 ) -> napi::Result<String> {
   let mut decode_span = woml_engine::performance::PerformanceSpan::new_for_process(
     "native",
@@ -878,6 +918,7 @@ pub async fn execute_woml_workflow_durable(
     script_timeout_ms,
     resolved_secrets_json,
     runtime_modules_json,
+    runtime_capabilities_json,
   )?;
   decode_span.count("nodes", workflow.graph.nodes.len());
   decode_span.count("modules", options.runtime_modules.len());
@@ -926,6 +967,7 @@ pub fn execute_woml_workflow_durable_with_progress(
   progress_callback: JsFunction,
   resolved_secrets_json: String,
   runtime_modules_json: Option<String>,
+  runtime_capabilities_json: Option<String>,
 ) -> napi::Result<JsObject> {
   let mut decode_span = woml_engine::performance::PerformanceSpan::new_for_process(
     "native",
@@ -951,6 +993,7 @@ pub fn execute_woml_workflow_durable_with_progress(
     script_timeout_ms,
     progress_callback,
     resolved_secrets_json,
+    runtime_capabilities_json,
   )?;
   let modules: Vec<RuntimeModuleArtifact> =
     serde_json::from_str(runtime_modules_json.as_deref().unwrap_or("[]")).map_err(|error| {
@@ -1031,6 +1074,7 @@ pub fn resume_woml_workflow_durable_with_progress(
   progress_callback: JsFunction,
   resolved_secrets_json: String,
   runtime_modules_json: Option<String>,
+  runtime_capabilities_json: Option<String>,
 ) -> napi::Result<JsObject> {
   let workflow: CompiledWorkflowDefinition =
     serde_json::from_str(&compiled_model_json).map_err(|error| {
@@ -1044,6 +1088,7 @@ pub fn resume_woml_workflow_durable_with_progress(
     script_timeout_ms,
     progress_callback,
     resolved_secrets_json,
+    runtime_capabilities_json,
   )?;
   let modules: Vec<RuntimeModuleArtifact> =
     serde_json::from_str(runtime_modules_json.as_deref().unwrap_or("[]")).map_err(|error| {
@@ -1070,6 +1115,7 @@ pub async fn execute_woml_workflow_durable_outcome(
   event_store_path: String,
   resolved_secrets_json: String,
   runtime_modules_json: Option<String>,
+  runtime_capabilities_json: Option<String>,
 ) -> napi::Result<String> {
   let workflow: CompiledWorkflowDefinition =
     serde_json::from_str(&compiled_model_json).map_err(|error| {
@@ -1087,6 +1133,7 @@ pub async fn execute_woml_workflow_durable_outcome(
       script_timeout_ms,
       resolved_secrets_json,
       runtime_modules_json,
+      runtime_capabilities_json,
     )?,
     PathBuf::from(event_store_path),
   )
@@ -1110,6 +1157,7 @@ pub fn execute_woml_workflow_durable_outcome_with_progress(
   progress_callback: JsFunction,
   resolved_secrets_json: String,
   runtime_modules_json: Option<String>,
+  runtime_capabilities_json: Option<String>,
 ) -> napi::Result<JsObject> {
   let workflow: CompiledWorkflowDefinition =
     serde_json::from_str(&compiled_model_json).map_err(|error| {
@@ -1124,6 +1172,7 @@ pub fn execute_woml_workflow_durable_outcome_with_progress(
     script_timeout_ms,
     progress_callback,
     resolved_secrets_json,
+    runtime_capabilities_json,
   )?;
   let modules: Vec<RuntimeModuleArtifact> =
     serde_json::from_str(runtime_modules_json.as_deref().unwrap_or("[]")).map_err(|error| {
@@ -1157,6 +1206,7 @@ pub async fn resume_woml_workflow_durable_outcome(
   event_store_path: String,
   resolved_secrets_json: String,
   runtime_modules_json: Option<String>,
+  runtime_capabilities_json: Option<String>,
 ) -> napi::Result<String> {
   let workflow: CompiledWorkflowDefinition =
     serde_json::from_str(&compiled_model_json).map_err(|error| {
@@ -1186,6 +1236,7 @@ pub async fn resume_woml_workflow_durable_outcome(
       script_timeout_ms,
       resolved_secrets_json,
       runtime_modules_json,
+      runtime_capabilities_json,
     )?,
   )
   .await
@@ -1208,6 +1259,7 @@ pub fn resume_woml_workflow_durable_outcome_with_progress(
   progress_callback: JsFunction,
   resolved_secrets_json: String,
   runtime_modules_json: Option<String>,
+  runtime_capabilities_json: Option<String>,
 ) -> napi::Result<JsObject> {
   let workflow: CompiledWorkflowDefinition =
     serde_json::from_str(&compiled_model_json).map_err(|error| {
@@ -1221,6 +1273,7 @@ pub fn resume_woml_workflow_durable_outcome_with_progress(
     script_timeout_ms,
     progress_callback,
     resolved_secrets_json,
+    runtime_capabilities_json,
   )?;
   let modules: Vec<RuntimeModuleArtifact> =
     serde_json::from_str(runtime_modules_json.as_deref().unwrap_or("[]")).map_err(|error| {
@@ -1328,6 +1381,7 @@ pub fn resume_woml_stored_run_with_progress(
   event_store_path: String,
   progress_callback: JsFunction,
   resolved_secrets_json: String,
+  runtime_capabilities_json: Option<String>,
 ) -> napi::Result<JsObject> {
   let options = runtime_options_with_progress(
     &env,
@@ -1336,6 +1390,7 @@ pub fn resume_woml_stored_run_with_progress(
     script_timeout_ms,
     progress_callback,
     resolved_secrets_json,
+    runtime_capabilities_json,
   )?;
   env.spawn_future(async move {
     let outcome =
@@ -1442,6 +1497,7 @@ pub fn start_woml_webhook_runtime(
   deployment_id: String,
   activation_id: String,
   start_suspended: bool,
+  runtime_capabilities_json: Option<String>,
   progress_callback: JsFunction,
 ) -> napi::Result<JsObject> {
   let mut decode_span = woml_engine::performance::PerformanceSpan::new_for_process(
@@ -1526,8 +1582,9 @@ pub fn start_woml_webhook_runtime(
     .with_schedule_progress_reporter(schedule_progress_reporter)
     .with_interval_progress_reporter(interval_progress_reporter)
     .with_workflow_call_progress_reporter(workflow_call_progress_reporter)
-    .with_runtime_policy_progress_reporter(runtime_policy_progress_reporter)
-    .with_shared_script_hosts();
+    .with_runtime_policy_progress_reporter(runtime_policy_progress_reporter);
+  let execution =
+    apply_runtime_capabilities(execution, runtime_capabilities_json)?.with_shared_script_hosts();
   let config = WomlWebhookServerConfig {
     bind_address,
     database_path: PathBuf::from(event_store_path),

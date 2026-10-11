@@ -426,6 +426,7 @@ cp -R skills/woml .agents/skills/woml
 - [Language reference](./docs/language-reference.md)
 - [CLI reference](./docs/cli-reference.md)
 - [Services and capabilities](./docs/woml-services.md)
+- [Run local tools safely](./docs/woml-process.md)
 - [Modules](./docs/woml-modules.md)
 - [Communication providers](./docs/woml-communication-providers.md)
 - [Production deployment](./docs/woml-production-deployment.md)

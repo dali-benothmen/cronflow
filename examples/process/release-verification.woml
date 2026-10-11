@@ -1,0 +1,41 @@
+<woml>
+  <workflow
+    id="release-verification"
+    name="Build and verify release"
+    description="Build the project and verify its release artifact without publishing it."
+    version="1.0.0"
+  >
+    <triggers><manual id="start" /></triggers>
+    <steps>
+      <step id="build" name="Build release artifact">
+        <script>
+          return await services.process.run({
+            executable: "bun",
+            args: ["run", "build"],
+            timeout: "10m",
+            output: { stdout: "capture", stderr: "capture", maxBytes: 65536 }
+          }, { name: "release-build" });
+        </script>
+      </step>
+      <step id="verify" name="Verify release artifact">
+        <script>
+          return await services.process.run({
+            executable: "bun",
+            args: ["run", "test:release"],
+            timeout: "10m",
+            output: { stdout: "capture", stderr: "capture", maxBytes: 65536 }
+          }, { name: "release-verification" });
+        </script>
+      </step>
+      <step id="summary" name="Confirm verified artifact">
+        <script>
+          return {
+            built: context.steps.build.exitCode === 0,
+            verified: context.steps.verify.exitCode === 0,
+            published: false
+          };
+        </script>
+      </step>
+    </steps>
+  </workflow>
+</woml>

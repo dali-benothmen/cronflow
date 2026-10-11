@@ -7943,24 +7943,9 @@ impl DurableEventStore {
             capability: operation.capability.clone(),
             operation: operation.operation.clone(),
             execution_mode: operation.execution_mode,
-            metadata: operation.metadata.clone(),
+            metadata: interrupted_operation_metadata(operation),
             duration_ms: 0.0,
-            failure: crate::CapabilityFailure {
-              kind: crate::CapabilityFailureKind::Interrupted,
-              code: if observed {
-                "WOML_NATIVE_FETCH_INTERRUPTED".to_string()
-              } else {
-                "WOML_CAPABILITY_INTERRUPTED".to_string()
-              },
-              message: if observed {
-                "Recovery found native Fetch without a durable terminal observation; its outcome is ambiguous and it will not be replayed.".to_string()
-              } else {
-                "Recovery found a managed operation without a durable terminal event; it will not be replayed.".to_string()
-              },
-              retryable: false,
-              ambiguous: true,
-              details: None,
-            },
+            failure: interrupted_operation_failure(operation, observed, false),
           }),
         )?;
       }
@@ -10498,6 +10483,56 @@ fn interrupted_failure() -> AttemptFailure {
   }
 }
 
+fn interrupted_operation_failure(
+  operation: &crate::projection::OperationProjection,
+  observed: bool,
+  loop_owned: bool,
+) -> crate::CapabilityFailure {
+  let process = operation.capability == "process" && operation.operation == "run";
+  let (code, message) = if process {
+    (
+      "WOML_PROCESS_INTERRUPTED",
+      "Recovery found an approved process start without a durable terminal outcome; the process result is ambiguous and WOML will not replay it.",
+    )
+  } else if observed {
+    (
+      "WOML_NATIVE_FETCH_INTERRUPTED",
+      "Recovery found native Fetch without a durable terminal observation; its outcome is ambiguous and it will not be replayed.",
+    )
+  } else if loop_owned {
+    (
+      "WOML_CAPABILITY_INTERRUPTED",
+      "Recovery found a loop-owned operation without a durable terminal event; its outcome is ambiguous and it will not be replayed.",
+    )
+  } else {
+    (
+      "WOML_CAPABILITY_INTERRUPTED",
+      "Recovery found a managed operation without a durable terminal event; it will not be replayed.",
+    )
+  };
+  crate::CapabilityFailure {
+    kind: crate::CapabilityFailureKind::Interrupted,
+    code: code.to_string(),
+    message: message.to_string(),
+    retryable: false,
+    ambiguous: true,
+    details: None,
+  }
+}
+
+fn interrupted_operation_metadata(
+  operation: &crate::projection::OperationProjection,
+) -> serde_json::Map<String, serde_json::Value> {
+  let mut metadata = operation.metadata.clone();
+  if operation.capability == "process" && operation.operation == "run" {
+    metadata.insert(
+      "outcome".to_string(),
+      serde_json::Value::String("interrupted".to_string()),
+    );
+  }
+  metadata
+}
+
 fn for_each_recovery_failure_kind(kind: AttemptFailureKind) -> ForEachIterationFailureKind {
   match kind {
     AttemptFailureKind::ScriptThrew => ForEachIterationFailureKind::ScriptThrew,
@@ -10755,16 +10790,9 @@ fn recover_open_for_each_failure(
           capability: operation.capability.clone(),
           operation: operation.operation.clone(),
           execution_mode: operation.execution_mode,
-          metadata: operation.metadata.clone(),
+          metadata: interrupted_operation_metadata(operation),
           duration_ms: 0.0,
-          failure: crate::CapabilityFailure {
-            kind: crate::CapabilityFailureKind::Interrupted,
-            code: "WOML_CAPABILITY_INTERRUPTED".to_string(),
-            message: "Recovery found a loop-owned operation without a durable terminal event; its outcome is ambiguous and it will not be replayed.".to_string(),
-            retryable: false,
-            ambiguous: true,
-            details: None,
-          },
+          failure: interrupted_operation_failure(operation, false, true),
         }),
       )?;
     }

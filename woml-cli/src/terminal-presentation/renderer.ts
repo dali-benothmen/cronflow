@@ -48,6 +48,7 @@ interface ResolvedRenderOptions {
   readonly timeZone?: string;
   readonly fullResultCommand: (runId: string) => string;
   readonly manualInstruction: string;
+  readonly now: number;
 }
 
 function clamp(value: number, minimum: number, maximum: number): number {
@@ -72,6 +73,7 @@ function resolveOptions(options: PresentationRenderOptions = {}): ResolvedRender
     timeZone: options.timeZone,
     fullResultCommand: options.fullResultCommand ?? (runId => `woml get ${runId} --json`),
     manualInstruction: options.manualInstruction ?? 'Press Enter to start a run',
+    now: options.now ?? Date.now(),
   };
 }
 
@@ -545,9 +547,35 @@ function stepLines(step: StepPresentationV1, index: number, runId: string, optio
   }
   const kindAlreadyShown = step.kind === 'custom_step' && step.description !== undefined;
   if (step.detail !== undefined || (!['step', 'script'].includes(step.kind) && !kindAlreadyShown)) {
-    const detail = step.detail === undefined ? stepKind(step.kind) : `${stepKind(step.kind)} · ${step.detail}`;
-    for (const line of wrap(detail, Math.max(12, options.width - visibleLength(contentIndent)))) {
-      lines.push(`${contentIndent}${paint(line, 'dim', options.color)}`);
+    if (step.detail?.startsWith('Process ')) {
+      for (const operation of step.detail.split('; ')) {
+        const startedAt = step.startedAt === undefined
+          ? undefined
+          : Date.parse(step.startedAt);
+        const runningDuration =
+          operation.includes(' · running') &&
+          startedAt !== undefined &&
+          Number.isFinite(startedAt)
+            ? Math.max(0, options.now - startedAt)
+            : undefined;
+        const visibleOperation = runningDuration === undefined
+          ? operation
+          : operation.replace(' · running', ` · running for ${duration(runningDuration)}`);
+        const color = visibleOperation.includes(' · succeeded')
+          ? 'green'
+          : visibleOperation.includes(' · running')
+            ? 'yellow'
+            : 'red';
+        const activity = `${options.unicode ? '↳' : '>'} ${visibleOperation}`;
+        for (const line of wrap(activity, Math.max(12, options.width - visibleLength(contentIndent)))) {
+          lines.push(`${contentIndent}${paint(line, color, options.color)}`);
+        }
+      }
+    } else {
+      const detail = step.detail === undefined ? stepKind(step.kind) : `${stepKind(step.kind)} · ${step.detail}`;
+      for (const line of wrap(detail, Math.max(12, options.width - visibleLength(contentIndent)))) {
+        lines.push(`${contentIndent}${paint(line, 'dim', options.color)}`);
+      }
     }
   }
   if (step.result !== undefined) {

@@ -1152,6 +1152,16 @@ or enters `context`; the complete contract and operational guide are
 documented in `docs/protocols/durable-state-v1.md` and
 `docs/woml-durable-state.md`.
 
+`services.process.run(request, options?)` executes one operator-approved local
+tool through the Rust process authority. The request uses an executable alias
+plus a literal argument array; there is no shell string or `shell` option.
+Working directory, environment, timeout, output, and concurrency are bounded by
+Process Policy v1. Process execution is disabled by default and requires
+`--allow-process` for a foreground review or `--process-policy` for durable
+runtime authority. Results expose exit or signal status, bounded stdout and
+stderr, byte and truncation counts, and duration. See
+[Process execution](woml-process.md).
+
 `services.events.emit(name, payload, options?)` directly fans out a named event
 to loaded `<event>` subscribers without HTTP or a publisher credential. Rust
 derives a stable publication identity, durably admits child runs, and protects
