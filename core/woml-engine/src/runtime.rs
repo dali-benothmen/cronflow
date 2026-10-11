@@ -558,6 +558,21 @@ impl RuntimeExecutionOptions {
     self
   }
 
+  /// Enables the managed process capability for this runtime only after the
+  /// runtime-owned Process Policy v1 has been validated by the Rust core.
+  pub fn with_process_policy(
+    self,
+    policy: crate::ProcessPolicyV1,
+    mode: crate::ProcessRuntimeMode,
+  ) -> Result<Self, crate::ProcessPolicyError> {
+    let handler = crate::ManagedProcessHandler::new(policy, mode)?;
+    self
+      .capability_registry
+      .register(Arc::new(handler))
+      .map_err(|error| crate::ProcessPolicyError::Invalid(error.to_string()))?;
+    Ok(self)
+  }
+
   pub fn with_schedule_progress_reporter(mut self, reporter: ScheduleProgressReporter) -> Self {
     self.schedule_progress_reporter = Some(reporter);
     self

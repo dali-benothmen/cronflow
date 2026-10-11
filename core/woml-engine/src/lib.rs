@@ -27,6 +27,7 @@ pub mod notification_runtime;
 #[doc(hidden)]
 pub mod performance;
 pub mod presentation;
+pub mod process;
 pub mod projection;
 pub mod protocol;
 pub mod retention;
@@ -177,6 +178,11 @@ pub use presentation::{
   RUN_PRESENTATION_MAX_BYTES, RUN_PRESENTATION_MAX_EVENTS, RUN_PRESENTATION_MAX_ITERATIONS,
   RUN_PRESENTATION_MAX_LIFECYCLE, RUN_PRESENTATION_MAX_STEPS, RUN_PRESENTATION_MAX_WARNINGS,
   RUN_PRESENTATION_PROFILE, RUN_PRESENTATION_RECENT_LIMIT,
+};
+pub use process::{
+  ManagedProcessHandler, ProcessPolicyEnvironment, ProcessPolicyError, ProcessPolicyExecutable,
+  ProcessPolicyLimits, ProcessPolicyModes, ProcessPolicyV1, ProcessRuntimeMode, PROCESS_CONTRACT,
+  PROCESS_CONTRACT_VERSION, PROCESS_POLICY_CONTRACT, PROCESS_POLICY_CONTRACT_VERSION,
 };
 pub use projection::{
   fold_events, ApprovalRequestProjection, ApprovalRequestStatus, FoldError, ForkBranchProjection,
