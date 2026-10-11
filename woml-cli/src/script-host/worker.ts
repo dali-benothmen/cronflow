@@ -1151,6 +1151,43 @@ function publicArtifactResult(
   return data.path;
 }
 
+function redactMaterializedPaths(
+  value: string,
+  materializedPaths: ReadonlySet<string>
+): string {
+  let redacted = value;
+  for (const path of materializedPaths) {
+    redacted = redacted.split(path).join('[materialized-artifact]');
+  }
+  return redacted;
+}
+
+function containsMaterializedPath(
+  value: unknown,
+  materializedPaths: ReadonlySet<string>,
+  seen: WeakSet<object> = new WeakSet()
+): boolean {
+  if (typeof value === 'string') {
+    for (const path of materializedPaths) {
+      if (value.includes(path)) return true;
+    }
+    return false;
+  }
+  if (value !== null && typeof value === 'object') {
+    if (seen.has(value)) return false;
+    seen.add(value);
+    if (Array.isArray(value)) {
+      return value.some(item =>
+        containsMaterializedPath(item, materializedPaths, seen)
+      );
+    }
+    return Object.values(value).some(item =>
+      containsMaterializedPath(item, materializedPaths, seen)
+    );
+  }
+  return false;
+}
+
 function normalizeTelegramSend(input: JsonValue): JsonObject {
   const object = plainObject(input);
   if (object === undefined) {
@@ -2096,7 +2133,8 @@ function publicWorkflowResult(
 
 function deeplyReadonlyServiceFacade(
   request: ScriptWorkerRequest,
-  executionDeadline: number
+  executionDeadline: number,
+  materializedPaths: Set<string>
 ): unknown {
   if (request.attempt === undefined || request.bindings === undefined) {
     return Object.freeze({});
@@ -2556,11 +2594,16 @@ function deeplyReadonlyServiceFacade(
               'services.artifacts.materialize() requires exactly one Artifact Reference v1 value.'
             );
           }
-          return invokeCapability(
+          const path = await invokeCapability(
             'artifacts',
             'materialize',
             normalizeArtifactReferenceRequest('materialize', args[0])
           );
+          if (typeof path !== 'string') {
+            throw new TypeError('Rust returned an invalid artifact materialization.');
+          }
+          materializedPaths.add(path);
+          return path;
         };
         Object.freeze(put);
         Object.freeze(head);
@@ -2780,6 +2823,7 @@ async function executeScript(
   request: ScriptWorkerRequest
 ): Promise<ScriptWorkerResponse> {
   let secretValues: readonly string[] = [];
+  const materializedPaths = new Set<string>();
   try {
     const prepared = profileSync('worker', 'worker.prepare_context', measurements => {
       identifyInvocation(measurements, request);
@@ -2844,36 +2888,49 @@ async function executeScript(
     const safeConsole = Object.freeze({
       log: (...values: unknown[]) =>
         globalThis.console.error(
-          redactKnownSecrets(
-            values.map(value => String(value)).join(' '),
-            secretValues
+          redactMaterializedPaths(
+            redactKnownSecrets(
+              values.map(value => String(value)).join(' '),
+              secretValues
+            ),
+            materializedPaths
           )
         ),
       info: (...values: unknown[]) =>
         globalThis.console.error(
-          redactKnownSecrets(
-            values.map(value => String(value)).join(' '),
-            secretValues
+          redactMaterializedPaths(
+            redactKnownSecrets(
+              values.map(value => String(value)).join(' '),
+              secretValues
+            ),
+            materializedPaths
           )
         ),
       warn: (...values: unknown[]) =>
         globalThis.console.error(
-          redactKnownSecrets(
-            values.map(value => String(value)).join(' '),
-            secretValues
+          redactMaterializedPaths(
+            redactKnownSecrets(
+              values.map(value => String(value)).join(' '),
+              secretValues
+            ),
+            materializedPaths
           )
         ),
       error: (...values: unknown[]) =>
         globalThis.console.error(
-          redactKnownSecrets(
-            values.map(value => String(value)).join(' '),
-            secretValues
+          redactMaterializedPaths(
+            redactKnownSecrets(
+              values.map(value => String(value)).join(' '),
+              secretValues
+            ),
+            materializedPaths
           )
         ),
     });
     const builtInServices = deeplyReadonlyServiceFacade(
       request,
-      executionDeadline
+      executionDeadline,
+      materializedPaths
     );
     const nativeFetch = trackedNativeFetch(request);
     const services = await profileAsync(
@@ -3022,6 +3079,11 @@ async function executeScript(
     ) {
       result = null;
     }
+    if (containsMaterializedPath(result, materializedPaths)) {
+      throw new TypeError(
+        'A materialized artifact path is attempt-scoped and cannot be returned as workflow data. Return its Artifact Reference v1 value instead.'
+      );
+    }
     const violation = profileSync('worker', 'worker.validate_result', measurements => {
       identifyInvocation(measurements, request);
       const violation = findJsonViolation(result);
@@ -3045,7 +3107,11 @@ async function executeScript(
     }
     return { ok: true, result: result as JsonValue };
   } catch (error) {
-    return serializeError(error, secretValues, request.modules);
+    return serializeError(
+      error,
+      [...secretValues, ...materializedPaths],
+      request.modules
+    );
   }
 }
 

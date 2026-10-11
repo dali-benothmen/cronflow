@@ -43,6 +43,28 @@
           return { artifact };
         </script>
       </step>
+
+      <step id="consumeReport" name="Verify and consume report">
+        <script>
+          const artifact = context.steps.preserveReport.artifact;
+          const metadata = await services.artifacts.head(artifact);
+          const path = await services.artifacts.materialize(artifact);
+          const consumed = await services.process.run({
+            executable: "bun",
+            args: [
+              "-e",
+              "console.log(await Bun.file(Bun.argv[1]).text())",
+              path
+            ],
+            timeout: "10s"
+          }, { name: "consume-report-file" });
+          return {
+            artifact,
+            integrity: metadata.integrity,
+            report: JSON.parse(consumed.stdout)
+          };
+        </script>
+      </step>
     </steps>
   </workflow>
 </woml>

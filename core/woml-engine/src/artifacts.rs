@@ -168,6 +168,8 @@ pub(crate) struct PreparedArtifactPolicy {
   project_root: PathBuf,
   read_roots: Vec<PathBuf>,
   backend_directory: PathBuf,
+  materialization_directory: PathBuf,
+  max_materialization_bytes_per_attempt: u64,
   limits: ArtifactLimits,
   retention: ArtifactRetentionPolicy,
   secret_action: KnownSecretAction,
@@ -191,6 +193,29 @@ struct ArtifactPutInputV1 {
   name: String,
   content_type: String,
   retention_ms: u64,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct ArtifactReferenceRequestV1 {
+  contract: String,
+  contract_version: u32,
+  kind: String,
+  operation: String,
+  input: ArtifactReferenceInputV1,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ArtifactReferenceInputV1 {
+  artifact: ArtifactReferenceV1,
+}
+
+#[derive(Debug, Clone)]
+struct AuthorizedArtifact {
+  reference: ArtifactReferenceV1,
+  created_at: String,
+  expires_at: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -217,6 +242,7 @@ trait ArtifactBackend: Send + Sync {
   fn publish(&self, stage: ArtifactStage, sha256: &str, size: u64)
     -> Result<(), CapabilityFailure>;
   fn cleanup_startup(&self, connection: &Connection) -> Result<(), CapabilityFailure>;
+  fn verify(&self, sha256: &str, size: u64) -> Result<PathBuf, CapabilityFailure>;
 }
 
 #[derive(Debug)]
@@ -234,9 +260,8 @@ struct ArtifactStage {
 
 impl Drop for ArtifactStage {
   fn drop(&mut self) {
-    if self.file.take().is_some() {
-      let _ = fs::remove_file(&self.path);
-    }
+    self.file.take();
+    let _ = fs::remove_file(&self.path);
   }
 }
 
@@ -290,6 +315,71 @@ impl LocalArtifactBackend {
       return Err(artifact_corrupt());
     }
     Ok(())
+  }
+
+  fn bind_store(&self, connection: &Connection, store_id: &str) -> Result<(), CapabilityFailure> {
+    let marker = self.root.join("store-id");
+    match fs::read_to_string(&marker) {
+      Ok(value) => {
+        if value != format!("woml.artifact-store/v1\n{store_id}\n") {
+          return Err(backend_unavailable());
+        }
+        return Ok(());
+      }
+      Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+      Err(_) => return Err(backend_unavailable()),
+    }
+    // A pre-marker DA3 store may be adopted only when every published blob is
+    // already reachable from this SQLite authority. This prevents a newly
+    // selected state database from claiming or collecting another store.
+    for prefix in fs::read_dir(&self.blobs).map_err(|_| backend_unavailable())? {
+      let prefix = prefix.map_err(|_| backend_unavailable())?;
+      if !prefix
+        .file_type()
+        .map_err(|_| backend_unavailable())?
+        .is_dir()
+      {
+        return Err(backend_unavailable());
+      }
+      for entry in fs::read_dir(prefix.path()).map_err(|_| backend_unavailable())? {
+        let entry = entry.map_err(|_| backend_unavailable())?;
+        if !entry
+          .file_type()
+          .map_err(|_| backend_unavailable())?
+          .is_file()
+        {
+          return Err(backend_unavailable());
+        }
+        let digest = format!(
+          "{}{}",
+          prefix.file_name().to_string_lossy(),
+          entry.file_name().to_string_lossy()
+        );
+        let reachable: bool = connection
+          .query_row(
+            "SELECT EXISTS(SELECT 1 FROM woml_artifact_blobs WHERE sha256 = ?1)",
+            [&digest],
+            |row| row.get(0),
+          )
+          .map_err(|_| backend_unavailable())?;
+        if !reachable {
+          return Err(backend_unavailable());
+        }
+      }
+    }
+    let mut options = OpenOptions::new();
+    options.create_new(true).write(true);
+    #[cfg(unix)]
+    {
+      use std::os::unix::fs::OpenOptionsExt;
+      options.mode(0o600);
+    }
+    let mut file = options.open(&marker).map_err(|_| backend_unavailable())?;
+    file
+      .write_all(format!("woml.artifact-store/v1\n{store_id}\n").as_bytes())
+      .map_err(|_| backend_unavailable())?;
+    file.sync_all().map_err(|_| backend_unavailable())?;
+    sync_directory(&self.root)
   }
 }
 
@@ -384,6 +474,12 @@ impl ArtifactBackend for LocalArtifactBackend {
     }
     sync_directory(&self.root)
   }
+
+  fn verify(&self, sha256: &str, size: u64) -> Result<PathBuf, CapabilityFailure> {
+    let path = self.blob_path(sha256);
+    self.verify_blob(&path, sha256, size)?;
+    Ok(path)
+  }
 }
 
 #[derive(Default)]
@@ -435,12 +531,20 @@ impl ManagedArtifactStore {
       .clone()
       .ok_or_else(backend_unavailable)
   }
+
+  pub(crate) fn cleanup_invocation(&self, invocation_id: &str) {
+    let Ok(store) = self.configured() else {
+      return;
+    };
+    let _ = store.cleanup_materialization(invocation_id);
+  }
 }
 
 struct ArtifactStore {
   state_path: PathBuf,
   policy: Arc<PreparedArtifactPolicy>,
   backend: LocalArtifactBackend,
+  materializations: PathBuf,
 }
 
 impl std::fmt::Debug for ArtifactStore {
@@ -462,16 +566,42 @@ impl ArtifactStore {
     let state_path = fs::canonicalize(state_path).map_err(|_| backend_unavailable())?;
     harden_file_permissions(&state_path)?;
     let backend = LocalArtifactBackend::open(&policy.backend_directory)?;
+    ensure_private_directory(&policy.materialization_directory)?;
+    let materializations = fs::canonicalize(&policy.materialization_directory)
+      .map_err(|_| materialization_unavailable())?;
+    cleanup_directory_contents(&materializations)?;
     let store = Self {
       state_path,
       policy,
       backend,
+      materializations,
     };
     let connection = store.connection()?;
     initialize_schema(&connection)?;
     validate_schema(&connection)?;
+    let store_id = ensure_store_identity(&connection)?;
+    store.backend.bind_store(&connection, &store_id)?;
     store.backend.cleanup_startup(&connection)?;
     Ok(store)
+  }
+
+  fn invocation_materialization_directory(&self, invocation_id: &str) -> PathBuf {
+    let mut digest = Sha256::new();
+    digest.update(b"woml.artifact-materialization\0v1\0");
+    digest.update(invocation_id.as_bytes());
+    self.materializations.join(hex::encode(digest.finalize()))
+  }
+
+  fn cleanup_materialization(&self, invocation_id: &str) -> Result<(), CapabilityFailure> {
+    let directory = self.invocation_materialization_directory(invocation_id);
+    match fs::symlink_metadata(&directory) {
+      Ok(metadata) if metadata.is_dir() && !metadata.file_type().is_symlink() => {
+        fs::remove_dir_all(directory).map_err(|_| materialization_unavailable())
+      }
+      Ok(_) => Err(materialization_unavailable()),
+      Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+      Err(_) => Err(materialization_unavailable()),
+    }
   }
 
   fn connection(&self) -> Result<Connection, CapabilityFailure> {
@@ -705,6 +835,162 @@ impl ArtifactStore {
     Ok(())
   }
 
+  fn head(
+    &self,
+    request: &CapabilityCallRequest,
+    parsed: &ArtifactReferenceRequestV1,
+  ) -> Result<Value, CapabilityFailure> {
+    let artifact = self.authorize_reference(&request.run_id, &parsed.input.artifact)?;
+    self
+      .backend
+      .verify(&artifact.reference.sha256, artifact.reference.size)?;
+    Ok(json!({
+      "contract": ARTIFACTS_CONTRACT,
+      "contractVersion": ARTIFACTS_CONTRACT_VERSION,
+      "kind": "result",
+      "operation": "head",
+      "data": {
+        "artifact": artifact.reference,
+        "createdAt": artifact.created_at,
+        "expiresAt": artifact.expires_at,
+        "integrity": "verified"
+      }
+    }))
+  }
+
+  fn materialize(
+    &self,
+    request: &CapabilityCallRequest,
+    parsed: &ArtifactReferenceRequestV1,
+    cancellation: &CapabilityCancellationToken,
+  ) -> Result<Value, CapabilityFailure> {
+    let artifact = self.authorize_reference(&request.run_id, &parsed.input.artifact)?;
+    if artifact.reference.size > self.policy.max_materialization_bytes_per_attempt {
+      return Err(artifact_too_large());
+    }
+    let source_path = self
+      .backend
+      .verify(&artifact.reference.sha256, artifact.reference.size)?;
+    let directory = self.invocation_materialization_directory(&request.invocation_id);
+    ensure_private_directory(&directory).map_err(|_| materialization_unavailable())?;
+    let existing_bytes = directory_bytes(&directory)?;
+    let final_path = directory.join(&artifact.reference.id);
+    if final_path.exists() {
+      verify_materialized_file(
+        &final_path,
+        &artifact.reference.sha256,
+        artifact.reference.size,
+      )?;
+    } else {
+      if existing_bytes.saturating_add(artifact.reference.size)
+        > self.policy.max_materialization_bytes_per_attempt
+      {
+        return Err(artifact_too_large());
+      }
+      stream_materialization(
+        &source_path,
+        &final_path,
+        &artifact.reference.sha256,
+        artifact.reference.size,
+        cancellation,
+      )?;
+    }
+    let path = final_path
+      .to_str()
+      .filter(|path| path.len() <= 4_096)
+      .ok_or_else(materialization_unavailable)?;
+    Ok(json!({
+      "contract": ARTIFACTS_CONTRACT,
+      "contractVersion": ARTIFACTS_CONTRACT_VERSION,
+      "kind": "result",
+      "operation": "materialize",
+      "data": {
+        "artifact": artifact.reference,
+        "path": path
+      }
+    }))
+  }
+
+  fn authorize_reference(
+    &self,
+    run_id: &str,
+    supplied: &ArtifactReferenceV1,
+  ) -> Result<AuthorizedArtifact, CapabilityFailure> {
+    validate_reference(supplied)?;
+    let connection = self.connection()?;
+    validate_schema(&connection)?;
+    let stored: Option<(String, String, u64, String, String, String, String, String)> = connection
+      .query_row(
+        "SELECT a.artifact_id, a.name, a.size, a.sha256, a.content_type,
+                a.status, a.created_at, r.expires_at
+         FROM woml_artifacts a
+         JOIN woml_artifact_retention r ON r.artifact_id = a.artifact_id
+         WHERE a.artifact_id = ?1",
+        [&supplied.id],
+        |row| {
+          Ok((
+            row.get(0)?,
+            row.get(1)?,
+            row.get(2)?,
+            row.get(3)?,
+            row.get(4)?,
+            row.get(5)?,
+            row.get(6)?,
+            row.get(7)?,
+          ))
+        },
+      )
+      .optional()
+      .map_err(|_| backend_unavailable())?;
+    let Some((id, name, size, sha256, content_type, status, created_at, expires_at)) = stored
+    else {
+      return Err(artifact_not_found());
+    };
+    let authorized: bool = connection
+      .query_row(
+        "SELECT EXISTS(
+           SELECT 1 FROM woml_artifact_access
+           WHERE artifact_id = ?1 AND run_id = ?2 AND revoked_at IS NULL
+         )",
+        params![id, run_id],
+        |row| row.get(0),
+      )
+      .map_err(|_| backend_unavailable())?;
+    if !authorized {
+      return Err(artifact_access_denied());
+    }
+    match status.as_str() {
+      "available" => {}
+      "expired" => return Err(artifact_expired()),
+      "quarantined" => return Err(artifact_quarantined()),
+      "corrupt" => return Err(artifact_corrupt()),
+      "deleted" => return Err(artifact_not_found()),
+      _ => return Err(artifact_corrupt()),
+    }
+    let expires =
+      chrono::DateTime::parse_from_rfc3339(&expires_at).map_err(|_| artifact_corrupt())?;
+    if expires <= Utc::now() {
+      return Err(artifact_expired());
+    }
+    let reference = ArtifactReferenceV1 {
+      contract: ARTIFACT_REFERENCE_CONTRACT.to_string(),
+      contract_version: ARTIFACT_REFERENCE_CONTRACT_VERSION,
+      id,
+      name,
+      size,
+      sha256,
+      content_type,
+    };
+    if &reference != supplied {
+      return Err(artifact_access_denied());
+    }
+    Ok(AuthorizedArtifact {
+      reference,
+      created_at,
+      expires_at,
+    })
+  }
+
   fn read_source(
     &self,
     authored: &str,
@@ -802,6 +1088,24 @@ impl ManagedArtifactPutHandler {
 
   pub(crate) fn policy(&self) -> Arc<PreparedArtifactPolicy> {
     Arc::clone(&self.policy)
+  }
+
+  pub fn head_handler(&self) -> ManagedArtifactReadHandler {
+    ManagedArtifactReadHandler {
+      store: Arc::clone(&self.store),
+      policy: Arc::clone(&self.policy),
+      concurrency: Arc::clone(&self.concurrency),
+      operation: ArtifactReadOperation::Head,
+    }
+  }
+
+  pub fn materialize_handler(&self) -> ManagedArtifactReadHandler {
+    ManagedArtifactReadHandler {
+      store: Arc::clone(&self.store),
+      policy: Arc::clone(&self.policy),
+      concurrency: Arc::clone(&self.concurrency),
+      operation: ArtifactReadOperation::Materialize,
+    }
   }
 }
 
@@ -961,6 +1265,169 @@ impl CapabilityHandler for ManagedArtifactPutHandler {
   }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ArtifactReadOperation {
+  Head,
+  Materialize,
+}
+
+impl ArtifactReadOperation {
+  fn as_str(self) -> &'static str {
+    match self {
+      Self::Head => "head",
+      Self::Materialize => "materialize",
+    }
+  }
+}
+
+#[derive(Debug)]
+pub struct ManagedArtifactReadHandler {
+  store: Arc<ManagedArtifactStore>,
+  policy: Arc<PreparedArtifactPolicy>,
+  concurrency: Arc<Semaphore>,
+  operation: ArtifactReadOperation,
+}
+
+impl CapabilityHandler for ManagedArtifactReadHandler {
+  fn descriptor(&self) -> CapabilityDescriptor {
+    CapabilityDescriptor {
+      capability: "artifacts".to_string(),
+      operation: self.operation.as_str().to_string(),
+      input_contract_version: ARTIFACTS_CONTRACT_VERSION,
+      result_contract_version: ARTIFACTS_CONTRACT_VERSION,
+      effect: CapabilityEffect::Read,
+      supports_cancellation: true,
+      supports_provider_idempotency: false,
+    }
+  }
+
+  fn validate_request(&self, request: &CapabilityCallRequest) -> Result<(), CapabilityFailure> {
+    parse_reference_request(&request.input, self.operation.as_str())?;
+    if request.identity.mode != CapabilityIdentityMode::Automatic {
+      return Err(artifact_access_denied());
+    }
+    Ok(())
+  }
+
+  fn safe_request_metadata(
+    &self,
+    _request: &CapabilityCallRequest,
+  ) -> Result<Map<String, Value>, CapabilityFailure> {
+    Ok(Map::from_iter([
+      (
+        "profile".to_string(),
+        json!("woml.artifact-operation-metadata/v1"),
+      ),
+      ("operation".to_string(), json!(self.operation.as_str())),
+      ("outcome".to_string(), json!("started")),
+    ]))
+  }
+
+  fn safe_result_metadata(&self, result: &Value) -> Map<String, Value> {
+    let mut metadata = Map::from_iter([
+      (
+        "profile".to_string(),
+        json!("woml.artifact-operation-metadata/v1"),
+      ),
+      ("operation".to_string(), json!(self.operation.as_str())),
+      ("outcome".to_string(), json!("succeeded")),
+    ]);
+    let artifact = result.get("data").and_then(|data| data.get("artifact"));
+    if let Some(artifact) = artifact {
+      for (from, to) in [("id", "artifactId"), ("size", "size")] {
+        if let Some(value) = artifact.get(from) {
+          metadata.insert(to.to_string(), value.clone());
+        }
+      }
+      if let Some(digest) = artifact.get("sha256").and_then(Value::as_str) {
+        metadata.insert(
+          "contentDigest".to_string(),
+          json!(format!("sha256:{digest}")),
+        );
+      }
+    }
+    metadata
+  }
+
+  fn safe_failure_metadata(&self, failure: &CapabilityFailure) -> Map<String, Value> {
+    Map::from_iter([
+      (
+        "profile".to_string(),
+        json!("woml.artifact-operation-metadata/v1"),
+      ),
+      ("operation".to_string(), json!(self.operation.as_str())),
+      (
+        "outcome".to_string(),
+        json!(if failure.kind == CapabilityFailureKind::Cancelled {
+          "cancelled"
+        } else {
+          "failed"
+        }),
+      ),
+      ("errorCode".to_string(), json!(failure.code)),
+      ("ambiguous".to_string(), json!(failure.ambiguous)),
+    ])
+  }
+
+  fn execute(
+    &self,
+    _input: Value,
+    _cancellation: CapabilityCancellationToken,
+  ) -> BoxFuture<'static, Result<Value, CapabilityFailure>> {
+    Box::pin(async { Err(backend_unavailable()) })
+  }
+
+  fn execute_request_scoped(
+    &self,
+    request: &CapabilityCallRequest,
+    _workflow_scope: Option<String>,
+    cancellation: CapabilityCancellationToken,
+  ) -> BoxFuture<'static, Result<Value, CapabilityFailure>> {
+    let request = request.clone();
+    let parsed = match parse_reference_request(&request.input, self.operation.as_str()) {
+      Ok(parsed) => parsed,
+      Err(error) => return Box::pin(async move { Err(error) }),
+    };
+    let store = match self.store.configured() {
+      Ok(store) => store,
+      Err(error) => return Box::pin(async move { Err(error) }),
+    };
+    let operation = self.operation;
+    let concurrency = Arc::clone(&self.concurrency);
+    let timeout = Duration::from_millis(self.policy.limits.transfer_timeout_ms);
+    Box::pin(async move {
+      let permit = tokio::select! {
+        permit = concurrency.acquire_owned() => permit.map_err(|_| backend_unavailable())?,
+        _ = cancellation.cancelled() => return Err(artifact_cancelled()),
+      };
+      let task_cancellation = cancellation.clone();
+      let task = tokio::task::spawn_blocking(move || {
+        let _permit = permit;
+        match operation {
+          ArtifactReadOperation::Head => store.head(&request, &parsed),
+          ArtifactReadOperation::Materialize => {
+            store.materialize(&request, &parsed, &task_cancellation)
+          }
+        }
+      });
+      match tokio::time::timeout(timeout, task).await {
+        Ok(Ok(result)) => result,
+        Ok(Err(_)) => Err(artifact_failure(
+          CapabilityFailureKind::HandlerCrashed,
+          "WOML_ARTIFACT_BACKEND_UNAVAILABLE",
+          "The artifact backend is unavailable.",
+          true,
+          operation == ArtifactReadOperation::Materialize,
+        )),
+        Err(_) => {
+          cancellation.cancel();
+          Err(artifact_timed_out())
+        }
+      }
+    })
+  }
+}
+
 impl PreparedArtifactPolicy {
   fn prepare(
     policy: ArtifactPolicyV1,
@@ -1030,10 +1497,18 @@ impl PreparedArtifactPolicy {
         ))
       }
     };
+    let materialization_path = Path::new(&policy.materialization.directory);
+    let materialization_directory = if materialization_path.is_absolute() {
+      materialization_path.to_path_buf()
+    } else {
+      project_root.join(materialization_path)
+    };
     Ok(Self {
       project_root,
       read_roots,
       backend_directory,
+      materialization_directory,
+      max_materialization_bytes_per_attempt: policy.materialization.max_bytes_per_attempt,
       limits: policy.limits,
       retention: policy.retention,
       secret_action: policy.secret_scanning.known_secret_action,
@@ -1138,6 +1613,31 @@ fn initialize_schema(connection: &Connection) -> Result<(), CapabilityFailure> {
     )
     .map_err(|_| backend_unavailable())?;
   Ok(())
+}
+
+fn ensure_store_identity(connection: &Connection) -> Result<String, CapabilityFailure> {
+  let existing: Option<String> = connection
+    .query_row(
+      "SELECT value FROM woml_artifact_store_metadata WHERE key = 'store_id'",
+      [],
+      |row| row.get(0),
+    )
+    .optional()
+    .map_err(|_| backend_unavailable())?;
+  if let Some(store_id) = existing {
+    if store_id.starts_with("artifact-store-") && store_id.len() == 47 {
+      return Ok(store_id);
+    }
+    return Err(backend_unavailable());
+  }
+  let store_id = format!("artifact-store-{}", uuid::Uuid::new_v4().simple());
+  connection
+    .execute(
+      "INSERT INTO woml_artifact_store_metadata(key, value) VALUES ('store_id', ?1)",
+      [&store_id],
+    )
+    .map_err(|_| backend_unavailable())?;
+  Ok(store_id)
 }
 
 fn validate_schema(connection: &Connection) -> Result<(), CapabilityFailure> {
@@ -1287,6 +1787,42 @@ fn parse_put(
   Ok(request)
 }
 
+fn parse_reference_request(
+  value: &Value,
+  expected_operation: &str,
+) -> Result<ArtifactReferenceRequestV1, CapabilityFailure> {
+  let request: ArtifactReferenceRequestV1 =
+    serde_json::from_value(value.clone()).map_err(|_| artifact_access_denied())?;
+  if request.contract != ARTIFACTS_CONTRACT
+    || request.contract_version != ARTIFACTS_CONTRACT_VERSION
+    || request.kind != "request"
+    || request.operation != expected_operation
+  {
+    return Err(artifact_access_denied());
+  }
+  validate_reference(&request.input.artifact)?;
+  Ok(request)
+}
+
+fn validate_reference(reference: &ArtifactReferenceV1) -> Result<(), CapabilityFailure> {
+  let encoded_id = reference.id.strip_prefix("artifact_");
+  if reference.contract != ARTIFACT_REFERENCE_CONTRACT
+    || reference.contract_version != ARTIFACT_REFERENCE_CONTRACT_VERSION
+    || encoded_id
+      .is_none_or(|id| id.len() != 26 || !id.bytes().all(|byte| CROCKFORD.contains(&byte)))
+    || reference.sha256.len() != 64
+    || !reference
+      .sha256
+      .bytes()
+      .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+    || reference.size > MAX_ARTIFACT_BYTES
+  {
+    return Err(artifact_access_denied());
+  }
+  validate_name(&reference.name).map_err(|_| artifact_access_denied())?;
+  validate_content_type(&reference.content_type).map_err(|_| artifact_access_denied())
+}
+
 fn authorize_source(
   policy: &PreparedArtifactPolicy,
   authored: &str,
@@ -1401,6 +1937,134 @@ fn reject_link_components(root: &Path, target: &Path) -> Result<(), CapabilityFa
     }
   }
   Ok(())
+}
+
+fn cleanup_directory_contents(directory: &Path) -> Result<(), CapabilityFailure> {
+  for entry in fs::read_dir(directory).map_err(|_| materialization_unavailable())? {
+    let entry = entry.map_err(|_| materialization_unavailable())?;
+    let path = entry.path();
+    let metadata = fs::symlink_metadata(&path).map_err(|_| materialization_unavailable())?;
+    if metadata.file_type().is_symlink() || metadata.is_file() {
+      fs::remove_file(path).map_err(|_| materialization_unavailable())?;
+    } else if metadata.is_dir() && !is_windows_reparse(&metadata) {
+      fs::remove_dir_all(path).map_err(|_| materialization_unavailable())?;
+    } else {
+      return Err(materialization_unavailable());
+    }
+  }
+  sync_directory(directory)
+}
+
+fn directory_bytes(directory: &Path) -> Result<u64, CapabilityFailure> {
+  let mut total = 0_u64;
+  for entry in fs::read_dir(directory).map_err(|_| materialization_unavailable())? {
+    let entry = entry.map_err(|_| materialization_unavailable())?;
+    let metadata = fs::symlink_metadata(entry.path()).map_err(|_| materialization_unavailable())?;
+    if metadata.file_type().is_symlink() || !metadata.is_file() || is_windows_reparse(&metadata) {
+      return Err(materialization_unavailable());
+    }
+    total = total.saturating_add(metadata.len());
+  }
+  Ok(total)
+}
+
+fn verify_materialized_file(
+  path: &Path,
+  expected_digest: &str,
+  expected_size: u64,
+) -> Result<(), CapabilityFailure> {
+  let metadata = fs::symlink_metadata(path).map_err(|_| materialization_unavailable())?;
+  if metadata.file_type().is_symlink()
+    || !metadata.is_file()
+    || is_windows_reparse(&metadata)
+    || metadata.len() != expected_size
+  {
+    return Err(artifact_corrupt());
+  }
+  let mut source = File::open(path).map_err(|_| materialization_unavailable())?;
+  let mut digest = Sha256::new();
+  let mut size = 0_u64;
+  let mut buffer = vec![0_u8; STREAM_BUFFER_BYTES];
+  loop {
+    let read = source.read(&mut buffer).map_err(|_| artifact_corrupt())?;
+    if read == 0 {
+      break;
+    }
+    size = size.saturating_add(read as u64);
+    digest.update(&buffer[..read]);
+  }
+  if size != expected_size || hex::encode(digest.finalize()) != expected_digest {
+    return Err(artifact_corrupt());
+  }
+  Ok(())
+}
+
+fn stream_materialization(
+  source_path: &Path,
+  final_path: &Path,
+  expected_digest: &str,
+  expected_size: u64,
+  cancellation: &CapabilityCancellationToken,
+) -> Result<(), CapabilityFailure> {
+  let stage_path = final_path.with_extension(format!("{}.part", uuid::Uuid::new_v4().simple()));
+  let mut options = OpenOptions::new();
+  options.create_new(true).write(true).read(true);
+  #[cfg(unix)]
+  {
+    use std::os::unix::fs::OpenOptionsExt;
+    options.mode(0o600);
+  }
+  let destination = options
+    .open(&stage_path)
+    .map_err(|_| materialization_unavailable())?;
+  let mut stage = ArtifactStage {
+    path: stage_path,
+    file: Some(destination),
+  };
+  let mut source = File::open(source_path).map_err(|_| backend_unavailable())?;
+  let mut digest = Sha256::new();
+  let mut size = 0_u64;
+  let mut buffer = vec![0_u8; STREAM_BUFFER_BYTES];
+  loop {
+    if cancellation.is_cancelled() {
+      return Err(artifact_cancelled());
+    }
+    let read = source.read(&mut buffer).map_err(|_| artifact_corrupt())?;
+    if read == 0 {
+      break;
+    }
+    size = size.saturating_add(read as u64);
+    if size > expected_size {
+      return Err(artifact_corrupt());
+    }
+    digest.update(&buffer[..read]);
+    stage
+      .file
+      .as_mut()
+      .ok_or_else(materialization_unavailable)?
+      .write_all(&buffer[..read])
+      .map_err(|_| materialization_unavailable())?;
+  }
+  if size != expected_size || hex::encode(digest.finalize()) != expected_digest {
+    return Err(artifact_corrupt());
+  }
+  let file = stage.file.take().ok_or_else(materialization_unavailable)?;
+  file.sync_all().map_err(|_| materialization_unavailable())?;
+  drop(file);
+  match fs::hard_link(&stage.path, final_path) {
+    Ok(()) => {}
+    Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+      verify_materialized_file(final_path, expected_digest, expected_size)?;
+    }
+    Err(_) => return Err(materialization_unavailable()),
+  }
+  fs::remove_file(&stage.path).map_err(|_| materialization_unavailable())?;
+  sync_directory(
+    final_path
+      .parent()
+      .ok_or_else(materialization_unavailable)?,
+  )?;
+  verify_materialized_file(final_path, expected_digest, expected_size)
 }
 
 #[cfg(windows)]
@@ -1578,6 +2242,33 @@ fn retention_invalid() -> CapabilityFailure {
     false,
   )
 }
+fn artifact_not_found() -> CapabilityFailure {
+  artifact_failure(
+    CapabilityFailureKind::ServiceRejected,
+    "WOML_ARTIFACT_NOT_FOUND",
+    "The artifact does not exist in this durable store.",
+    false,
+    false,
+  )
+}
+fn artifact_access_denied() -> CapabilityFailure {
+  artifact_failure(
+    CapabilityFailureKind::ServiceRejected,
+    "WOML_ARTIFACT_ACCESS_DENIED",
+    "The current run is not authorized to access this artifact.",
+    false,
+    false,
+  )
+}
+fn artifact_expired() -> CapabilityFailure {
+  artifact_failure(
+    CapabilityFailureKind::ServiceRejected,
+    "WOML_ARTIFACT_EXPIRED",
+    "The artifact has expired and is no longer readable.",
+    false,
+    false,
+  )
+}
 fn artifact_quarantined() -> CapabilityFailure {
   artifact_failure(
     CapabilityFailureKind::ServiceRejected,
@@ -1601,6 +2292,15 @@ fn backend_unavailable() -> CapabilityFailure {
     CapabilityFailureKind::TransportFailed,
     "WOML_ARTIFACT_BACKEND_UNAVAILABLE",
     "The artifact backend is unavailable.",
+    true,
+    false,
+  )
+}
+fn materialization_unavailable() -> CapabilityFailure {
+  artifact_failure(
+    CapabilityFailureKind::TransportFailed,
+    "WOML_ARTIFACT_MATERIALIZATION_UNAVAILABLE",
+    "A private artifact materialization could not be created.",
     true,
     false,
   )
@@ -1748,6 +2448,49 @@ mod tests {
           "contentType": "text/plain",
           "retentionMs": 86400000
         }
+      }),
+    }
+  }
+
+  fn reference_call(
+    operation: &str,
+    artifact: &ArtifactReferenceV1,
+    run_id: &str,
+    invocation_id: &str,
+  ) -> CapabilityCallRequest {
+    let step_key = format!("step-key-{run_id}");
+    let operation_name = format!("artifacts.{operation}#1");
+    CapabilityCallRequest {
+      contract: "woml.capability-call".to_string(),
+      contract_version: 1,
+      message_type: "request".to_string(),
+      invocation_id: invocation_id.to_string(),
+      call_id: format!("call-{operation}"),
+      run_id: run_id.to_string(),
+      node_id: "consume".to_string(),
+      attempt_number: 1,
+      capability: "artifacts".to_string(),
+      operation: operation.to_string(),
+      input_contract_version: 1,
+      result_contract_version: 1,
+      identity: CapabilityCallIdentity {
+        mode: CapabilityIdentityMode::Automatic,
+        step_idempotency_key: step_key.clone(),
+        operation_name: operation_name.clone(),
+        operation_key: derive_operation_key(&step_key, &operation_name),
+        provider_idempotency_key: None,
+      },
+      limits: CapabilityCallLimits {
+        input_bytes: 16_384,
+        result_bytes: 16_384,
+        timeout_ms: 30_000,
+      },
+      input: json!({
+        "contract": "woml.artifacts",
+        "contractVersion": 1,
+        "kind": "request",
+        "operation": operation,
+        "input": { "artifact": artifact }
       }),
     }
   }
@@ -1907,6 +2650,416 @@ mod tests {
       .await
       .unwrap_err();
     assert_eq!(failure.code, "WOML_ARTIFACT_TOO_LARGE");
+  }
+
+  #[tokio::test]
+  async fn head_and_materialize_verify_same_run_access_and_cleanup() {
+    let temp = TempDir::new().unwrap();
+    fs::write(temp.path().join("report.txt"), b"durable artifact").unwrap();
+    let state = temp.path().join("state.sqlite");
+    let backend = temp.path().join("artifacts-v1");
+    let managed = Arc::new(ManagedArtifactStore::default());
+    let put = ManagedArtifactPutHandler::new(
+      Arc::clone(&managed),
+      policy(temp.path(), &backend),
+      ArtifactRuntimeMode::Foreground,
+      &BTreeMap::new(),
+    )
+    .unwrap();
+    let head = put.head_handler();
+    let materialize = put.materialize_handler();
+    managed.configure_for_state(&state, put.policy()).unwrap();
+    let stored = put
+      .execute_request_scoped(
+        &call("report.txt", "report"),
+        Some("workflow".to_string()),
+        CapabilityCancellationToken::default(),
+      )
+      .await
+      .unwrap();
+    let reference: ArtifactReferenceV1 = serde_json::from_value(stored["data"].clone()).unwrap();
+
+    let head_result = head
+      .execute_request_scoped(
+        &reference_call("head", &reference, "run-artifact", "inv-head"),
+        Some("workflow".to_string()),
+        CapabilityCancellationToken::default(),
+      )
+      .await
+      .unwrap();
+    assert_eq!(head_result["data"]["integrity"], "verified");
+    assert_eq!(head_result["data"]["artifact"]["id"], reference.id);
+
+    let invocation_id = "inv-materialize";
+    let materialized = materialize
+      .execute_request_scoped(
+        &reference_call("materialize", &reference, "run-artifact", invocation_id),
+        Some("workflow".to_string()),
+        CapabilityCancellationToken::default(),
+      )
+      .await
+      .unwrap();
+    let path = PathBuf::from(materialized["data"]["path"].as_str().unwrap());
+    assert_eq!(fs::read(&path).unwrap(), b"durable artifact");
+    managed.cleanup_invocation(invocation_id);
+    assert!(!path.exists());
+  }
+
+  #[tokio::test]
+  async fn artifact_reads_reject_unauthorized_forged_expired_and_corrupt_references() {
+    let temp = TempDir::new().unwrap();
+    fs::write(temp.path().join("report.txt"), b"durable artifact").unwrap();
+    let state = temp.path().join("state.sqlite");
+    let backend = temp.path().join("artifacts-v1");
+    let managed = Arc::new(ManagedArtifactStore::default());
+    let put = ManagedArtifactPutHandler::new(
+      Arc::clone(&managed),
+      policy(temp.path(), &backend),
+      ArtifactRuntimeMode::Foreground,
+      &BTreeMap::new(),
+    )
+    .unwrap();
+    let head = put.head_handler();
+    managed.configure_for_state(&state, put.policy()).unwrap();
+    let stored = put
+      .execute_request_scoped(
+        &call("report.txt", "report"),
+        Some("workflow".to_string()),
+        CapabilityCancellationToken::default(),
+      )
+      .await
+      .unwrap();
+    let reference: ArtifactReferenceV1 = serde_json::from_value(stored["data"].clone()).unwrap();
+
+    let failure = head
+      .execute_request_scoped(
+        &reference_call("head", &reference, "another-run", "inv-other"),
+        Some("workflow".to_string()),
+        CapabilityCancellationToken::default(),
+      )
+      .await
+      .unwrap_err();
+    assert_eq!(failure.code, "WOML_ARTIFACT_ACCESS_DENIED");
+
+    let mut forged = reference.clone();
+    forged.name = "forged".to_string();
+    let failure = head
+      .execute_request_scoped(
+        &reference_call("head", &forged, "run-artifact", "inv-forged"),
+        Some("workflow".to_string()),
+        CapabilityCancellationToken::default(),
+      )
+      .await
+      .unwrap_err();
+    assert_eq!(failure.code, "WOML_ARTIFACT_ACCESS_DENIED");
+
+    Connection::open(&state)
+      .unwrap()
+      .execute(
+        "UPDATE woml_artifact_retention SET expires_at = '2000-01-01T00:00:00.000Z'",
+        [],
+      )
+      .unwrap();
+    let failure = head
+      .execute_request_scoped(
+        &reference_call("head", &reference, "run-artifact", "inv-expired"),
+        Some("workflow".to_string()),
+        CapabilityCancellationToken::default(),
+      )
+      .await
+      .unwrap_err();
+    assert_eq!(failure.code, "WOML_ARTIFACT_EXPIRED");
+
+    Connection::open(&state)
+      .unwrap()
+      .execute(
+        "UPDATE woml_artifact_retention SET expires_at = '2999-01-01T00:00:00.000Z'",
+        [],
+      )
+      .unwrap();
+    let blob = backend
+      .join("blobs/sha256")
+      .join(&reference.sha256[..2])
+      .join(&reference.sha256[2..]);
+    fs::write(blob, b"corrupt artifact").unwrap();
+    let failure = head
+      .execute_request_scoped(
+        &reference_call("head", &reference, "run-artifact", "inv-corrupt"),
+        Some("workflow".to_string()),
+        CapabilityCancellationToken::default(),
+      )
+      .await
+      .unwrap_err();
+    assert_eq!(failure.code, "WOML_ARTIFACT_CORRUPT");
+
+    let other = TempDir::new().unwrap();
+    let other_store = Arc::new(ManagedArtifactStore::default());
+    let other_put = ManagedArtifactPutHandler::new(
+      Arc::clone(&other_store),
+      policy(other.path(), &other.path().join("artifacts-v1")),
+      ArtifactRuntimeMode::Foreground,
+      &BTreeMap::new(),
+    )
+    .unwrap();
+    let other_head = other_put.head_handler();
+    other_store
+      .configure_for_state(&other.path().join("state.sqlite"), other_put.policy())
+      .unwrap();
+    let failure = other_head
+      .execute_request_scoped(
+        &reference_call("head", &reference, "run-artifact", "inv-other-store"),
+        Some("workflow".to_string()),
+        CapabilityCancellationToken::default(),
+      )
+      .await
+      .unwrap_err();
+    assert_eq!(failure.code, "WOML_ARTIFACT_NOT_FOUND");
+  }
+
+  #[tokio::test]
+  async fn materialization_cleans_partial_files_and_fails_closed_on_cancellation() {
+    let temp = TempDir::new().unwrap();
+    fs::write(temp.path().join("report.bin"), vec![b'x'; 512 * 1024]).unwrap();
+    let state = temp.path().join("state.sqlite");
+    let backend = temp.path().join("artifacts-v1");
+    let managed = Arc::new(ManagedArtifactStore::default());
+    let put = ManagedArtifactPutHandler::new(
+      Arc::clone(&managed),
+      policy(temp.path(), &backend),
+      ArtifactRuntimeMode::Foreground,
+      &BTreeMap::new(),
+    )
+    .unwrap();
+    let materialize = put.materialize_handler();
+    managed.configure_for_state(&state, put.policy()).unwrap();
+    let stored = put
+      .execute_request_scoped(
+        &call("report.bin", "report"),
+        Some("workflow".to_string()),
+        CapabilityCancellationToken::default(),
+      )
+      .await
+      .unwrap();
+    let reference: ArtifactReferenceV1 = serde_json::from_value(stored["data"].clone()).unwrap();
+    let store = managed.configured().unwrap();
+
+    let corrupt_invocation = "inv-partial";
+    let corrupt_directory = store.invocation_materialization_directory(corrupt_invocation);
+    ensure_private_directory(&corrupt_directory).unwrap();
+    fs::write(corrupt_directory.join(&reference.id), b"partial").unwrap();
+    let failure = materialize
+      .execute_request_scoped(
+        &reference_call(
+          "materialize",
+          &reference,
+          "run-artifact",
+          corrupt_invocation,
+        ),
+        Some("workflow".to_string()),
+        CapabilityCancellationToken::default(),
+      )
+      .await
+      .unwrap_err();
+    assert_eq!(failure.code, "WOML_ARTIFACT_CORRUPT");
+    managed.cleanup_invocation(corrupt_invocation);
+
+    let unavailable_invocation = "inv-unavailable";
+    let unavailable_path = store.invocation_materialization_directory(unavailable_invocation);
+    fs::write(&unavailable_path, b"directory collision").unwrap();
+    let failure = materialize
+      .execute_request_scoped(
+        &reference_call(
+          "materialize",
+          &reference,
+          "run-artifact",
+          unavailable_invocation,
+        ),
+        Some("workflow".to_string()),
+        CapabilityCancellationToken::default(),
+      )
+      .await
+      .unwrap_err();
+    assert_eq!(failure.code, "WOML_ARTIFACT_MATERIALIZATION_UNAVAILABLE");
+    fs::remove_file(unavailable_path).unwrap();
+
+    let cancellation = CapabilityCancellationToken::default();
+    cancellation.cancel();
+    let failure = materialize
+      .execute_request_scoped(
+        &reference_call("materialize", &reference, "run-artifact", "inv-cancelled"),
+        Some("workflow".to_string()),
+        cancellation,
+      )
+      .await
+      .unwrap_err();
+    assert_eq!(failure.code, "WOML_ARTIFACT_CANCELLED");
+
+    let startup_partial = store.materializations.join("abandoned-attempt");
+    ensure_private_directory(&startup_partial).unwrap();
+    fs::write(startup_partial.join("download.part"), b"partial").unwrap();
+    drop(store);
+    drop(materialize);
+    drop(put);
+    drop(managed);
+    let recovered = Arc::new(ManagedArtifactStore::default());
+    let recovered_put = ManagedArtifactPutHandler::new(
+      Arc::clone(&recovered),
+      policy(temp.path(), &backend),
+      ArtifactRuntimeMode::Foreground,
+      &BTreeMap::new(),
+    )
+    .unwrap();
+    recovered
+      .configure_for_state(&state, recovered_put.policy())
+      .unwrap();
+    assert!(!startup_partial.exists());
+  }
+
+  #[tokio::test]
+  async fn retries_reconnect_and_startup_recovers_uncommitted_files_fail_closed() {
+    let temp = TempDir::new().unwrap();
+    fs::write(temp.path().join("report.txt"), b"durable artifact").unwrap();
+    let state = temp.path().join("state.sqlite");
+    let backend = temp.path().join("artifacts-v1");
+    let managed = Arc::new(ManagedArtifactStore::default());
+    let put = ManagedArtifactPutHandler::new(
+      Arc::clone(&managed),
+      policy(temp.path(), &backend),
+      ArtifactRuntimeMode::Foreground,
+      &BTreeMap::new(),
+    )
+    .unwrap();
+    managed.configure_for_state(&state, put.policy()).unwrap();
+    let original = call("report.txt", "report");
+    let first = put
+      .execute_request_scoped(
+        &original,
+        Some("workflow".to_string()),
+        CapabilityCancellationToken::default(),
+      )
+      .await
+      .unwrap();
+    let mut retry = original.clone();
+    retry.attempt_number = 2;
+    retry.invocation_id = "invocation-artifact-retry".to_string();
+    retry.call_id = "call-artifact-retry".to_string();
+    let replayed = put
+      .execute_request_scoped(
+        &retry,
+        Some("workflow".to_string()),
+        CapabilityCancellationToken::default(),
+      )
+      .await
+      .unwrap();
+    assert_eq!(first, replayed);
+    let connection = Connection::open(&state).unwrap();
+    let artifacts: u64 = connection
+      .query_row("SELECT COUNT(*) FROM woml_artifacts", [], |row| row.get(0))
+      .unwrap();
+    assert_eq!(artifacts, 1);
+
+    let crash_root = TempDir::new().unwrap();
+    let crash_state = crash_root.path().join("state.sqlite");
+    let crash_backend = crash_root.path().join("artifacts-v1");
+    let initial_store = Arc::new(ManagedArtifactStore::default());
+    let initial_put = ManagedArtifactPutHandler::new(
+      Arc::clone(&initial_store),
+      policy(crash_root.path(), &crash_backend),
+      ArtifactRuntimeMode::Foreground,
+      &BTreeMap::new(),
+    )
+    .unwrap();
+    initial_store
+      .configure_for_state(&crash_state, initial_put.policy())
+      .unwrap();
+    drop(initial_put);
+    drop(initial_store);
+    let connection = Connection::open(&crash_state).unwrap();
+    let interrupted = call("report.txt", "interrupted");
+    connection
+      .execute(
+        "INSERT INTO woml_artifact_transfers(
+           operation_key, run_id, node_id, attempt_number, operation,
+           input_digest, status, started_at
+         ) VALUES (?1, ?2, ?3, 1, 'put', ?4, 'started', ?5)",
+        params![
+          interrupted.identity.operation_key,
+          interrupted.run_id,
+          interrupted.node_id,
+          canonical_digest(b"woml.artifact-input\0v1\0", &interrupted.input).unwrap(),
+          timestamp(),
+        ],
+      )
+      .unwrap();
+    fs::create_dir_all(crash_backend.join("staging")).unwrap();
+    fs::write(
+      crash_backend.join("staging/before-publish.part"),
+      b"partial",
+    )
+    .unwrap();
+    let orphan_digest = hex::encode(Sha256::digest(b"published without metadata"));
+    let orphan = crash_backend
+      .join("blobs/sha256")
+      .join(&orphan_digest[..2])
+      .join(&orphan_digest[2..]);
+    fs::create_dir_all(orphan.parent().unwrap()).unwrap();
+    fs::write(&orphan, b"published without metadata").unwrap();
+    drop(connection);
+
+    let recovered = Arc::new(ManagedArtifactStore::default());
+    let recovered_put = ManagedArtifactPutHandler::new(
+      Arc::clone(&recovered),
+      policy(crash_root.path(), &crash_backend),
+      ArtifactRuntimeMode::Foreground,
+      &BTreeMap::new(),
+    )
+    .unwrap();
+    recovered
+      .configure_for_state(&crash_state, recovered_put.policy())
+      .unwrap();
+    assert!(!crash_backend.join("staging/before-publish.part").exists());
+    assert!(!orphan.exists());
+    let failure = recovered_put
+      .execute_request_scoped(
+        &interrupted,
+        Some("workflow".to_string()),
+        CapabilityCancellationToken::default(),
+      )
+      .await
+      .unwrap_err();
+    assert_eq!(failure.code, "WOML_ARTIFACT_INTERRUPTED");
+  }
+
+  #[test]
+  fn artifact_backend_is_bound_to_one_durable_store() {
+    let temp = TempDir::new().unwrap();
+    let backend = temp.path().join("artifacts-v1");
+    let first_store = Arc::new(ManagedArtifactStore::default());
+    let first_put = ManagedArtifactPutHandler::new(
+      Arc::clone(&first_store),
+      policy(temp.path(), &backend),
+      ArtifactRuntimeMode::Foreground,
+      &BTreeMap::new(),
+    )
+    .unwrap();
+    first_store
+      .configure_for_state(&temp.path().join("first.sqlite"), first_put.policy())
+      .unwrap();
+    drop(first_put);
+    drop(first_store);
+
+    let second_store = Arc::new(ManagedArtifactStore::default());
+    let second_put = ManagedArtifactPutHandler::new(
+      Arc::clone(&second_store),
+      policy(temp.path(), &backend),
+      ArtifactRuntimeMode::Foreground,
+      &BTreeMap::new(),
+    )
+    .unwrap();
+    let failure = second_store
+      .configure_for_state(&temp.path().join("second.sqlite"), second_put.policy())
+      .unwrap_err();
+    assert_eq!(failure.code, "WOML_ARTIFACT_BACKEND_UNAVAILABLE");
   }
 
   #[test]

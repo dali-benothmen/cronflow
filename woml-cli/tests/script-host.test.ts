@@ -2495,7 +2495,7 @@ return {
             facadeFrozen,
             referenceFrozen: Object.isFrozen(reference),
             reference,
-            path
+            pathAvailable: path.endsWith('release.tfplan')
           };
         `
       )
@@ -2537,9 +2537,82 @@ return {
         facadeFrozen: true,
         referenceFrozen: true,
         reference,
-        path: '/private/attempt/release.tfplan',
+        pathAvailable: true,
       },
     });
+  });
+
+  test('Artifact v1 prevents private materialization paths from becoming durable output', async () => {
+    const completed: CompletedMessage[] = [];
+    const reference = {
+      contract: 'woml.artifact-reference',
+      contractVersion: 1,
+      id: 'artifact_01k7qh7s00a1b2c3d4e5f6g7h8',
+      name: 'release-plan',
+      size: 12,
+      sha256: 'c742b8669e07a0ca8a2a8d79b22b17504c51f7b0d81623a8045fece436f02942',
+      contentType: 'application/octet-stream',
+    } as const;
+    let host!: ScriptHost;
+    host = new ScriptHost({
+      workerUrl: new URL('../src/script-host-worker.ts', import.meta.url),
+      protocolVersion: 4,
+      send: async message => {
+        if (message.messageType === 'completed') {
+          completed.push(message);
+          return;
+        }
+        if (message.messageType !== 'capability_call') return;
+        const result = {
+          contract: 'woml.artifacts',
+          contractVersion: 1,
+          kind: 'result',
+          operation: 'materialize',
+          data: {
+            artifact: reference,
+            path: '/private/attempt/release.tfplan',
+          },
+        } as const;
+        host.accept({
+          protocol: 'woml.script-host',
+          protocolVersion: 4,
+          messageType: 'capability_result',
+          invocationId: message.invocationId,
+          callId: message.callId,
+          result: {
+            contract: 'woml.capability-call',
+            contractVersion: 1,
+            messageType: 'result',
+            invocationId: message.invocationId,
+            callId: message.callId,
+            outcome: 'succeeded',
+            resultContractVersion: 1,
+            resultBytes: Buffer.byteLength(JSON.stringify(result)),
+            durationMs: 1,
+            result,
+          },
+        });
+      },
+    });
+    host.accept(
+      executeV4(
+        'inv_v4_artifact_path_leak',
+        `
+          const path = await services.artifacts.materialize(${JSON.stringify(reference)});
+          return { path };
+        `
+      )
+    );
+    await host.drain();
+    expect(completed[0]?.outcome).toMatchObject({
+      kind: 'failure',
+      error: {
+        message: expect.stringContaining('attempt-scoped'),
+      },
+    });
+    expect(JSON.stringify(completed[0])).not.toContain(
+      '/private/attempt/release.tfplan'
+    );
   });
 
   test('Artifact v1 rejects unsafe requests before crossing the capability boundary', async () => {

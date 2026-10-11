@@ -25,8 +25,8 @@ function run(...args: string[]): ReturnType<typeof Bun.spawnSync> {
   });
 }
 
-describe('Durable Artifacts DA4 CLI journey', () => {
-  test('creates a file through Process v1 and imports it through Rust', async () => {
+describe('Durable Artifacts local runtime journey', () => {
+  test('stores, verifies, materializes, consumes, and cleans an artifact', async () => {
     const state = join(temporaryDirectory, 'workflow-history.sqlite');
     const backend = join(temporaryDirectory, 'artifact-bytes');
     const policy = join(temporaryDirectory, 'artifact-policy.json');
@@ -95,6 +95,23 @@ describe('Durable Artifacts DA4 CLI journey', () => {
           return { artifact };
         </script>
       </step>
+      <step id="consume" name="Consume durable report">
+        <script>
+          const artifact = context.steps.preserve.artifact;
+          const metadata = await services.artifacts.head(artifact);
+          const path = await services.artifacts.materialize(artifact);
+          const consumed = await services.process.run({
+            executable: "bun",
+            args: ["-e", "console.log(await Bun.file(Bun.argv[1]).text())", path],
+            timeout: "10s"
+          }, { name: "consume-report" });
+          return {
+            artifact,
+            integrity: metadata.integrity,
+            content: consumed.stdout.trim()
+          };
+        </script>
+      </step>
     </steps>
   </workflow>
 </woml>\n`
@@ -123,6 +140,17 @@ describe('Durable Artifacts DA4 CLI journey', () => {
     });
     expect(result.artifact.id).toMatch(/^artifact_[0-9a-hjkmnp-tv-z]{26}$/);
     expect(result.artifact.sha256).toMatch(/^[0-9a-f]{64}$/);
+    expect(result.integrity).toBe('verified');
+    expect(result.content).toBe('durable bytes');
+    expect(
+      Array.from(
+        new Bun.Glob('**/*').scanSync({
+          cwd: join(temporaryDirectory, 'materialized'),
+          dot: true,
+          onlyFiles: false,
+        })
+      )
+    ).toEqual([]);
 
     const database = new Database(state, { readonly: true });
     expect(
@@ -136,6 +164,23 @@ describe('Durable Artifacts DA4 CLI journey', () => {
     expect(
       database.query('SELECT COUNT(*) AS count FROM woml_artifact_access').get()
     ).toEqual({ count: 1 });
+    const durableEvents = database
+      .query('SELECT event_json AS eventJson FROM woml_run_events ORDER BY sequence')
+      .all() as { eventJson: string }[];
+    const artifactEvents = durableEvents.filter(({ eventJson }) =>
+      eventJson.includes('"capability":"artifacts"')
+    );
+    expect(artifactEvents.length).toBeGreaterThanOrEqual(6);
+    expect(artifactEvents.some(({ eventJson }) => eventJson.includes('"operation":"head"'))).toBe(true);
+    expect(
+      artifactEvents.some(({ eventJson }) =>
+        eventJson.includes('"operation":"materialize"')
+      )
+    ).toBe(true);
+    expect(artifactEvents.some(({ eventJson }) => eventJson.includes('"artifactId"'))).toBe(true);
+    const durableHistory = durableEvents.map(({ eventJson }) => eventJson).join('\n');
+    expect(durableHistory).not.toContain(join(temporaryDirectory, 'materialized'));
+    expect(durableHistory).not.toContain(join(temporaryDirectory, 'artifact-bytes'));
     database.close();
   }, 30_000);
 });
