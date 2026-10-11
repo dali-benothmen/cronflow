@@ -12,6 +12,7 @@ Use this reference before generating a `services.*` call. Built-in services exec
 | Files and larger durable values | `services.storage` |
 | Disposable expiring optimization data | `services.cache` |
 | Small permanent workflow-owned memory | `services.state` |
+| Approved local or infrastructure command | `services.process.run()` |
 | Fan out a named fact to subscribers | `services.events.emit()` |
 | Wait for one child workflow's result | `services.workflows.call()` |
 | Start independent child work | `services.workflows.start()` |
@@ -184,6 +185,45 @@ Operations:
 - `setIfAbsent(key, value, { name })` → `{ stored, value, version, updatedAt }`.
 
 Every mutation requires a stable `name`. Use `ifVersion` for compare-and-set when multiple runs may update the same key. State is small, permanent workflow-owned JSON; it is not encrypted secret storage, cache, a general database, or run context.
+
+## Supervised local processes
+
+Use Process v1 when a workflow must run an operator-approved developer or
+infrastructure tool:
+
+```js
+const result = await services.process.run({
+  executable: "bun",
+  args: ["test", "--timeout", "5000"],
+  cwd: ".",
+  timeout: "5m",
+  acceptExitCodes: [0],
+  output: { stdout: "capture", stderr: "capture", maxBytes: 65536 }
+}, { name: "project-tests" });
+
+return { passed: result.exitCode === 0, output: result.stdout };
+```
+
+Rules:
+
+- `executable` is a policy alias, never a path or command string.
+- `args` is an array of literal arguments. Never generate `sh -c`, `cmd /c`,
+  `powershell -Command`, a shell pipeline, or a `shell` field.
+- Process execution is disabled by default. For reviewed foreground work use
+  `--allow-process bun,git`; for long-lived/background operation use an
+  operator-owned `--process-policy <path>` document.
+- Prefer no environment. A policy must independently allow every inherited or
+  explicit name. Never place credentials in arguments.
+- Always bound timeout and captured output. Use `discard` for noisy streams.
+- A non-accepted exit code throws. Timeout, cancellation, and interruption can
+  be ambiguous because the command may already have changed an external system.
+- WOML fails an interrupted process closed and never silently replays it.
+- Use raw `Bun.spawn()` only for deliberately unsupervised internals in trusted
+  module code. Workflow effects should use `services.process.run()`.
+
+The result provides `exitCode`, `signal`, `stdout`, `stderr`, total byte counts,
+truncation flags, and `durationMs`. Return only safe fields downstream because
+step results are durable.
 
 ## Internal events
 

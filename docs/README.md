@@ -22,6 +22,7 @@ or schema documents to write and run a workflow.
 | Lifecycle and cancellation | [Lifecycle and run control](woml-lifecycle-and-run-control.md) |
 | Approvals and notifications | [Notifications](woml-notifications.md) |
 | Services overview | [Services](woml-services.md) |
+| Supervised local tools | [Process execution](woml-process.md) |
 | HTTP | [Outbound HTTP](woml-http-services.md) |
 | SQL databases | [Database](woml-database.md) |
 | Durable objects | [Storage](woml-storage.md) |
@@ -57,6 +58,7 @@ Provider-specific setup is available for [Telegram](telegram.md),
 - [Security policy](../SECURITY.md)
 - [Support](../SUPPORT.md)
 - [WOML 1.0.0 release notes](release/v1.0.0-release-notes.md)
+- [Process v1 release notes](release/process-v1-release-notes.md)
 - [Release runbook](woml-release.md)
 - [Provider extension direction](provider-extension-architecture.md)
 

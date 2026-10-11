@@ -24,7 +24,8 @@ Use this after an agent creates or edits WOML. `--json` is appropriate for tooli
 
 ```bash
 woml run <workflow.woml|directory>... \
-  [--config <path>] [--host <address>] [--port <port>] \
+  [--config <path>] [--process-policy <path>|--allow-process <aliases>] \
+  [--host <address>] [--port <port>] \
   [--state <path>] [--trigger <manualTriggerId>] [--resume <runId>] \
   [--approval-port <port>] [--json] [--verbose] \
   [--color=auto|always|never] [--background|-d]
@@ -39,17 +40,24 @@ woml run <workflow.woml|directory>... \
 - `--host`, `--port`, and `--approval-port` configure local HTTP listeners.
 - `--background`/`-d` detaches after readiness and prints runtime/log/stop information.
 - `--config` supplies production runtime configuration.
+- `--allow-process bun,git` is a foreground-only reviewed executable grant.
+- `--process-policy <path>` supplies canonical executable, directory,
+  environment, timeout, output, concurrency, and background authority.
 - `--verbose`, color, and JSON flags affect presentation, not workflow semantics.
 
 ## One-shot integration execution
 
 ```bash
-woml test <workflow.woml> [--state <path>] \
+woml test <workflow.woml> [--process-policy <path>|--allow-process <aliases>] \
+  [--state <path>] \
   [--trigger <manualTriggerId>] [--resume <runId>] \
   [--approval-port <port>]
 ```
 
 Runs one manual occurrence and exits. It accepts exactly one workflow file with a manual trigger. Use it for integration tests/CI, not as the normal persistent automation host.
+
+Process execution remains disabled when neither permission option is present.
+Never suggest `--allow-process` with `--background`; use a reviewed policy.
 
 ## Editor declarations
 

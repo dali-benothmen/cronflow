@@ -75,6 +75,9 @@ jobs:
       - name: Test runtime operations
         working-directory: woml-cli
         run: bun run test:cli:operations
+      - name: Test the secure process CLI journey
+        working-directory: woml-cli
+        run: bun test tests/process-cli.test.ts --max-concurrency=1
       - name: Test for-each presentation and clean package
         working-directory: woml-cli
         run: >-
@@ -139,6 +142,29 @@ jobs:
           --test for_each_recovery
           --test backup_restore
           -- --test-threads=1
+      - name: Failure diagnostics
+        if: failure()
+        run: |
+          rustc --version
+          cargo --version
+          git status --short
+
+  process-containment:
+    name: Process containment (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, macos-15, windows-2022]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Test Process v1 containment serially
+        working-directory: core
+        run: >-
+          cargo test --config profile.dev.debug=0
+          --config profile.dev.incremental=false -j 1 --locked
+          -p woml-engine --lib process::tests -- --test-threads=1
       - name: Failure diagnostics
         if: failure()
         run: |

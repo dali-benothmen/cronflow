@@ -224,12 +224,44 @@ describe('Frozen service and capability contracts', () => {
                       ? schemas.processPolicy
                       : name.startsWith('process-')
                         ? schemas.process
-                    : schemas.http;
+                        : schemas.http;
       expect(
         validator(fixture),
         `${name}: ${JSON.stringify(validator.errors)}`
       ).toBe(true);
     }
+  });
+
+  test('freezes the same Process v1 payload inside TypeScript capability envelopes', async () => {
+    const request = await json(
+      join(fixtureDirectory, 'process-request.v1.json')
+    );
+    const result = await json(join(fixtureDirectory, 'process-result.v1.json'));
+    const capabilityRequest = await json(
+      join(fixtureDirectory, 'capability-process-request.v1.json')
+    );
+    const capabilityResult = await json(
+      join(fixtureDirectory, 'capability-process-succeeded.v1.json')
+    );
+
+    expect(
+      schemas.process(request),
+      JSON.stringify(schemas.process.errors)
+    ).toBe(true);
+    expect(
+      schemas.process(result),
+      JSON.stringify(schemas.process.errors)
+    ).toBe(true);
+    expect(
+      schemas.capability(capabilityRequest),
+      JSON.stringify(schemas.capability.errors)
+    ).toBe(true);
+    expect(
+      schemas.capability(capabilityResult),
+      JSON.stringify(schemas.capability.errors)
+    ).toBe(true);
+    expect(capabilityRequest.input).toEqual(request);
+    expect(capabilityResult.result).toEqual(result);
   });
 
   test('validates Model v8 and the complete operation history fixture', async () => {

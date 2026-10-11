@@ -1,4 +1,12 @@
-import { mkdtemp, mkdir, readFile, readdir, rm, writeFile } from 'node:fs/promises';
+import {
+  mkdtemp,
+  mkdir,
+  readFile,
+  readdir,
+  rm,
+  stat,
+  writeFile,
+} from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 
@@ -15,14 +23,21 @@ interface Arguments {
   readonly target: WomlNativeTarget;
 }
 
+// Checked by verify-process-release.ts. Keep this smoke in every native matrix job.
+const PROCESS_CONTAINMENT_SMOKE_V1 = true;
+
 function parseArguments(values: readonly string[]): Arguments {
   const options = new Map<string, string>();
   for (let index = 0; index < values.length; index += 2) {
     const option = values[index];
     const value = values[index + 1];
-    if (option === undefined || value === undefined || !option.startsWith('--')) {
+    if (
+      option === undefined ||
+      value === undefined ||
+      !option.startsWith('--')
+    ) {
       throw new Error(
-        'Usage: smoke-release-candidate.ts --main-root <path> --native-root <path> --target <target>',
+        'Usage: smoke-release-candidate.ts --main-root <path> --native-root <path> --target <target>'
       );
     }
     options.set(option, value);
@@ -37,7 +52,7 @@ function parseArguments(values: readonly string[]): Arguments {
     !womlNativeTargets.includes(target as WomlNativeTarget)
   ) {
     throw new Error(
-      'Usage: smoke-release-candidate.ts --main-root <path> --native-root <path> --target <target>',
+      'Usage: smoke-release-candidate.ts --main-root <path> --native-root <path> --target <target>'
     );
   }
   return {
@@ -52,7 +67,9 @@ async function oneArchive(root: string): Promise<string> {
     .filter(name => name.endsWith('.tgz'))
     .map(name => join(root, name));
   if (archives.length !== 1) {
-    throw new Error(`Expected one npm archive in ${root}, found ${archives.length}.`);
+    throw new Error(
+      `Expected one npm archive in ${root}, found ${archives.length}.`
+    );
   }
   return archives[0]!;
 }
@@ -78,10 +95,17 @@ function run(command: readonly string[], cwd: string): string {
   });
   if (result.exitCode !== 0) {
     throw new Error(
-      `Command failed (${command.join(' ')}):\n${result.stdout.toString()}${result.stderr.toString()}`,
+      `Command failed (${command.join(' ')}):\n${result.stdout.toString()}${result.stderr.toString()}`
     );
   }
   return result.stdout.toString();
+}
+
+function runRaw(
+  command: readonly string[],
+  cwd: string
+): ReturnType<typeof Bun.spawnSync> {
+  return Bun.spawnSync(command, { cwd, stdout: 'pipe', stderr: 'pipe' });
 }
 
 async function main(): Promise<void> {
@@ -93,14 +117,16 @@ async function main(): Promise<void> {
     throw new Error('The portable woml package contains a native binary.');
   }
 
-  const directory = await mkdtemp(join(tmpdir(), `woml-candidate-${args.target}-`));
+  const directory = await mkdtemp(
+    join(tmpdir(), `woml-candidate-${args.target}-`)
+  );
   const cache = join(directory, 'cache');
   const consumer = join(directory, 'consumer');
   try {
     await Promise.all([mkdir(cache), mkdir(consumer)]);
     await writeFile(
       join(consumer, 'package.json'),
-      JSON.stringify({ name: 'woml-release-candidate-smoke', private: true }),
+      JSON.stringify({ name: 'woml-release-candidate-smoke', private: true })
     );
     await writeFile(
       join(consumer, 'hello.woml'),
@@ -109,7 +135,7 @@ async function main(): Promise<void> {
     <triggers><manual id="start" /></triggers>
     <steps><step id="hello"><script>return { message: "Hello World" };</script></step></steps>
   </workflow>
-</woml>\n`,
+</woml>\n`
     );
     await writeFile(
       join(consumer, 'for-each.woml'),
@@ -125,7 +151,58 @@ async function main(): Promise<void> {
       <step id="summary"><script>return context.steps.greetings;</script></step>
     </steps>
   </workflow>
-</woml>\n`,
+</woml>\n`
+    );
+    await writeFile(
+      join(consumer, 'process-literal.woml'),
+      `<woml>
+  <workflow id="release-candidate-process" name="Release candidate process" version="1.0.0">
+    <triggers><manual id="start" /></triggers>
+    <steps><step id="literal"><script>
+      const result = await services.process.run({
+        executable: "bun",
+        args: ["run", "echo arguments 雪.ts", "space value", "café 雪", "\\\"quoted\\\"", "; echo not-a-shell"],
+        timeout: "10s"
+      }, { name: "release-literal-arguments" });
+      return { exitCode: result.exitCode, arguments: JSON.parse(result.stdout) };
+    </script></step></steps>
+  </workflow>
+</woml>\n`
+    );
+    await writeFile(
+      join(consumer, 'echo arguments 雪.ts'),
+      'process.stdout.write(JSON.stringify(Bun.argv.slice(2)) + "\\r\\n");\n'
+    );
+    await writeFile(
+      join(consumer, 'process-tree.woml'),
+      `<woml>
+  <workflow id="release-candidate-process-tree" name="Release process containment" version="1.0.0">
+    <triggers><manual id="start" /></triggers>
+    <steps><step id="tree"><script>
+      return await services.process.run({
+        executable: "bun",
+        args: ["run", "tree-parent.ts", "process-heartbeat"],
+        timeout: "350ms"
+      }, { name: "release-process-tree" });
+    </script></step></steps>
+  </workflow>
+</woml>\n`
+    );
+    await writeFile(
+      join(consumer, 'tree-parent.ts'),
+      `const child = Bun.spawn([process.execPath, "run", "tree-grandchild.ts", Bun.argv[2]], {
+  stdin: "ignore", stdout: "ignore", stderr: "ignore"
+});
+await child.exited;\n`
+    );
+    await writeFile(
+      join(consumer, 'tree-grandchild.ts'),
+      `import { appendFile } from "node:fs/promises";
+const path = Bun.argv[2]!;
+while (true) {
+  await appendFile(path, "x");
+  await Bun.sleep(20);
+}\n`
     );
 
     const installEnvironment = {
@@ -135,11 +212,16 @@ async function main(): Promise<void> {
     const install = (): void => {
       const result = Bun.spawnSync(
         [Bun.which('bun')!, 'add', mainArchive, nativeArchive, '--no-save'],
-        { cwd: consumer, env: installEnvironment, stdout: 'pipe', stderr: 'pipe' },
+        {
+          cwd: consumer,
+          env: installEnvironment,
+          stdout: 'pipe',
+          stderr: 'pipe',
+        }
       );
       if (result.exitCode !== 0) {
         throw new Error(
-          `Clean candidate installation failed:\n${result.stdout.toString()}${result.stderr.toString()}`,
+          `Clean candidate installation failed:\n${result.stdout.toString()}${result.stderr.toString()}`
         );
       }
     };
@@ -147,26 +229,32 @@ async function main(): Promise<void> {
 
     const packageRoot = join(consumer, 'node_modules', 'woml-cli');
     const { version: expectedVersion } = JSON.parse(
-      await readFile(join(packageRoot, 'package.json'), 'utf8'),
+      await readFile(join(packageRoot, 'package.json'), 'utf8')
     ) as { readonly version: string };
     const nativeRoot = join(
       consumer,
       'node_modules',
-      ...nativePackageName(args.target).split('/'),
+      ...nativePackageName(args.target).split('/')
     );
     if ((await filesBelow(packageRoot)).some(path => path.endsWith('.node'))) {
-      throw new Error('The installed portable woml package contains a native binary.');
+      throw new Error(
+        'The installed portable woml package contains a native binary.'
+      );
     }
     const nativeBinary = join(nativeRoot, nativePackageBinaryName(args.target));
     if (!(await Bun.file(nativeBinary).exists())) {
-      throw new Error(`The installed native package is missing ${nativeBinary}.`);
+      throw new Error(
+        `The installed native package is missing ${nativeBinary}.`
+      );
     }
 
     const cli = join(packageRoot, 'dist', 'cli.js');
     const command = (...values: string[]): string =>
       run([Bun.which('bun')!, cli, ...values], consumer);
     if (command('--version').trim() !== `woml ${expectedVersion}`) {
-      throw new Error(`The installed CLI did not report version ${expectedVersion}.`);
+      throw new Error(
+        `The installed CLI did not report version ${expectedVersion}.`
+      );
     }
     if (!command('--help').includes('woml run')) {
       throw new Error('The installed CLI help is incomplete.');
@@ -177,20 +265,29 @@ async function main(): Promise<void> {
     if (!command('check', 'for-each.woml').includes('WOML check passed')) {
       throw new Error('The installed compiler did not validate for-each.woml.');
     }
+    if (
+      !command('check', 'process-literal.woml').includes('WOML check passed')
+    ) {
+      throw new Error(
+        'The installed compiler did not validate process-literal.woml.'
+      );
+    }
     const result = command(
       'test',
       'hello.woml',
       '--state',
-      join(directory, 'state.sqlite'),
+      join(directory, 'state.sqlite')
     );
     if (result !== '{"message":"Hello World"}\n') {
-      throw new Error(`The installed runtime returned an unexpected result: ${result}`);
+      throw new Error(
+        `The installed runtime returned an unexpected result: ${result}`
+      );
     }
     const forEachResult = command(
       'test',
       'for-each.woml',
       '--state',
-      join(directory, 'for-each-state.sqlite'),
+      join(directory, 'for-each-state.sqlite')
     );
     const expectedForEach = {
       total: 3,
@@ -201,17 +298,92 @@ async function main(): Promise<void> {
         { index: 2, message: 'Hello Linus' },
       ],
     };
-    if (JSON.stringify(JSON.parse(forEachResult)) !== JSON.stringify(expectedForEach)) {
+    if (
+      JSON.stringify(JSON.parse(forEachResult)) !==
+      JSON.stringify(expectedForEach)
+    ) {
       throw new Error(
-        `The installed runtime returned an unexpected for-each result: ${forEachResult}`,
+        `The installed runtime returned an unexpected for-each result: ${forEachResult}`
       );
+    }
+    const processResult = command(
+      'test',
+      'process-literal.woml',
+      '--allow-process',
+      'bun',
+      '--state',
+      join(directory, 'process-state.sqlite')
+    );
+    const expectedProcess = {
+      exitCode: 0,
+      arguments: ['space value', 'café 雪', '"quoted"', '; echo not-a-shell'],
+    };
+    if (
+      JSON.stringify(JSON.parse(processResult)) !==
+      JSON.stringify(expectedProcess)
+    ) {
+      throw new Error(
+        `The installed Process v1 runtime changed literal arguments: ${processResult}`
+      );
+    }
+
+    if (PROCESS_CONTAINMENT_SMOKE_V1) {
+      const containment = runRaw(
+        [
+          Bun.which('bun')!,
+          cli,
+          'test',
+          'process-tree.woml',
+          '--allow-process',
+          'bun',
+          '--state',
+          join(directory, 'process-tree-state.sqlite'),
+        ],
+        consumer
+      );
+      const containmentOutput = `${containment.stdout.toString()}${containment.stderr.toString()}`;
+      if (
+        containment.exitCode === 0 ||
+        !containmentOutput.includes('WOML_PROCESS_TIMED_OUT')
+      ) {
+        throw new Error(
+          `The packaged Process v1 timeout smoke did not fail safely:\n${containmentOutput}`
+        );
+      }
+      const heartbeat = join(consumer, 'process-heartbeat');
+      let heartbeatCreated = false;
+      for (let attempt = 0; attempt < 20; attempt += 1) {
+        try {
+          await stat(heartbeat);
+          heartbeatCreated = true;
+          break;
+        } catch {
+          await Bun.sleep(25);
+        }
+      }
+      if (!heartbeatCreated) {
+        throw new Error('The packaged Process v1 child tree never started.');
+      }
+      await Bun.sleep(200);
+      const first = (await stat(heartbeat)).size;
+      await Bun.sleep(200);
+      const second = (await stat(heartbeat)).size;
+      if (first !== second) {
+        throw new Error(
+          'A packaged Process v1 descendant survived timeout containment.'
+        );
+      }
     }
 
     install();
     if (command('--version').trim() !== `woml ${expectedVersion}`) {
-      throw new Error(`The reinstalled CLI did not report version ${expectedVersion}.`);
+      throw new Error(
+        `The reinstalled CLI did not report version ${expectedVersion}.`
+      );
     }
-    process.stdout.write(`WOML ${args.target} release candidate smoke passed.\n`);
+    process.stdout.write(
+      `WOML ${args.target} release candidate smoke passed.\n`
+    );
   } finally {
     await rm(directory, { recursive: true, force: true });
   }

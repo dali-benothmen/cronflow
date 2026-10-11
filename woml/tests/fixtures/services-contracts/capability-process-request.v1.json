@@ -27,7 +27,7 @@
     "contractVersion": 1,
     "kind": "request",
     "executable": "bun",
-    "args": ["test"],
+    "args": ["test", "--timeout", "5000"],
     "cwd": ".",
     "env": { "CI": "true" },
     "timeoutMs": 300000,

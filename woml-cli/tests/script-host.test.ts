@@ -2183,11 +2183,11 @@ return {
           kind: 'result',
           exitCode: 0,
           signal: null,
-          stdout: 'ok\n',
+          stdout: 'ok top-secret-value then top-secr',
           stderr: '',
-          stdoutBytes: 3,
+          stdoutBytes: 33,
           stderrBytes: 0,
-          stdoutTruncated: false,
+          stdoutTruncated: true,
           stderrTruncated: false,
           durationMs: 12.5,
         } as const;
@@ -2223,7 +2223,7 @@ return {
             executable: 'bun',
             args: ['test', '--watch=false'],
             cwd: './packages/runtime',
-            env: { CI: 'true' },
+            env: { CI: 'true', API_TOKEN: secrets.API_TOKEN },
             timeout: '5s',
             acceptExitCodes: [0, 2],
             output: { stdout: 'capture', stderr: 'discard', maxBytes: 4096 }
@@ -2235,7 +2235,8 @@ return {
             hasContractField: Object.hasOwn(value, 'contract'),
             value
           };
-        `
+        `,
+        { API_TOKEN: 'top-secret-value' }
       )
     );
     await host.drain();
@@ -2257,7 +2258,7 @@ return {
         executable: 'bun',
         args: ['test', '--watch=false'],
         cwd: './packages/runtime',
-        env: { CI: 'true' },
+        env: { CI: 'true', API_TOKEN: 'top-secret-value' },
         acceptExitCodes: [0, 2],
         output: {
           stdout: 'capture',
@@ -2282,11 +2283,11 @@ return {
         value: {
           exitCode: 0,
           signal: null,
-          stdout: 'ok\n',
+          stdout: 'ok [REDACTED] then ********',
           stderr: '',
-          stdoutBytes: 3,
+          stdoutBytes: 33,
           stderrBytes: 0,
-          stdoutTruncated: false,
+          stdoutTruncated: true,
           stderrTruncated: false,
           durationMs: 12.5,
         },

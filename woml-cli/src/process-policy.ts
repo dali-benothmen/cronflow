@@ -40,9 +40,25 @@ export class ProcessPolicyError extends Error {
   readonly code: string;
 
   constructor(code: string, message: string) {
-    super(message);
+    super(`${message} Corrective action: ${processCorrectiveAction(code)}`);
     this.name = 'ProcessPolicyError';
     this.code = code;
+  }
+}
+
+function processCorrectiveAction(code: string): string {
+  switch (code) {
+    case 'WOML_PROCESS_DISABLED':
+      return 'grant a reviewed foreground --allow-process list or configure Process Policy v1.';
+    case 'WOML_PROCESS_MODE_DENIED':
+      return 'enable this runtime mode in the operator-owned Process Policy v1 document.';
+    case 'WOML_PROCESS_EXECUTABLE_NOT_FOUND':
+      return 'install or restore the reviewed executable, then restart WOML.';
+    case 'WOML_PROCESS_CWD_DENIED':
+    case 'WOML_PROCESS_CWD_NOT_FOUND':
+      return 'use an existing project-relative directory allowed by the process policy.';
+    default:
+      return 'repair the operator-owned Process Policy v1 configuration and run WOML again.';
   }
 }
 

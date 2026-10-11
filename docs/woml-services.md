@@ -31,6 +31,7 @@ services.cache
 services.events
 services.workflows
 services.state
+services.process
 services.telegram
 services.discord
 services.whatsapp
@@ -80,6 +81,7 @@ step. See [Lifecycle and Local Run Control](woml-lifecycle-and-run-control.md).
 | Delegate work and use one workflow's answer | `services.workflows.call()` | One independently durable child run and direct JSON result |
 | Start exact background workflow work | `services.workflows.start()` | Durable child run ID without waiting for completion |
 | Small workflow-owned correctness data | `services.state` | Versioned durable JSON state shared by future runs of the same workflow ID |
+| Run an approved local or infrastructure tool | `services.process.run()` | Rust-supervised literal arguments, policy, containment, bounded output, and fail-closed recovery |
 | Send a Telegram message or reply | `services.telegram.send()` | Supervised Bot API delivery with a stable result |
 | Send a Discord message or reply | `services.discord.send()` | Supervised REST delivery using a shared bot identity |
 | Send an approved WhatsApp template | `services.whatsapp.send()` | Supervised official Cloud API template delivery |
@@ -116,6 +118,7 @@ woml test examples/httpComparisonWorkflow.woml
 woml test examples/sqliteWorkflow.woml
 woml test examples/storageWorkflow.woml
 woml test examples/cacheWorkflow.woml
+woml test examples/process/project-checks.woml --allow-process bun
 ```
 
 The HTTP example needs internet access. PostgreSQL additionally needs
@@ -173,4 +176,5 @@ stop the active runtime.
 - Durable User State operations: `docs/woml-durable-state.md`
 - Data choice guide: `docs/woml-data-guide.md`
 - Local data security: `docs/woml-data-security.md`
+- Supervised local tools: `docs/woml-process.md`
 - Communication providers: `docs/woml-communication-providers.md`

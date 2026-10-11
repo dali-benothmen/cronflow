@@ -199,4 +199,6 @@ export interface PresentationRenderOptions {
   readonly fullResultCommand?: (runId: string) => string;
   /** Temporary/runtime-specific manual instruction; the frozen default is interactive. */
   readonly manualInstruction?: string;
+  /** Rendering clock used for ephemeral running-duration text. */
+  readonly now?: number;
 }

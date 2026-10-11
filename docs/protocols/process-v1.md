@@ -317,6 +317,41 @@ Output truncation is a successful-result condition expressed by
 `stdoutTruncated` and `stderrTruncated`, not a failure. Authors can request a
 larger bounded limit when policy allows it.
 
+## Environment and output redaction
+
+The Process authority starts every child with an empty environment. It then
+adds only values named by `environment.inherit` and explicit `env` values whose
+names are permitted by `environment.allow`. WOML's other secrets are not
+implicitly exposed to the child.
+
+Operator-inherited environment values are treated as sensitive by the Rust
+authority. Resolved WOML secret values are known only inside the isolated Bun
+worker, so that boundary replaces their exact occurrences with `[REDACTED]`
+before captured stdout or stderr becomes script-visible. It also masks a
+truncated stream suffix when that suffix matches the beginning of a known
+secret. Rust redaction includes a bounded lookahead at the capture boundary so
+truncation cannot reveal the beginning of an inherited value. Secret
+provenance intentionally does not cross Process v1, and ordinary explicit
+`env` values are not guessed to be secrets. Environment values, arguments, and
+captured output remain absent from durable events and diagnostics.
+
+No output filter can reliably recognize every transformation of a secret. A
+child can encode, hash, split, encrypt, compress, or otherwise transform a
+value before printing it. Process v1 therefore documents redaction as a
+defense-in-depth boundary, not permission to print secrets. Workflows should
+avoid passing secrets to tools that may echo or transform their environment.
+
+## Terminal activity
+
+Human terminal output renders each managed Process call beneath its owning
+step. It may show only the approved executable alias, outcome, safe exit code
+or signal, duration, observed stdout/stderr byte counts, truncation state, and
+the configured output ceiling while running. A running duration is calculated
+ephemerally by the terminal renderer and is never added to durable events. It
+never shows arguments, environment values, resolved command paths, or raw
+captured output as Process activity. JSON presentation remains ANSI-free and
+uses the same safe durable metadata.
+
 ## Recovery decision table
 
 | Observed durable state | Runtime decision | Automatic replay |

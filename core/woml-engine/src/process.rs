@@ -85,11 +85,11 @@ pub struct ProcessPolicyLimits {
 
 #[derive(Debug, Error)]
 pub enum ProcessPolicyError {
-  #[error("WOML_PROCESS_DISABLED: process execution is disabled by runtime policy")]
+  #[error("WOML_PROCESS_DISABLED: process execution is disabled by runtime policy. Corrective action: grant a reviewed foreground --allow-process list or configure Process Policy v1")]
   Disabled,
-  #[error("WOML_PROCESS_MODE_DENIED: process execution is not allowed in {0} mode")]
+  #[error("WOML_PROCESS_MODE_DENIED: process execution is not allowed in {0} mode. Corrective action: enable that mode in the operator-owned Process Policy v1 document")]
   ModeDenied(&'static str),
-  #[error("WOML_PROCESS_POLICY_INVALID: {0}")]
+  #[error("WOML_PROCESS_POLICY_INVALID: {0}. Corrective action: repair the Process Policy v1 document and run WOML again")]
   Invalid(String),
 }
 
@@ -143,11 +143,31 @@ struct ProcessRunResult {
 #[derive(Debug)]
 struct PreparedProcessPolicy {
   project_root: PathBuf,
-  executables: HashMap<String, PathBuf>,
+  executables: HashMap<String, ApprovedExecutable>,
   working_directories: Vec<PathBuf>,
   inherited_environment: BTreeMap<String, String>,
   allowed_environment: BTreeSet<String>,
   limits: ProcessPolicyLimits,
+}
+
+#[derive(Debug)]
+struct ApprovedExecutable {
+  path: PathBuf,
+  identity: ExecutableIdentity,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ExecutableIdentity {
+  length: u64,
+  modified: Option<std::time::SystemTime>,
+  #[cfg(unix)]
+  device: u64,
+  #[cfg(unix)]
+  inode: u64,
+  #[cfg(windows)]
+  volume_serial_number: Option<u32>,
+  #[cfg(windows)]
+  file_index: Option<u64>,
 }
 
 #[derive(Debug, Clone)]
@@ -182,14 +202,13 @@ impl ManagedProcessHandler {
       .policy
       .executables
       .get(&request.executable)
-      .cloned()
       .ok_or_else(|| {
         rejected(
           "WOML_PROCESS_EXECUTABLE_DENIED",
           "The requested executable alias is not allowed by runtime policy.",
         )
       })?;
-    verify_executable(&executable)?;
+    verify_executable(executable)?;
     for name in request.env.keys() {
       if !self.policy.allowed_environment.contains(name) {
         return Err(rejected(
@@ -201,7 +220,7 @@ impl ManagedProcessHandler {
     let cwd = authorize_cwd(&self.policy, &request.cwd)?;
     Ok(AuthorizedProcess {
       request,
-      executable,
+      executable: executable.path.clone(),
       cwd,
     })
   }
@@ -293,8 +312,17 @@ impl PreparedProcessPolicy {
           entry.alias
         ))
       })?;
-      verify_executable_policy(&canonical, &entry.alias)?;
-      if executables.insert(entry.alias.clone(), canonical).is_some() {
+      let identity = verify_executable_policy(&canonical, &entry.alias)?;
+      if executables
+        .insert(
+          entry.alias.clone(),
+          ApprovedExecutable {
+            path: canonical,
+            identity,
+          },
+        )
+        .is_some()
+      {
         return Err(ProcessPolicyError::Invalid(format!(
           "executable alias '{}' is duplicated",
           entry.alias
@@ -474,6 +502,17 @@ async fn execute_process(
 ) -> Result<Value, CapabilityFailure> {
   let started = Instant::now();
   let request = authorized.request;
+  // Process output is ephemeral, but it is still user-visible. Operator-
+  // inherited values are sensitive at this boundary. The Bun worker separately
+  // redacts resolved WOML secrets because secret provenance intentionally does
+  // not cross the Process v1 contract.
+  let sensitive_values = sensitive_environment_values(&policy);
+  let redaction_lookahead = sensitive_values
+    .iter()
+    .map(String::len)
+    .max()
+    .unwrap_or(0)
+    .saturating_sub(1);
   let mut command = Command::new(&authorized.executable);
   command
     .args(&request.args)
@@ -491,7 +530,7 @@ async fn execute_process(
       CapabilityFailureKind::ServiceRejected,
       "WOML_PROCESS_SPAWN_FAILED",
       "The approved executable could not be started.",
-      false,
+      true,
       false,
       None,
     )
@@ -535,11 +574,13 @@ async fn execute_process(
     stdout,
     request.output.stdout,
     request.output.max_bytes,
+    redaction_lookahead,
   ));
   let stderr_task = tokio::spawn(drain_output(
     stderr,
     request.output.stderr,
     request.output.max_bytes,
+    redaction_lookahead,
   ));
   let timeout = tokio::time::sleep(Duration::from_millis(request.timeout_ms));
   tokio::pin!(timeout);
@@ -584,8 +625,16 @@ async fn execute_process(
   // starting descendants, close the containment boundary before waiting for
   // inherited stdout/stderr handles to reach EOF.
   containment.close_remaining_tree().await;
-  let stdout = collect_output_task(stdout_task).await?;
-  let stderr = collect_output_task(stderr_task).await?;
+  let stdout = redact_and_bound_output(
+    collect_output_task(stdout_task).await?,
+    &sensitive_values,
+    request.output.max_bytes,
+  );
+  let stderr = redact_and_bound_output(
+    collect_output_task(stderr_task).await?,
+    &sensitive_values,
+    request.output.max_bytes,
+  );
   let exit_code = status.code();
   let signal = exit_signal(&status);
   let duration_ms = started.elapsed().as_secs_f64() * 1_000.0;
@@ -877,9 +926,11 @@ async fn drain_output<R: AsyncRead + Unpin>(
   mut reader: R,
   mode: OutputMode,
   max_bytes: usize,
+  redaction_lookahead: usize,
 ) -> Result<CapturedOutput, CapabilityFailure> {
+  let capture_limit = max_bytes.saturating_add(redaction_lookahead);
   let mut captured = Vec::with_capacity(match mode {
-    OutputMode::Capture => max_bytes.min(64 * 1024),
+    OutputMode::Capture => capture_limit.min(64 * 1024),
     OutputMode::Discard => 0,
   });
   let mut total = 0_u64;
@@ -893,16 +944,47 @@ async fn drain_output<R: AsyncRead + Unpin>(
       break;
     }
     total = total.saturating_add(read as u64);
-    if matches!(mode, OutputMode::Capture) && captured.len() < max_bytes {
-      let remaining = max_bytes - captured.len();
+    if matches!(mode, OutputMode::Capture) && captured.len() < capture_limit {
+      let remaining = capture_limit - captured.len();
       captured.extend_from_slice(&buffer[..read.min(remaining)]);
     }
   }
   Ok(CapturedOutput {
     text: String::from_utf8_lossy(&captured).into_owned(),
     bytes: total,
-    truncated: matches!(mode, OutputMode::Capture) && total > captured.len() as u64,
+    truncated: matches!(mode, OutputMode::Capture) && total > max_bytes as u64,
   })
+}
+
+fn sensitive_environment_values(policy: &PreparedProcessPolicy) -> Vec<String> {
+  let mut values = policy
+    .inherited_environment
+    .values()
+    .filter(|value| !value.is_empty())
+    .cloned()
+    .collect::<Vec<_>>();
+  values.sort_by_key(|value| std::cmp::Reverse(value.len()));
+  values.dedup();
+  values
+}
+
+fn redact_and_bound_output(
+  mut output: CapturedOutput,
+  sensitive_values: &[String],
+  max_bytes: usize,
+) -> CapturedOutput {
+  for value in sensitive_values {
+    output.text = output.text.replace(value, "[redacted]");
+  }
+  if output.text.len() > max_bytes {
+    let mut end = max_bytes;
+    while !output.text.is_char_boundary(end) {
+      end = end.saturating_sub(1);
+    }
+    output.text.truncate(end);
+    output.truncated = true;
+  }
+  output
 }
 
 fn parse_request(input: &Value) -> Result<ProcessRunRequest, CapabilityFailure> {
@@ -989,7 +1071,9 @@ fn validate_relative_cwd(value: &str) -> Result<(), CapabilityFailure> {
       && value.as_bytes()[0].is_ascii_alphabetic()
       && value.as_bytes()[1] == b':'
       && matches!(value.as_bytes()[2], b'/' | b'\\'))
-    || value.split(['/', '\\']).any(|component| component == "..")
+    || value
+      .split(['/', '\\'])
+      .any(|component| component == ".." || invalid_portable_path_component(component))
     || path.components().any(|component| {
       matches!(
         component,
@@ -1002,6 +1086,25 @@ fn validate_relative_cwd(value: &str) -> Result<(), CapabilityFailure> {
     ));
   }
   Ok(())
+}
+
+fn invalid_portable_path_component(component: &str) -> bool {
+  if component.is_empty() || component == "." {
+    return false;
+  }
+  if component.contains(':') || component.ends_with(' ') || component.ends_with('.') {
+    return true;
+  }
+  let stem = component
+    .split('.')
+    .next()
+    .unwrap_or(component)
+    .to_ascii_uppercase();
+  matches!(stem.as_str(), "CON" | "PRN" | "AUX" | "NUL")
+    || stem
+      .strip_prefix("COM")
+      .or_else(|| stem.strip_prefix("LPT"))
+      .is_some_and(|suffix| suffix.len() == 1 && matches!(suffix.as_bytes()[0], b'1'..=b'9'))
 }
 
 fn validate_alias(alias: &str) -> Result<(), ProcessPolicyError> {
@@ -1063,7 +1166,10 @@ fn canonical_directory(path: &Path, label: &str) -> Result<PathBuf, ProcessPolic
   Ok(canonical)
 }
 
-fn verify_executable_policy(path: &Path, alias: &str) -> Result<(), ProcessPolicyError> {
+fn verify_executable_policy(
+  path: &Path,
+  alias: &str,
+) -> Result<ExecutableIdentity, ProcessPolicyError> {
   let metadata = std::fs::metadata(path).map_err(|_| {
     ProcessPolicyError::Invalid(format!("executable alias '{alias}' is unavailable"))
   })?;
@@ -1072,11 +1178,11 @@ fn verify_executable_policy(path: &Path, alias: &str) -> Result<(), ProcessPolic
       "executable alias '{alias}' does not point to an executable file"
     )));
   }
-  Ok(())
+  Ok(executable_identity(&metadata))
 }
 
-fn verify_executable(path: &Path) -> Result<(), CapabilityFailure> {
-  let canonical = std::fs::canonicalize(path).map_err(|_| {
+fn verify_executable(executable: &ApprovedExecutable) -> Result<(), CapabilityFailure> {
+  let canonical = std::fs::canonicalize(&executable.path).map_err(|_| {
     rejected(
       "WOML_PROCESS_EXECUTABLE_NOT_FOUND",
       "The approved executable is no longer available.",
@@ -1088,13 +1194,36 @@ fn verify_executable(path: &Path) -> Result<(), CapabilityFailure> {
       "The approved executable is no longer available.",
     )
   })?;
-  if canonical != path || !metadata.is_file() || !platform_executable(&metadata) {
+  if canonical != executable.path
+    || !metadata.is_file()
+    || !platform_executable(&metadata)
+    || executable_identity(&metadata) != executable.identity
+  {
     return Err(rejected(
       "WOML_PROCESS_EXECUTABLE_CHANGED",
       "The approved executable changed after runtime preflight.",
     ));
   }
   Ok(())
+}
+
+fn executable_identity(metadata: &std::fs::Metadata) -> ExecutableIdentity {
+  #[cfg(unix)]
+  use std::os::unix::fs::MetadataExt;
+  #[cfg(windows)]
+  use std::os::windows::fs::MetadataExt;
+  ExecutableIdentity {
+    length: metadata.len(),
+    modified: metadata.modified().ok(),
+    #[cfg(unix)]
+    device: metadata.dev(),
+    #[cfg(unix)]
+    inode: metadata.ino(),
+    #[cfg(windows)]
+    volume_serial_number: metadata.volume_serial_number(),
+    #[cfg(windows)]
+    file_index: metadata.file_index(),
+  }
 }
 
 #[cfg(unix)]
@@ -1136,7 +1265,7 @@ fn output_mode_name(mode: OutputMode) -> &'static str {
 fn invalid_input(message: &str) -> CapabilityFailure {
   failure(
     CapabilityFailureKind::InvalidInput,
-    "WOML_PROCESS_INVALID_INPUT",
+    "WOML_PROCESS_INPUT_INVALID",
     message,
     false,
     false,
@@ -1177,16 +1306,90 @@ fn failure(
   CapabilityFailure {
     kind,
     code: code.to_string(),
-    message: message.to_string(),
+    message: format!("{message} Corrective action: {}", corrective_action(code)),
     retryable,
     ambiguous,
     details,
   }
 }
 
+fn corrective_action(code: &str) -> &'static str {
+  match code {
+    "WOML_PROCESS_EXECUTABLE_DENIED" => {
+      "add the intended executable alias to the operator-owned process policy"
+    }
+    "WOML_PROCESS_EXECUTABLE_NOT_FOUND" | "WOML_PROCESS_EXECUTABLE_CHANGED" => {
+      "restore the reviewed executable and restart the WOML runtime so it can preflight it again"
+    }
+    "WOML_PROCESS_CWD_NOT_FOUND" | "WOML_PROCESS_CWD_DENIED" => {
+      "use an existing project-relative directory allowed by the process policy"
+    }
+    "WOML_PROCESS_ENV_DENIED" => {
+      "remove the variable or allow its name in the operator-owned process policy"
+    }
+    "WOML_PROCESS_OUTPUT_LIMIT_DENIED" => {
+      "lower output.maxBytes or raise the policy ceiling after review"
+    }
+    "WOML_PROCESS_CONCURRENCY_LIMIT" => {
+      "wait for another managed process to finish or raise the reviewed concurrency limit"
+    }
+    "WOML_PROCESS_SPAWN_FAILED" => {
+      "verify executable permissions and host resources, then start a new run"
+    }
+    "WOML_PROCESS_TIMED_OUT" => {
+      "optimize the command or increase its timeout within the policy ceiling"
+    }
+    "WOML_PROCESS_CANCELLED" => {
+      "inspect possible partial external effects before starting a new run"
+    }
+    "WOML_PROCESS_EXIT_CODE" => {
+      "inspect the tool result or explicitly accept that exit code when it represents success"
+    }
+    "WOML_PROCESS_SIGNALLED" => {
+      "inspect host resource pressure and possible partial effects before retrying"
+    }
+    "WOML_PROCESS_INPUT_INVALID" => "correct the Process v1 request fields and bounds",
+    _ => "inspect the runtime diagnostics and start a new run only when the cause is understood",
+  }
+}
+
 #[cfg(test)]
 mod tests {
   use super::*;
+
+  #[test]
+  fn typescript_and_rust_share_the_frozen_process_v1_payloads() {
+    let request: Value = serde_json::from_str(include_str!(
+      "../../../woml/tests/fixtures/services-contracts/process-request.v1.json"
+    ))
+    .expect("standalone Process v1 request fixture");
+    let capability_request: Value = serde_json::from_str(include_str!(
+      "../../../woml/tests/fixtures/services-contracts/capability-process-request.v1.json"
+    ))
+    .expect("Capability Call v1 Process request fixture");
+    assert_eq!(capability_request["input"], request);
+
+    let parsed = parse_request(&request).expect("Rust accepts the TypeScript request fixture");
+    assert_eq!(parsed.contract, PROCESS_CONTRACT);
+    assert_eq!(parsed.contract_version, PROCESS_CONTRACT_VERSION);
+    assert_eq!(parsed.kind, "request");
+    assert_eq!(parsed.executable, "bun");
+    assert_eq!(parsed.args, ["test", "--timeout", "5000"]);
+    assert_eq!(parsed.cwd, ".");
+    assert_eq!(parsed.env.get("CI").map(String::as_str), Some("true"));
+    assert_eq!(parsed.timeout_ms, 300_000);
+    assert_eq!(parsed.accept_exit_codes, [0]);
+
+    let result: Value = serde_json::from_str(include_str!(
+      "../../../woml/tests/fixtures/services-contracts/process-result.v1.json"
+    ))
+    .expect("standalone Process v1 result fixture");
+    let capability_result: Value = serde_json::from_str(include_str!(
+      "../../../woml/tests/fixtures/services-contracts/capability-process-succeeded.v1.json"
+    ))
+    .expect("Capability Call v1 Process result fixture");
+    assert_eq!(capability_result["result"], result);
+  }
 
   fn policy() -> ProcessPolicyV1 {
     ProcessPolicyV1 {
@@ -1217,6 +1420,10 @@ mod tests {
           "WOML_PROCESS_FIXTURE_EXIT".to_string(),
           "WOML_PROCESS_FIXTURE_TREE".to_string(),
           "WOML_PROCESS_FIXTURE_HEARTBEAT".to_string(),
+          "WOML_PROCESS_FIXTURE_CWD".to_string(),
+          "WOML_PROCESS_FIXTURE_ENV_NAME".to_string(),
+          "WOML_PROCESS_FIXTURE_PRINT_ENV".to_string(),
+          "PATH".to_string(),
         ],
       },
       limits: ProcessPolicyLimits {
@@ -1240,6 +1447,20 @@ mod tests {
       "acceptExitCodes": accepted,
       "output": { "stdout": "capture", "stderr": "capture", "maxBytes": max_bytes }
     })
+  }
+
+  fn with_cwd(mut request: Value, cwd: &str) -> Value {
+    request["cwd"] = json!(cwd);
+    request
+  }
+
+  fn temporary_directory(label: &str) -> PathBuf {
+    let path = std::env::temp_dir().join(format!(
+      "woml-process-{label}-{}",
+      uuid::Uuid::new_v4().simple()
+    ));
+    std::fs::create_dir(&path).expect("create temporary directory");
+    path
   }
 
   #[test]
@@ -1276,6 +1497,30 @@ mod tests {
         std::thread::sleep(Duration::from_millis(10));
       }
     }
+    if std::env::var("WOML_PROCESS_FIXTURE_CWD").as_deref() == Ok("1") {
+      print!(
+        "{}",
+        std::env::current_dir()
+          .expect("fixture cwd")
+          .to_string_lossy()
+      );
+      return;
+    }
+    if let Ok(name) = std::env::var("WOML_PROCESS_FIXTURE_ENV_NAME") {
+      print!(
+        "{}",
+        if std::env::var_os(name).is_some() {
+          "present"
+        } else {
+          "absent"
+        }
+      );
+      return;
+    }
+    if let Ok(name) = std::env::var("WOML_PROCESS_FIXTURE_PRINT_ENV") {
+      print!("{}", std::env::var(name).unwrap_or_default());
+      return;
+    }
     let text = std::env::var("WOML_PROCESS_FIXTURE_TEXT").unwrap_or_default();
     print!("{text}");
     if let Ok(code) = std::env::var("WOML_PROCESS_FIXTURE_EXIT") {
@@ -1306,6 +1551,273 @@ mod tests {
     assert_eq!(value["stdoutTruncated"], true);
     assert!(value["stdoutBytes"].as_u64().expect("byte count") > 10);
     assert!(value["stdout"].as_str().expect("stdout").len() <= 10);
+  }
+
+  #[tokio::test]
+  async fn inherited_environment_values_are_redacted_from_captured_output() {
+    let mut configured = policy();
+    configured.environment.inherit = vec!["PATH".to_string()];
+    let handler = ManagedProcessHandler::new(configured, ProcessRuntimeMode::Foreground)
+      .expect("valid inherited environment policy");
+    let value = handler
+      .execute(
+        request(
+          json!({
+            "WOML_PROCESS_FIXTURE": "1",
+            "WOML_PROCESS_FIXTURE_PRINT_ENV": "PATH"
+          }),
+          1_024,
+          vec![0],
+        ),
+        CapabilityCancellationToken::default(),
+      )
+      .await
+      .expect("approved process succeeds");
+    assert!(value["stdout"]
+      .as_str()
+      .expect("stdout")
+      .contains("[redacted]"));
+    assert!(!value
+      .to_string()
+      .contains(&std::env::var("PATH").expect("host PATH")));
+  }
+
+  #[tokio::test]
+  async fn ambient_environment_is_cleared_unless_explicitly_inherited() {
+    let handler =
+      ManagedProcessHandler::new(policy(), ProcessRuntimeMode::Foreground).expect("valid policy");
+    let value = handler
+      .execute(
+        request(
+          json!({
+            "WOML_PROCESS_FIXTURE": "1",
+            "WOML_PROCESS_FIXTURE_ENV_NAME": "HOME"
+          }),
+          128,
+          vec![0],
+        ),
+        CapabilityCancellationToken::default(),
+      )
+      .await
+      .expect("approved process succeeds");
+    assert!(value["stdout"].as_str().expect("stdout").contains("absent"));
+  }
+
+  #[tokio::test]
+  async fn policy_inherits_only_names_the_operator_approved() {
+    let mut configured = policy();
+    configured.environment.inherit = vec!["PATH".to_string()];
+    let handler = ManagedProcessHandler::new(configured, ProcessRuntimeMode::Foreground)
+      .expect("valid inherited environment policy");
+    let value = handler
+      .execute(
+        request(
+          json!({
+            "WOML_PROCESS_FIXTURE": "1",
+            "WOML_PROCESS_FIXTURE_ENV_NAME": "PATH"
+          }),
+          128,
+          vec![0],
+        ),
+        CapabilityCancellationToken::default(),
+      )
+      .await
+      .expect("approved inherited variable is available");
+    assert!(value["stdout"]
+      .as_str()
+      .expect("stdout")
+      .contains("present"));
+  }
+
+  #[tokio::test]
+  async fn path_shadowing_cannot_change_the_preflighted_executable() {
+    let handler =
+      ManagedProcessHandler::new(policy(), ProcessRuntimeMode::Foreground).expect("valid policy");
+    let value = handler
+      .execute(
+        request(
+          json!({
+            "WOML_PROCESS_FIXTURE": "1",
+            "WOML_PROCESS_FIXTURE_TEXT": "approved-binary-ran",
+            "PATH": "/definitely/not/the/operator/path"
+          }),
+          128,
+          vec![0],
+        ),
+        CapabilityCancellationToken::default(),
+      )
+      .await
+      .expect("canonical executable is used directly");
+    assert_eq!(value["exitCode"], 0);
+  }
+
+  #[tokio::test]
+  async fn cwd_is_resolved_from_the_policy_project_root() {
+    let root = temporary_directory("project-root");
+    let mut configured = policy();
+    configured.project_root = root.to_string_lossy().into_owned();
+    configured.working_directories = vec![".".to_string()];
+    let handler = ManagedProcessHandler::new(configured, ProcessRuntimeMode::Foreground)
+      .expect("valid project policy");
+    let value = handler
+      .execute(
+        request(
+          json!({
+            "WOML_PROCESS_FIXTURE": "1",
+            "WOML_PROCESS_FIXTURE_CWD": "1"
+          }),
+          512,
+          vec![0],
+        ),
+        CapabilityCancellationToken::default(),
+      )
+      .await
+      .expect("approved process succeeds");
+    assert!(value["stdout"]
+      .as_str()
+      .expect("stdout")
+      .contains(root.to_string_lossy().as_ref()));
+    let _ = std::fs::remove_dir(root);
+  }
+
+  #[cfg(unix)]
+  #[test]
+  fn symlink_cannot_escape_an_allowed_working_directory() {
+    use std::os::unix::fs::symlink;
+    let root = temporary_directory("symlink-root");
+    let outside = temporary_directory("symlink-outside");
+    symlink(&outside, root.join("escape")).expect("create symlink");
+    let mut configured = policy();
+    configured.project_root = root.to_string_lossy().into_owned();
+    configured.working_directories = vec![".".to_string()];
+    let handler = ManagedProcessHandler::new(configured, ProcessRuntimeMode::Foreground)
+      .expect("valid project policy");
+    let error = handler
+      .parse_and_authorize(&with_cwd(request(json!({}), 128, vec![0]), "escape"))
+      .expect_err("symlink escape denied");
+    assert_eq!(error.code, "WOML_PROCESS_CWD_DENIED");
+    let _ = std::fs::remove_file(root.join("escape"));
+    let _ = std::fs::remove_dir(root);
+    let _ = std::fs::remove_dir(outside);
+  }
+
+  #[cfg(unix)]
+  #[test]
+  fn executable_replacement_is_detected_after_preflight() {
+    let root = temporary_directory("executable-identity");
+    let executable = root.join("fixture");
+    std::fs::copy(
+      std::env::current_exe().expect("current executable"),
+      &executable,
+    )
+    .expect("copy executable");
+    let mut configured = policy();
+    configured.executables[0].path = executable.to_string_lossy().into_owned();
+    let handler = ManagedProcessHandler::new(configured, ProcessRuntimeMode::Foreground)
+      .expect("valid executable policy");
+    let replacement = root.join("replacement");
+    std::fs::copy(
+      std::env::current_exe().expect("current executable"),
+      &replacement,
+    )
+    .expect("copy replacement");
+    std::fs::rename(&replacement, &executable).expect("replace executable");
+    let error = handler
+      .parse_and_authorize(&request(json!({}), 128, vec![0]))
+      .expect_err("replacement denied");
+    assert_eq!(error.code, "WOML_PROCESS_EXECUTABLE_CHANGED");
+    let _ = std::fs::remove_file(executable);
+    let _ = std::fs::remove_dir(root);
+  }
+
+  #[test]
+  fn validation_rejects_device_paths_and_resource_exhaustion() {
+    for cwd in ["NUL", "con.txt", "COM1", "LPT9.log", "folder. "] {
+      let error = parse_request(&with_cwd(request(json!({}), 128, vec![0]), cwd))
+        .expect_err("portable device path denied");
+      assert_eq!(error.code, "WOML_PROCESS_INPUT_INVALID");
+    }
+    let too_many_args = (0..257).map(|_| "x").collect::<Vec<_>>();
+    let mut value = request(json!({}), 128, vec![0]);
+    value["args"] = json!(too_many_args);
+    assert_eq!(
+      parse_request(&value)
+        .expect_err("argument count bounded")
+        .code,
+      "WOML_PROCESS_INPUT_INVALID"
+    );
+    value = request(json!({}), 128, vec![0]);
+    value["args"] = json!(["x".repeat(32_769)]);
+    assert_eq!(
+      parse_request(&value)
+        .expect_err("argument size bounded")
+        .code,
+      "WOML_PROCESS_INPUT_INVALID"
+    );
+    let environment = (0..129)
+      .map(|index| (format!("SAFE_{index}"), "x"))
+      .collect::<BTreeMap<_, _>>();
+    assert_eq!(
+      parse_request(&request(json!(environment), 128, vec![0]))
+        .expect_err("environment count bounded")
+        .code,
+      "WOML_PROCESS_INPUT_INVALID"
+    );
+    assert_eq!(
+      parse_request(&request(
+        json!({ "SAFE": "x".repeat(32_769) }),
+        128,
+        vec![0]
+      ))
+      .expect_err("environment value bounded")
+      .code,
+      "WOML_PROCESS_INPUT_INVALID"
+    );
+  }
+
+  #[test]
+  fn generated_process_requests_are_validated_without_panics() {
+    let alphabet = [b'a', b'Z', b'0', b'.', b'/', b'\\', b':', b' ', 0, 0xff];
+    let mut state = 0x5eed_u64;
+    for length in 0..256 {
+      let mut bytes = Vec::with_capacity(length);
+      for _ in 0..length {
+        state = state
+          .wrapping_mul(6_364_136_223_846_793_005)
+          .wrapping_add(1);
+        bytes.push(alphabet[(state as usize) % alphabet.len()]);
+      }
+      let candidate = String::from_utf8_lossy(&bytes).into_owned();
+      let value = with_cwd(request(json!({}), 128, vec![0]), &candidate);
+      let _ = parse_request(&value);
+    }
+  }
+
+  #[test]
+  fn every_process_failure_has_an_author_facing_corrective_action() {
+    for code in [
+      "WOML_PROCESS_EXECUTABLE_DENIED",
+      "WOML_PROCESS_EXECUTABLE_NOT_FOUND",
+      "WOML_PROCESS_EXECUTABLE_CHANGED",
+      "WOML_PROCESS_CWD_DENIED",
+      "WOML_PROCESS_ENV_DENIED",
+      "WOML_PROCESS_SPAWN_FAILED",
+      "WOML_PROCESS_TIMED_OUT",
+      "WOML_PROCESS_CANCELLED",
+      "WOML_PROCESS_EXIT_CODE",
+      "WOML_PROCESS_INPUT_INVALID",
+    ] {
+      let error = failure(
+        CapabilityFailureKind::ServiceRejected,
+        code,
+        "Safe process failure.",
+        false,
+        false,
+        None,
+      );
+      assert!(error.message.contains("Corrective action:"), "{code}");
+      assert!(!error.message.contains('/') && !error.message.contains('\\'));
+    }
   }
 
   #[tokio::test]
@@ -1451,6 +1963,45 @@ mod tests {
     assert_eq!(error.kind, CapabilityFailureKind::Cancelled);
     assert_eq!(error.code, "WOML_PROCESS_CANCELLED");
     assert!(error.ambiguous);
+    assert_heartbeat_stops(&heartbeat).await;
+    let _ = std::fs::remove_file(heartbeat);
+  }
+
+  #[cfg(any(unix, windows))]
+  #[tokio::test]
+  async fn concurrency_ceiling_rejects_excess_processes_without_queueing() {
+    let heartbeat = std::env::temp_dir().join(format!(
+      "woml-process-concurrency-heartbeat-{}",
+      uuid::Uuid::new_v4()
+    ));
+    let handler =
+      ManagedProcessHandler::new(policy(), ProcessRuntimeMode::Foreground).expect("valid policy");
+    let cancellation = CapabilityCancellationToken::default();
+    let running_handler = handler.clone();
+    let running_cancellation = cancellation.clone();
+    let running_request = tree_request(&heartbeat, 5_000);
+    let running = tokio::spawn(async move {
+      running_handler
+        .execute(running_request, running_cancellation)
+        .await
+    });
+    for _ in 0..100 {
+      if heartbeat.exists() {
+        break;
+      }
+      tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+    assert!(heartbeat.exists(), "first process did not start");
+    let error = handler
+      .execute(
+        request(json!({ "WOML_PROCESS_FIXTURE": "1" }), 128, vec![0]),
+        CapabilityCancellationToken::default(),
+      )
+      .await
+      .expect_err("second process exceeds the policy ceiling");
+    assert_eq!(error.code, "WOML_PROCESS_CONCURRENCY_LIMIT");
+    cancellation.cancel();
+    let _ = running.await;
     assert_heartbeat_stops(&heartbeat).await;
     let _ = std::fs::remove_file(heartbeat);
   }

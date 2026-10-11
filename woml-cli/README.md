@@ -291,6 +291,7 @@ return {
 | `services.storage` | Stores and retrieves larger checksummed objects outside workflow context. |
 | `services.cache` | Keeps reusable, expiring optimization data that may be safely discarded. |
 | `services.state` | Stores small, versioned workflow-owned values that must survive future runs and restarts. |
+| `services.process.run()` | Runs an operator-approved local tool with literal arguments, Rust-owned containment, bounded output, cancellation, and durable recovery. |
 | `services.events.emit()` | Publishes a durable named event to every matching active workflow. |
 | `services.workflows.call()` | Starts one workflow and waits for its final JSON result. |
 | `services.workflows.start()` | Starts one workflow in the background and immediately returns its durable run ID. |
@@ -344,6 +345,7 @@ For Codex and other Agent Skills-compatible tools, copy the repository's complet
 - [Language reference](https://github.com/dali-benothmen/woml/blob/master/docs/language-reference.md)
 - [CLI reference](https://github.com/dali-benothmen/woml/blob/master/docs/cli-reference.md)
 - [Services and capabilities](https://github.com/dali-benothmen/woml/blob/master/docs/woml-services.md)
+- [Run local tools safely](https://github.com/dali-benothmen/woml/blob/master/docs/woml-process.md)
 - [Modules](https://github.com/dali-benothmen/woml/blob/master/docs/woml-modules.md)
 - [Communication providers](https://github.com/dali-benothmen/woml/blob/master/docs/woml-communication-providers.md)
 - [Production deployment](https://github.com/dali-benothmen/woml/blob/master/docs/woml-production-deployment.md)

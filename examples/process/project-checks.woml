@@ -1,0 +1,43 @@
+<woml>
+  <workflow
+    id="project-checks"
+    name="Project checks"
+    description="Run type checking and tests through supervised local processes."
+    version="1.0.0"
+  >
+    <triggers><manual id="start" /></triggers>
+    <steps>
+      <parallel id="checks" name="Run project checks">
+        <step id="typecheck" name="Check TypeScript">
+          <script>
+            return await services.process.run({
+              executable: "bun",
+              args: ["run", "typecheck"],
+              timeout: "5m",
+              output: { stdout: "capture", stderr: "capture", maxBytes: 65536 }
+            }, { name: "project-typecheck" });
+          </script>
+        </step>
+        <step id="test" name="Run tests">
+          <script>
+            return await services.process.run({
+              executable: "bun",
+              args: ["test"],
+              timeout: "10m",
+              output: { stdout: "capture", stderr: "capture", maxBytes: 65536 }
+            }, { name: "project-tests" });
+          </script>
+        </step>
+      </parallel>
+      <step id="summary" name="Summarize checks">
+        <script>
+          return {
+            passed: context.steps.typecheck.exitCode === 0 && context.steps.test.exitCode === 0,
+            typecheckMs: context.steps.typecheck.durationMs,
+            testsMs: context.steps.test.durationMs
+          };
+        </script>
+      </step>
+    </steps>
+  </workflow>
+</woml>

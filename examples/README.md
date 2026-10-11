@@ -79,10 +79,22 @@ continues.
 | Expiring cache | [`cacheWorkflow.woml`](cacheWorkflow.woml) |
 | Durable user state | [`durableStateWorkflow.woml`](durableStateWorkflow.woml) |
 | Internal event fan-out | [`internalEvents/`](internalEvents/) |
+| Supervised local and infrastructure tools | [`process/`](process/) |
 
 Database, network, and provider examples may create local data or call external
 systems. Read the linked service guide in the [documentation map](../docs/README.md)
 before executing them.
+
+Process examples are disabled until the operator explicitly grants an alias:
+
+```bash
+woml test examples/process/project-checks.woml --allow-process bun
+woml test examples/process/kubernetes-rollout-check.woml --allow-process kubectl
+```
+
+Use [`process/process-policy.example.json`](process/process-policy.example.json)
+as a production-policy template after replacing its executable paths. Read the
+[Process guide](../docs/woml-process.md) before enabling background execution.
 
 ## 6. Operate a complete deployment
 

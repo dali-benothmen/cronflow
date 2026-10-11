@@ -23,15 +23,31 @@ const DEFINITION_HASH: &str =
 
 #[test]
 fn frozen_capability_call_messages_validate_in_rust() {
-  let request: CapabilityCallRequest = serde_json::from_str(include_str!(
-    "../../../woml/tests/fixtures/services-contracts/capability-request.v1.json"
-  ))
-  .unwrap();
-  request.validate().unwrap();
+  for fixture in [
+    include_str!("../../../woml/tests/fixtures/services-contracts/capability-request.v1.json"),
+    include_str!(
+      "../../../woml/tests/fixtures/services-contracts/capability-process-request.v1.json"
+    ),
+  ] {
+    let request: CapabilityCallRequest = serde_json::from_str(fixture).unwrap();
+    request.validate().unwrap();
+  }
   for fixture in [
     include_str!("../../../woml/tests/fixtures/services-contracts/capability-succeeded.v1.json"),
     include_str!("../../../woml/tests/fixtures/services-contracts/capability-failed.v1.json"),
     include_str!("../../../woml/tests/fixtures/services-contracts/capability-host-crashed.v1.json"),
+    include_str!(
+      "../../../woml/tests/fixtures/services-contracts/capability-process-succeeded.v1.json"
+    ),
+    include_str!(
+      "../../../woml/tests/fixtures/services-contracts/capability-process-exit-failed.v1.json"
+    ),
+    include_str!(
+      "../../../woml/tests/fixtures/services-contracts/capability-process-timeout.v1.json"
+    ),
+    include_str!(
+      "../../../woml/tests/fixtures/services-contracts/capability-process-cancelled.v1.json"
+    ),
   ] {
     let result: CapabilityCallResult = serde_json::from_str(fixture).unwrap();
     result.validate().unwrap();

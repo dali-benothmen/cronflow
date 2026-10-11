@@ -826,7 +826,59 @@ function normalizeProcessRequest(input: JsonValue): JsonObject {
   });
 }
 
-function publicProcessResult(result: JsonValue): JsonValue {
+function redactProcessOutput(
+  value: string,
+  secrets: readonly string[],
+  truncated: boolean
+): string {
+  let redacted = value;
+  for (const secret of [...secrets]
+    .filter(secret => secret.length > 0)
+    .sort((left, right) => right.length - left.length)) {
+    const secretBytes = Buffer.byteLength(secret, 'utf8');
+    const marker = secretBytes >= 10 ? '[REDACTED]' : '*'.repeat(secretBytes);
+    redacted = redacted.split(secret).join(marker);
+    if (truncated) {
+      const length = trailingSecretPrefixLength(redacted, secret);
+      if (length > 0) {
+        const prefix = secret.slice(0, length);
+        const prefixBytes = Buffer.byteLength(prefix, 'utf8');
+        const boundaryMarker = prefixBytes >= 10
+          ? '[REDACTED]'
+          : '*'.repeat(prefixBytes);
+        redacted = `${redacted.slice(0, -prefix.length)}${boundaryMarker}`;
+      }
+    }
+  }
+  return redacted;
+}
+
+function trailingSecretPrefixLength(value: string, secret: string): number {
+  if (secret.length < 2 || value.length === 0) return 0;
+  const failure = new Array<number>(secret.length).fill(0);
+  for (let index = 1, matched = 0; index < secret.length; index += 1) {
+    while (matched > 0 && secret[index] !== secret[matched]) {
+      matched = failure[matched - 1]!;
+    }
+    if (secret[index] === secret[matched]) matched += 1;
+    failure[index] = matched;
+  }
+  const tail = value.slice(-(secret.length - 1));
+  let matched = 0;
+  for (let index = 0; index < tail.length; index += 1) {
+    while (matched > 0 && tail[index] !== secret[matched]) {
+      matched = failure[matched - 1]!;
+    }
+    if (tail[index] === secret[matched]) matched += 1;
+    if (matched === secret.length) matched = failure[matched - 1]!;
+  }
+  return matched;
+}
+
+function publicProcessResult(
+  result: JsonValue,
+  secrets: readonly string[]
+): JsonValue {
   const object = plainObject(result);
   const fields = new Set([
     'contract',
@@ -875,8 +927,8 @@ function publicProcessResult(result: JsonValue): JsonValue {
   return Object.freeze({
     exitCode: object.exitCode,
     signal: object.signal,
-    stdout: object.stdout,
-    stderr: object.stderr,
+    stdout: redactProcessOutput(object.stdout, secrets, object.stdoutTruncated),
+    stderr: redactProcessOutput(object.stderr, secrets, object.stderrTruncated),
     stdoutBytes: object.stdoutBytes,
     stderrBytes: object.stderrBytes,
     stdoutTruncated: object.stdoutTruncated,
@@ -1835,6 +1887,7 @@ function deeplyReadonlyServiceFacade(
     return Object.freeze({});
   }
   const attempt = request.attempt;
+  const resolvedSecretValues = Object.values(request.bindings.secrets);
   const capabilityCache = new Map<string, unknown>();
   const invokeCapability = async (
     capability: string,
@@ -2010,7 +2063,7 @@ function deeplyReadonlyServiceFacade(
                       : managedWhatsApp
                         ? publicWhatsAppResult(result)
                         : managedProcess
-                          ? publicProcessResult(result)
+                          ? publicProcessResult(result, resolvedSecretValues)
                           : result;
   };
   return new Proxy(Object.freeze({}), {
