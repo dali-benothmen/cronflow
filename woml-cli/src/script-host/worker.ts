@@ -2203,10 +2203,26 @@ function deeplyReadonlyServiceFacade(
               'services.process.run() requires a request and optional stable operation options.'
             );
           }
+          const normalized = normalizeProcessRequest(args[0] as JsonValue);
+          const remainingTimeoutMs = Math.max(
+            1,
+            Math.floor(executionDeadline - performance.now())
+          );
+          const requestedTimeoutMs = normalized.timeoutMs;
+          if (typeof requestedTimeoutMs !== 'number') {
+            throw new TypeError('Normalized Process timeout must be numeric.');
+          }
+          const effectiveRequest = deepFreezeJson({
+            ...(normalized as JsonObject),
+            timeoutMs:
+              requestedTimeoutMs < remainingTimeoutMs
+                ? requestedTimeoutMs
+                : remainingTimeoutMs,
+          });
           return invokeCapability(
             'process',
             'run',
-            normalizeProcessRequest(args[0] as JsonValue),
+            effectiveRequest,
             args[1] as JsonValue | undefined
           );
         };

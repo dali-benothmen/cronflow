@@ -980,6 +980,56 @@ fn workflow_operation(
   Some((kind, bounded(&details, MAX_MESSAGE)))
 }
 
+fn process_operation(node_id: &str, projection: &RunProjection) -> Option<String> {
+  let operations = projection
+    .operations
+    .values()
+    .filter(|operation| {
+      operation.node_id == node_id
+        && operation.capability == "process"
+        && operation.operation == "run"
+    })
+    .map(|operation| {
+      let executable = operation
+        .metadata
+        .get("executable")
+        .and_then(Value::as_str)
+        .unwrap_or("approved executable");
+      let (outcome, duration_ms) = match &operation.status {
+        crate::projection::OperationStatus::Started => ("running", None),
+        crate::projection::OperationStatus::Succeeded { duration_ms, .. } => {
+          ("succeeded", Some(*duration_ms))
+        }
+        crate::projection::OperationStatus::Failed {
+          duration_ms,
+          failure,
+        } => {
+          let outcome = operation
+            .metadata
+            .get("outcome")
+            .and_then(Value::as_str)
+            .unwrap_or(match failure.kind {
+              crate::CapabilityFailureKind::Cancelled => "cancelled",
+              crate::CapabilityFailureKind::TimedOut => "timed out",
+              crate::CapabilityFailureKind::Interrupted => "interrupted",
+              _ => "failed",
+            });
+          (outcome, Some(*duration_ms))
+        }
+      };
+      let mut parts = vec![format!("Process {executable}"), outcome.to_string()];
+      if let Some(exit_code) = operation.metadata.get("exitCode").and_then(Value::as_i64) {
+        parts.push(format!("exit {exit_code}"));
+      }
+      if let Some(duration_ms) = duration_ms {
+        parts.push(format!("{duration_ms:.1} ms"));
+      }
+      parts.join(" · ")
+    })
+    .collect::<Vec<_>>();
+  (!operations.is_empty()).then(|| bounded(&operations.join("; "), MAX_MESSAGE))
+}
+
 fn runtime_policy_detail(
   workflow: &CompiledWorkflowDefinition,
   projection: &RunProjection,
@@ -1947,6 +1997,7 @@ fn steps(
       runtime_policy_detail(workflow, projection, &node.id),
       selected_choice(workflow, &node.id, projection),
       workflow_operation.map(|(_, detail)| detail),
+      process_operation(&node.id, projection),
       retry_detail(&node.id, timeline, status, projection),
     ]);
     if node.handler == "engine.approval-wait" {

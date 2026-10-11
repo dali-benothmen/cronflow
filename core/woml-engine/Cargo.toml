@@ -26,6 +26,7 @@ serde_json = { version = "1.0.143", features = ["preserve_order"] }
 serde_json_canonicalizer = "0.3.2"
 sha2 = "0.10"
 hmac = "0.12"
+libc = "0.2"
 serde_urlencoded = "0.7"
 subtle = "2.6"
 rusqlite = { version = "0.30", features = ["backup", "bundled"] }
@@ -36,3 +37,6 @@ tokio = { version = "1.0", features = ["io-util", "macros", "process", "rt", "sy
 tokio-postgres = { version = "0.7", features = ["with-chrono-0_4", "with-serde_json-1", "with-uuid-1"] }
 tokio-postgres-rustls = { version = "0.14", features = ["ring", "webpki-roots"] }
 uuid = { version = "1.0", features = ["v4"] }
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61.2", features = ["Win32_Foundation", "Win32_System_JobObjects", "Win32_System_Threading"] }

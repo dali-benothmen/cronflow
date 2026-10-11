@@ -3165,6 +3165,7 @@ dependencies = [
  "hex",
  "hmac 0.12.1",
  "jsonschema",
+ "libc",
  "reqwest",
  "rusqlite",
  "rustls",
@@ -3179,6 +3180,7 @@ dependencies = [
  "tokio-postgres",
  "tokio-postgres-rustls",
  "uuid",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]

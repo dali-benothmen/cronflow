@@ -2224,7 +2224,7 @@ return {
             args: ['test', '--watch=false'],
             cwd: './packages/runtime',
             env: { CI: 'true' },
-            timeout: '500ms',
+            timeout: '5s',
             acceptExitCodes: [0, 2],
             output: { stdout: 'capture', stderr: 'discard', maxBytes: 4096 }
           }, { name: 'project-tests' });
@@ -2258,7 +2258,6 @@ return {
         args: ['test', '--watch=false'],
         cwd: './packages/runtime',
         env: { CI: 'true' },
-        timeoutMs: 500,
         acceptExitCodes: [0, 2],
         output: {
           stdout: 'capture',
@@ -2268,7 +2267,10 @@ return {
       },
     });
     expect(calls[0]!.call.limits.timeoutMs).toBeGreaterThan(0);
-    expect(calls[0]!.call.limits.timeoutMs).toBeLessThanOrEqual(1_500);
+    expect(Number((calls[0]!.call.input as Record<string, unknown>).timeoutMs)).toBeLessThanOrEqual(
+      2_000
+    );
+    expect(calls[0]!.call.limits.timeoutMs).toBeLessThanOrEqual(2_000);
     expect(calls[0]!.call.identity.operationKey).toMatch(/^sha256:[a-f0-9]{64}$/);
     expect(completed[0]?.outcome).toEqual({
       kind: 'success',

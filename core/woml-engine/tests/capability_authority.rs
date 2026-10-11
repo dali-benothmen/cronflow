@@ -366,6 +366,66 @@ fn recovery_closes_interrupted_managed_operation_as_ambiguous_before_the_attempt
 }
 
 #[test]
+fn recovery_marks_process_ambiguous_without_replay_or_sensitive_metadata() {
+  let mut store = active_store("run-process-recovery", "inv-process-recovery");
+  let mut call = request(
+    "run-process-recovery",
+    "inv-process-recovery",
+    "process-active",
+    json!(null),
+  );
+  call.capability = "process".to_string();
+  call.operation = "run".to_string();
+  store
+    .append_payload(
+      "run-process-recovery",
+      "event-process-operation-start",
+      Utc::now(),
+      RunEventPayload::OperationStarted(OperationStartedData {
+        node_id: call.node_id,
+        attempt_number: call.attempt_number,
+        invocation_id: call.invocation_id,
+        call_id: call.call_id,
+        operation_key: call.identity.operation_key,
+        capability: call.capability,
+        operation: call.operation,
+        execution_mode: OperationExecutionMode::Managed,
+        metadata: Map::from_iter([
+          ("executable".to_string(), json!("kubectl")),
+          ("argumentCount".to_string(), json!(3)),
+        ]),
+      }),
+    )
+    .unwrap();
+
+  let report = store.recover_interrupted_runs().unwrap();
+  assert_eq!(report.recovered_runs, 1);
+  let projection = store.projection("run-process-recovery").unwrap();
+  let operation = projection.operations.values().next().unwrap();
+  assert_eq!(
+    operation.metadata.get("executable"),
+    Some(&json!("kubectl"))
+  );
+  assert_eq!(
+    operation.metadata.get("outcome"),
+    Some(&json!("interrupted"))
+  );
+  assert!(matches!(
+    operation.status,
+    OperationStatus::Failed { ref failure, .. }
+      if failure.kind == CapabilityFailureKind::Interrupted
+        && failure.code == "WOML_PROCESS_INTERRUPTED"
+        && failure.ambiguous
+        && !failure.retryable
+  ));
+  let history = serde_json::to_string(&store.events("run-process-recovery").unwrap()).unwrap();
+  assert!(!history.contains("args"));
+  assert!(!history.contains("env"));
+  assert!(!history.contains("stdout"));
+  assert!(!history.contains("stderr"));
+}
+
+#[test]
 fn recovery_closes_interrupted_observed_fetch_as_ambiguous_before_the_attempt() {
   let mut store = active_store("run-fetch-recovery", "inv-fetch-recovery");
   let call = request(

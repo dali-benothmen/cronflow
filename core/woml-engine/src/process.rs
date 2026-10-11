@@ -2,8 +2,9 @@
 
 use std::{
   collections::{BTreeMap, BTreeSet, HashMap},
+  io,
   path::{Component, Path, PathBuf},
-  process::Stdio,
+  process::{ExitStatus, Stdio},
   sync::Arc,
   time::{Duration, Instant},
 };
@@ -14,9 +15,13 @@ use serde_json::{json, Map, Value};
 use thiserror::Error;
 use tokio::{
   io::{AsyncRead, AsyncReadExt},
-  process::Command,
+  process::{Child, Command},
   sync::{OwnedSemaphorePermit, Semaphore},
+  task::JoinHandle,
 };
+
+const PROCESS_TERMINATION_GRACE: Duration = Duration::from_millis(250);
+const PROCESS_PIPE_DRAIN_GRACE: Duration = Duration::from_secs(1);
 
 use crate::{
   CapabilityCallRequest, CapabilityCancellationToken, CapabilityDescriptor, CapabilityEffect,
@@ -165,13 +170,8 @@ impl ManagedProcessHandler {
   }
 
   fn parse_and_authorize(&self, input: &Value) -> Result<AuthorizedProcess, CapabilityFailure> {
-    let request = parse_request(input)?;
-    if request.timeout_ms > self.policy.limits.max_timeout_ms {
-      return Err(rejected(
-        "WOML_PROCESS_TIMEOUT_DENIED",
-        "The requested process timeout exceeds the runtime policy limit.",
-      ));
-    }
+    let mut request = parse_request(input)?;
+    request.timeout_ms = request.timeout_ms.min(self.policy.limits.max_timeout_ms);
     if request.output.max_bytes > self.policy.limits.max_output_bytes {
       return Err(rejected(
         "WOML_PROCESS_OUTPUT_LIMIT_DENIED",
@@ -383,7 +383,10 @@ impl CapabilityHandler for ManagedProcessHandler {
   }
 
   fn safe_result_metadata(&self, result: &Value) -> Map<String, Value> {
-    let mut safe = Map::new();
+    let mut safe = Map::from_iter([(
+      "outcome".to_string(),
+      Value::String("succeeded".to_string()),
+    )]);
     for field in [
       "exitCode",
       "signal",
@@ -395,6 +398,32 @@ impl CapabilityHandler for ManagedProcessHandler {
     ] {
       if let Some(value) = result.get(field) {
         safe.insert(field.to_string(), value.clone());
+      }
+    }
+    safe
+  }
+
+  fn safe_failure_metadata(&self, error: &CapabilityFailure) -> Map<String, Value> {
+    let outcome = match error.kind {
+      CapabilityFailureKind::Cancelled => "cancelled",
+      CapabilityFailureKind::TimedOut => "timed_out",
+      CapabilityFailureKind::Interrupted => "interrupted",
+      _ => "failed",
+    };
+    let mut safe = Map::from_iter([("outcome".to_string(), Value::String(outcome.to_string()))]);
+    if let Some(details) = error.details.as_ref() {
+      for field in [
+        "exitCode",
+        "signal",
+        "durationMs",
+        "stdoutBytes",
+        "stderrBytes",
+        "stdoutTruncated",
+        "stderrTruncated",
+      ] {
+        if let Some(value) = details.get(field) {
+          safe.insert(field.to_string(), value.clone());
+        }
       }
     }
     safe
@@ -456,6 +485,7 @@ async fn execute_process(
     .stdout(Stdio::piped())
     .stderr(Stdio::piped())
     .kill_on_drop(true);
+  prepare_process_containment(&mut command);
   let mut child = command.spawn().map_err(|_| {
     failure(
       CapabilityFailureKind::ServiceRejected,
@@ -466,6 +496,21 @@ async fn execute_process(
       None,
     )
   })?;
+  let mut containment = match ProcessContainment::attach(&child) {
+    Ok(containment) => containment,
+    Err(_) => {
+      let _ = child.kill().await;
+      let _ = child.wait().await;
+      return Err(failure(
+        CapabilityFailureKind::HandlerCrashed,
+        "WOML_PROCESS_CONTAINMENT_FAILED",
+        "The process could not be attached to its operating-system containment boundary.",
+        false,
+        true,
+        None,
+      ));
+    }
+  };
   let stdout = child.stdout.take().ok_or_else(|| {
     failure(
       CapabilityFailureKind::HandlerCrashed,
@@ -501,10 +546,9 @@ async fn execute_process(
   let status = tokio::select! {
     biased;
     _ = cancellation.cancelled() => {
-      let _ = child.kill().await;
-      let _ = child.wait().await;
-      let _ = stdout_task.await;
-      let _ = stderr_task.await;
+      let _ = terminate_process_tree(&mut child, &mut containment).await;
+      let _ = collect_output_task(stdout_task).await;
+      let _ = collect_output_task(stderr_task).await;
       return Err(failure(
         CapabilityFailureKind::Cancelled,
         "WOML_PROCESS_CANCELLED",
@@ -515,10 +559,9 @@ async fn execute_process(
       ));
     }
     _ = &mut timeout => {
-      let _ = child.kill().await;
-      let _ = child.wait().await;
-      let _ = stdout_task.await;
-      let _ = stderr_task.await;
+      let _ = terminate_process_tree(&mut child, &mut containment).await;
+      let _ = collect_output_task(stdout_task).await;
+      let _ = collect_output_task(stderr_task).await;
       return Err(failure(
         CapabilityFailureKind::TimedOut,
         "WOML_PROCESS_TIMED_OUT",
@@ -537,8 +580,12 @@ async fn execute_process(
       Some(safe_duration(started)),
     ))?,
   };
-  let stdout = stdout_task.await.map_err(|_| output_failure())??;
-  let stderr = stderr_task.await.map_err(|_| output_failure())??;
+  // Process v1 never permits detached work. If the leader exited after
+  // starting descendants, close the containment boundary before waiting for
+  // inherited stdout/stderr handles to reach EOF.
+  containment.close_remaining_tree().await;
+  let stdout = collect_output_task(stdout_task).await?;
+  let stderr = collect_output_task(stderr_task).await?;
   let exit_code = status.code();
   let signal = exit_signal(&status);
   let duration_ms = started.elapsed().as_secs_f64() * 1_000.0;
@@ -572,16 +619,258 @@ async fn execute_process(
       ("stdoutTruncated".to_string(), json!(stdout.truncated)),
       ("stderrTruncated".to_string(), json!(stderr.truncated)),
     ]);
+    let (code, message, ambiguous) = if exit_code.is_none() {
+      (
+        "WOML_PROCESS_SIGNALLED",
+        "The process was terminated by a signal or platform-equivalent condition.",
+        true,
+      )
+    } else {
+      (
+        "WOML_PROCESS_EXIT_CODE",
+        "The process exited with a status not accepted by the workflow.",
+        false,
+      )
+    };
     return Err(failure(
       CapabilityFailureKind::ServiceRejected,
-      "WOML_PROCESS_EXIT_CODE",
-      "The process exited with a status not accepted by the workflow.",
+      code,
+      message,
       false,
-      false,
+      ambiguous,
       Some(details),
     ));
   }
   serde_json::to_value(result).map_err(|_| output_failure())
+}
+
+async fn collect_output_task(
+  mut task: JoinHandle<Result<CapturedOutput, CapabilityFailure>>,
+) -> Result<CapturedOutput, CapabilityFailure> {
+  match tokio::time::timeout(PROCESS_PIPE_DRAIN_GRACE, &mut task).await {
+    Ok(joined) => joined.map_err(|_| output_failure())?,
+    Err(_) => {
+      task.abort();
+      let _ = task.await;
+      Err(failure(
+        CapabilityFailureKind::HandlerCrashed,
+        "WOML_PROCESS_PIPE_DRAIN_TIMED_OUT",
+        "The process output pipes did not close after the containment boundary terminated.",
+        false,
+        true,
+        None,
+      ))
+    }
+  }
+}
+
+async fn terminate_process_tree(
+  child: &mut Child,
+  containment: &mut ProcessContainment,
+) -> io::Result<ExitStatus> {
+  containment.graceful_terminate()?;
+  tokio::time::sleep(PROCESS_TERMINATION_GRACE).await;
+  containment.force_terminate()?;
+  child.wait().await
+}
+
+#[cfg(unix)]
+fn prepare_process_containment(command: &mut Command) {
+  use std::os::unix::process::CommandExt;
+  command.as_std_mut().process_group(0);
+}
+
+#[cfg(windows)]
+fn prepare_process_containment(_command: &mut Command) {}
+
+#[cfg(not(any(unix, windows)))]
+fn prepare_process_containment(_command: &mut Command) {}
+
+#[derive(Debug)]
+struct ProcessContainment {
+  #[cfg(unix)]
+  process_group_id: i32,
+  #[cfg(windows)]
+  job: WindowsJob,
+}
+
+impl ProcessContainment {
+  fn attach(child: &Child) -> io::Result<Self> {
+    #[cfg(unix)]
+    {
+      let process_group_id = child
+        .id()
+        .and_then(|id| i32::try_from(id).ok())
+        .ok_or_else(|| io::Error::other("spawned process has no valid process-group id"))?;
+      Ok(Self { process_group_id })
+    }
+    #[cfg(windows)]
+    {
+      Ok(Self {
+        job: WindowsJob::attach(child)?,
+      })
+    }
+    #[cfg(not(any(unix, windows)))]
+    {
+      let _ = child;
+      Ok(Self {})
+    }
+  }
+
+  fn graceful_terminate(&mut self) -> io::Result<()> {
+    #[cfg(unix)]
+    {
+      signal_process_group(self.process_group_id, libc::SIGTERM)
+    }
+    #[cfg(windows)]
+    {
+      // Windows has no portable graceful signal for an arbitrary non-console
+      // process. Job termination is therefore the reviewed forced boundary.
+      self.job.terminate()
+    }
+    #[cfg(not(any(unix, windows)))]
+    {
+      Ok(())
+    }
+  }
+
+  fn force_terminate(&mut self) -> io::Result<()> {
+    #[cfg(unix)]
+    {
+      signal_process_group(self.process_group_id, libc::SIGKILL)
+    }
+    #[cfg(windows)]
+    {
+      self.job.terminate()
+    }
+    #[cfg(not(any(unix, windows)))]
+    {
+      Ok(())
+    }
+  }
+
+  async fn close_remaining_tree(&mut self) {
+    #[cfg(unix)]
+    {
+      if process_group_exists(self.process_group_id) {
+        let _ = self.graceful_terminate();
+        tokio::time::sleep(PROCESS_TERMINATION_GRACE).await;
+        let _ = self.force_terminate();
+      }
+    }
+    #[cfg(windows)]
+    {
+      // Closing a kill-on-close Job Object is the final descendant boundary.
+      let _ = self.job.terminate();
+    }
+  }
+}
+
+impl Drop for ProcessContainment {
+  fn drop(&mut self) {
+    #[cfg(unix)]
+    {
+      // A dropped handler future (for example, host shutdown) must not bypass
+      // containment cleanup. SIGKILL is the only synchronous fail-closed
+      // action available during Drop.
+      let _ = signal_process_group(self.process_group_id, libc::SIGKILL);
+    }
+    // On Windows, dropping the WindowsJob field closes its kill-on-close job.
+  }
+}
+
+#[cfg(unix)]
+fn signal_process_group(process_group_id: i32, signal: i32) -> io::Result<()> {
+  // SAFETY: kill is called with a positive, engine-owned process-group id and
+  // a platform signal constant. A negative pid targets only that group.
+  let result = unsafe { libc::kill(-process_group_id, signal) };
+  if result == 0 {
+    return Ok(());
+  }
+  let error = io::Error::last_os_error();
+  if error.raw_os_error() == Some(libc::ESRCH) {
+    Ok(())
+  } else {
+    Err(error)
+  }
+}
+
+#[cfg(unix)]
+fn process_group_exists(process_group_id: i32) -> bool {
+  // SAFETY: signal 0 performs existence/permission checking without sending a
+  // signal. The id was captured from the child created by this handler.
+  let result = unsafe { libc::kill(-process_group_id, 0) };
+  result == 0 || io::Error::last_os_error().raw_os_error() == Some(libc::EPERM)
+}
+
+#[cfg(windows)]
+#[derive(Debug)]
+struct WindowsJob {
+  handle: windows_sys::Win32::Foundation::HANDLE,
+}
+
+#[cfg(windows)]
+impl WindowsJob {
+  fn attach(child: &Child) -> io::Result<Self> {
+    use std::{mem::size_of, os::windows::io::AsRawHandle, ptr};
+    use windows_sys::Win32::{
+      Foundation::CloseHandle,
+      System::JobObjects::{
+        AssignProcessToJobObject, JobObjectExtendedLimitInformation, SetInformationJobObject,
+        JOBOBJECT_EXTENDED_LIMIT_INFORMATION, JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
+      },
+    };
+    // SAFETY: every handle is checked, the info pointer and byte size match,
+    // and ownership of the created job is retained by WindowsJob.
+    unsafe {
+      let handle =
+        windows_sys::Win32::System::JobObjects::CreateJobObjectW(ptr::null(), ptr::null());
+      if handle.is_null() {
+        return Err(io::Error::last_os_error());
+      }
+      let mut information: JOBOBJECT_EXTENDED_LIMIT_INFORMATION = std::mem::zeroed();
+      information.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+      if SetInformationJobObject(
+        handle,
+        JobObjectExtendedLimitInformation,
+        &information as *const _ as *const _,
+        size_of::<JOBOBJECT_EXTENDED_LIMIT_INFORMATION>() as u32,
+      ) == 0
+        || AssignProcessToJobObject(handle, child.as_raw_handle() as _) == 0
+      {
+        let error = io::Error::last_os_error();
+        CloseHandle(handle);
+        return Err(error);
+      }
+      Ok(Self { handle })
+    }
+  }
+
+  fn terminate(&self) -> io::Result<()> {
+    // SAFETY: handle is a live Job Object owned by self.
+    let result =
+      unsafe { windows_sys::Win32::System::JobObjects::TerminateJobObject(self.handle, 1) };
+    if result == 0 {
+      Err(io::Error::last_os_error())
+    } else {
+      Ok(())
+    }
+  }
+}
+
+#[cfg(windows)]
+// SAFETY: WindowsJob exclusively owns a kernel handle. Moving that owned
+// handle between executor threads does not change its validity or ownership.
+unsafe impl Send for WindowsJob {}
+
+#[cfg(windows)]
+impl Drop for WindowsJob {
+  fn drop(&mut self) {
+    // SAFETY: handle is owned by self and closed exactly once.
+    unsafe {
+      windows_sys::Win32::Foundation::CloseHandle(self.handle);
+    }
+  }
 }
 
 async fn drain_output<R: AsyncRead + Unpin>(
@@ -926,6 +1215,8 @@ mod tests {
           "WOML_PROCESS_FIXTURE".to_string(),
           "WOML_PROCESS_FIXTURE_TEXT".to_string(),
           "WOML_PROCESS_FIXTURE_EXIT".to_string(),
+          "WOML_PROCESS_FIXTURE_TREE".to_string(),
+          "WOML_PROCESS_FIXTURE_HEARTBEAT".to_string(),
         ],
       },
       limits: ProcessPolicyLimits {
@@ -955,6 +1246,35 @@ mod tests {
   fn fixture_child() {
     if std::env::var("WOML_PROCESS_FIXTURE").as_deref() != Ok("1") {
       return;
+    }
+    if let Ok(role) = std::env::var("WOML_PROCESS_FIXTURE_TREE") {
+      let heartbeat =
+        std::env::var("WOML_PROCESS_FIXTURE_HEARTBEAT").expect("tree fixture heartbeat path");
+      if role == "parent" {
+        std::process::Command::new(std::env::current_exe().expect("fixture executable"))
+          .args(["--exact", "process::tests::fixture_child", "--nocapture"])
+          .env_clear()
+          .env("WOML_PROCESS_FIXTURE", "1")
+          .env("WOML_PROCESS_FIXTURE_TREE", "grandchild")
+          .env("WOML_PROCESS_FIXTURE_HEARTBEAT", &heartbeat)
+          .stdin(Stdio::null())
+          .stdout(Stdio::null())
+          .stderr(Stdio::null())
+          .spawn()
+          .expect("spawn grandchild fixture");
+      }
+      let marker = if role == "parent" { b'P' } else { b'G' };
+      loop {
+        use std::io::Write;
+        let mut file = std::fs::OpenOptions::new()
+          .create(true)
+          .append(true)
+          .open(&heartbeat)
+          .expect("open heartbeat");
+        file.write_all(&[marker]).expect("write heartbeat");
+        file.sync_all().expect("sync heartbeat");
+        std::thread::sleep(Duration::from_millis(10));
+      }
     }
     let text = std::env::var("WOML_PROCESS_FIXTURE_TEXT").unwrap_or_default();
     print!("{text}");
@@ -1026,5 +1346,134 @@ mod tests {
       .await
       .expect_err("environment is denied");
     assert_eq!(error.code, "WOML_PROCESS_ENV_DENIED");
+  }
+
+  #[test]
+  fn runtime_policy_caps_the_effective_process_timeout() {
+    let handler =
+      ManagedProcessHandler::new(policy(), ProcessRuntimeMode::Foreground).expect("valid policy");
+    let mut input = request(json!({ "WOML_PROCESS_FIXTURE": "1" }), 128, vec![0]);
+    input["timeoutMs"] = json!(10_000);
+    let authorized = handler
+      .parse_and_authorize(&input)
+      .expect("timeout is bounded by policy");
+    assert_eq!(authorized.request.timeout_ms, 5_000);
+  }
+
+  #[test]
+  fn durable_metadata_excludes_arguments_environment_and_output() {
+    let handler =
+      ManagedProcessHandler::new(policy(), ProcessRuntimeMode::Foreground).expect("valid policy");
+    let input = request(
+      json!({
+        "WOML_PROCESS_FIXTURE": "1",
+        "WOML_PROCESS_FIXTURE_TEXT": "never-persist-this-secret"
+      }),
+      128,
+      vec![0],
+    );
+    let metadata = handler.safe_metadata(&input);
+    let encoded = serde_json::to_string(&metadata).expect("metadata JSON");
+    assert_eq!(metadata.get("executable"), Some(&json!("fixture")));
+    assert_eq!(metadata.get("argumentCount"), Some(&json!(3)));
+    assert!(!encoded.contains("never-persist-this-secret"));
+    assert!(!encoded.contains("--exact"));
+    assert!(!metadata.contains_key("args"));
+    assert!(!metadata.contains_key("env"));
+    assert!(!metadata.contains_key("stdout"));
+    assert!(!metadata.contains_key("stderr"));
+  }
+
+  async fn assert_heartbeat_stops(path: &Path) {
+    tokio::time::sleep(Duration::from_millis(150)).await;
+    let first = std::fs::metadata(path).expect("heartbeat exists").len();
+    tokio::time::sleep(Duration::from_millis(150)).await;
+    let second = std::fs::metadata(path).expect("heartbeat remains").len();
+    assert_eq!(first, second, "a descendant survived containment shutdown");
+  }
+
+  fn tree_request(path: &Path, timeout_ms: u64) -> Value {
+    let mut value = request(
+      json!({
+        "WOML_PROCESS_FIXTURE": "1",
+        "WOML_PROCESS_FIXTURE_TREE": "parent",
+        "WOML_PROCESS_FIXTURE_HEARTBEAT": path.to_string_lossy()
+      }),
+      128,
+      vec![0],
+    );
+    value["timeoutMs"] = json!(timeout_ms);
+    value
+  }
+
+  #[cfg(any(unix, windows))]
+  #[tokio::test]
+  async fn timeout_terminates_child_and_grandchild_tree() {
+    let heartbeat = std::env::temp_dir().join(format!(
+      "woml-process-timeout-heartbeat-{}",
+      uuid::Uuid::new_v4()
+    ));
+    let handler =
+      ManagedProcessHandler::new(policy(), ProcessRuntimeMode::Foreground).expect("valid policy");
+    let error = handler
+      .execute(
+        tree_request(&heartbeat, 250),
+        CapabilityCancellationToken::default(),
+      )
+      .await
+      .expect_err("tree times out");
+    assert_eq!(error.kind, CapabilityFailureKind::TimedOut);
+    assert_eq!(error.code, "WOML_PROCESS_TIMED_OUT");
+    assert!(error.ambiguous);
+    assert_heartbeat_stops(&heartbeat).await;
+    let _ = std::fs::remove_file(heartbeat);
+  }
+
+  #[cfg(any(unix, windows))]
+  #[tokio::test]
+  async fn cancellation_terminates_tree_and_cannot_report_success() {
+    let heartbeat = std::env::temp_dir().join(format!(
+      "woml-process-cancel-heartbeat-{}",
+      uuid::Uuid::new_v4()
+    ));
+    let handler =
+      ManagedProcessHandler::new(policy(), ProcessRuntimeMode::Foreground).expect("valid policy");
+    let cancellation = CapabilityCancellationToken::default();
+    let cancel = cancellation.clone();
+    let request = tree_request(&heartbeat, 5_000);
+    let execution = tokio::spawn(async move { handler.execute(request, cancellation).await });
+    tokio::time::sleep(Duration::from_millis(150)).await;
+    cancel.cancel();
+    let error = execution
+      .await
+      .expect("execution task")
+      .expect_err("tree is cancelled");
+    assert_eq!(error.kind, CapabilityFailureKind::Cancelled);
+    assert_eq!(error.code, "WOML_PROCESS_CANCELLED");
+    assert!(error.ambiguous);
+    assert_heartbeat_stops(&heartbeat).await;
+    let _ = std::fs::remove_file(heartbeat);
+  }
+
+  #[cfg(any(unix, windows))]
+  #[tokio::test]
+  async fn dropped_handler_future_closes_the_process_tree() {
+    let heartbeat = std::env::temp_dir().join(format!(
+      "woml-process-host-stop-heartbeat-{}",
+      uuid::Uuid::new_v4()
+    ));
+    let handler =
+      ManagedProcessHandler::new(policy(), ProcessRuntimeMode::Foreground).expect("valid policy");
+    let request = tree_request(&heartbeat, 5_000);
+    let execution = tokio::spawn(async move {
+      handler
+        .execute(request, CapabilityCancellationToken::default())
+        .await
+    });
+    tokio::time::sleep(Duration::from_millis(150)).await;
+    execution.abort();
+    let _ = execution.await;
+    assert_heartbeat_stops(&heartbeat).await;
+    let _ = std::fs::remove_file(heartbeat);
   }
 }

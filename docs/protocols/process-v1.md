@@ -200,6 +200,7 @@ Allowed start metadata:
 
 Allowed terminal metadata:
 
+- outcome (`succeeded`, `failed`, `timed_out`, `cancelled`, or `interrupted`);
 - exit code or signal;
 - duration;
 - stdout and stderr byte counts;
@@ -297,6 +298,8 @@ not provide exactly-once command execution.
 | `WOML_PROCESS_INPUT_INVALID` | `invalid_input` | No | No | Request violates Process v1 | Correct the field named by the diagnostic |
 | `WOML_PROCESS_CONCURRENCY_LIMIT` | `service_rejected` | Yes | No | Policy concurrency is exhausted | Wait, reduce parallelism, or raise the reviewed limit |
 | `WOML_PROCESS_SPAWN_FAILED` | `service_rejected` | Yes | No | OS rejected spawn before child execution was observed | Check permissions and host resources, then retry explicitly |
+| `WOML_PROCESS_CONTAINMENT_FAILED` | `handler_crashed` | No | Yes | The spawned process could not be attached to the required OS containment boundary | Inspect host process/job permissions before starting a reviewed new run |
+| `WOML_PROCESS_PIPE_DRAIN_TIMED_OUT` | `handler_crashed` | No | Yes | Output pipes remained open after bounded process-tree termination | Inspect descendant behavior and start a reviewed new run |
 | `WOML_PROCESS_EXIT_CODE` | `service_rejected` | No | No | Process returned a non-accepted exit code | Fix the command or explicitly accept the documented code |
 | `WOML_PROCESS_SIGNALLED` | `service_rejected` | No | Yes | Process terminated by signal or platform equivalent | Inspect the host and start a reviewed new run |
 | `WOML_PROCESS_TIMED_OUT` | `timed_out` | No | Yes | Runtime terminated the process tree after timeout | Inspect partial effects before starting a new run |
