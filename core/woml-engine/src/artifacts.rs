@@ -4341,10 +4341,14 @@ mod tests {
               &failed_blob_puts,
               &invisible_blob_reads,
             ),
-            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+            Err(_) => {
+              // A nonblocking Windows listener can surface an aborted or
+              // reset connection from a client pool through accept(). Those
+              // errors affect only that connection and must not terminate the
+              // mock S3 service before a rotated client reconnects. The stop
+              // flag, not a connection-scoped accept error, owns shutdown.
               std::thread::sleep(Duration::from_millis(2));
             }
-            Err(_) => break,
           }
         }
       });
