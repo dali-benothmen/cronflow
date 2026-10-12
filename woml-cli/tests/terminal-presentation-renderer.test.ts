@@ -116,6 +116,34 @@ describe('terminal presentation renderer', () => {
     expect(progress).toContain('output bounded to 64.0 KiB per stream');
   });
 
+  test('renders durable artifact references as concise body-free summaries', async () => {
+    const fixture = await success();
+    const artifact = {
+      contract: 'woml.artifact-reference' as const,
+      contractVersion: 1,
+      id: 'artifact_01k7qh7s00a1b2c3d4e5f6g7h8',
+      name: 'production-plan',
+      size: 184_320,
+      sha256: 'c742b8669e07a0ca8a2a8d79b22b17504c51f7b0d81623a8045fece436f02942',
+      contentType: 'application/octet-stream',
+    };
+    const run: RunPresentationV1 = {
+      ...structuredClone(fixture),
+      steps: [{ ...structuredClone(fixture.steps[0]!), result: { artifact } }],
+      result: { artifact },
+      summary: { succeeded: 1, failed: 0, skipped: 0, cancelled: 0, total: 1 },
+    };
+    const output = renderRunPresentation(run, {
+      format: 'plain', width: 160, unicode: true, timeZone: 'UTC',
+    });
+    expect(output).toContain(
+      'Artifact "production-plan" · 180.0 KiB · application/octet-stream · sha256:c742b8669e07…'
+    );
+    expect(output).not.toContain('"contractVersion": 1');
+    const machine = JSON.parse(renderRunPresentation(run, { format: 'json' }));
+    expect(machine.result.artifact).toEqual(artifact);
+  });
+
   test('honors NO_COLOR, TERM=dumb, redirected output, and explicit color modes', async () => {
     const fixture = await success();
     const cases = [

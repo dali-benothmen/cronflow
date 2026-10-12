@@ -267,8 +267,39 @@ pub struct RuntimeExecutionOptions {
   managed_storage_store: Option<Arc<crate::ManagedStorageStore>>,
   managed_cache_store: Option<Arc<crate::ManagedCacheStore>>,
   managed_durable_state_store: Option<Arc<crate::ManagedDurableStateStore>>,
+  managed_artifact_store: Option<Arc<crate::ManagedArtifactStore>>,
+  artifact_policy: Option<Arc<crate::artifacts::PreparedArtifactPolicy>>,
   policy_execution: Option<Arc<PolicyExecutionCoordinator>>,
   policy_execution_registry: PolicyExecutionRegistry,
+}
+
+struct ArtifactInvocationCleanup {
+  store: Option<Arc<crate::ManagedArtifactStore>>,
+  invocation_id: String,
+}
+
+impl ArtifactInvocationCleanup {
+  fn new(options: &RuntimeExecutionOptions, invocation_id: &str) -> Self {
+    Self {
+      store: options.managed_artifact_store.clone(),
+      invocation_id: invocation_id.to_string(),
+    }
+  }
+
+  fn from_store(store: Option<Arc<crate::ManagedArtifactStore>>, invocation_id: &str) -> Self {
+    Self {
+      store,
+      invocation_id: invocation_id.to_string(),
+    }
+  }
+}
+
+impl Drop for ArtifactInvocationCleanup {
+  fn drop(&mut self) {
+    if let Some(store) = &self.store {
+      store.cleanup_invocation(&self.invocation_id);
+    }
+  }
 }
 
 #[derive(Debug)]
@@ -427,6 +458,8 @@ impl RuntimeExecutionOptions {
       managed_storage_store: Some(managed_storage_store),
       managed_cache_store: Some(managed_cache_store),
       managed_durable_state_store: Some(managed_durable_state_store),
+      managed_artifact_store: None,
+      artifact_policy: None,
       policy_execution: None,
       policy_execution_registry: Arc::new(tokio::sync::RwLock::new(HashMap::new())),
     }
@@ -555,6 +588,8 @@ impl RuntimeExecutionOptions {
     self.managed_storage_store = None;
     self.managed_cache_store = None;
     self.managed_durable_state_store = None;
+    self.managed_artifact_store = None;
+    self.artifact_policy = None;
     self
   }
 
@@ -570,6 +605,38 @@ impl RuntimeExecutionOptions {
       .capability_registry
       .register(Arc::new(handler))
       .map_err(|error| crate::ProcessPolicyError::Invalid(error.to_string()))?;
+    Ok(self)
+  }
+
+  /// Enables durable artifacts only after Rust validates Artifact Policy v1.
+  pub fn with_artifact_policy(
+    mut self,
+    policy: crate::ArtifactPolicyV1,
+    mode: crate::ArtifactRuntimeMode,
+  ) -> Result<Self, crate::ArtifactPolicyError> {
+    let store = Arc::new(crate::ManagedArtifactStore::default());
+    let handler = crate::ManagedArtifactPutHandler::new(
+      Arc::clone(&store),
+      policy,
+      mode,
+      &self.resolved_secrets,
+    )?;
+    let head_handler = handler.head_handler();
+    let materialize_handler = handler.materialize_handler();
+    self.artifact_policy = Some(handler.policy());
+    self
+      .capability_registry
+      .register(Arc::new(handler))
+      .map_err(|error| crate::ArtifactPolicyError::Invalid(error.to_string()))?;
+    self
+      .capability_registry
+      .register(Arc::new(head_handler))
+      .map_err(|error| crate::ArtifactPolicyError::Invalid(error.to_string()))?;
+    self
+      .capability_registry
+      .register(Arc::new(materialize_handler))
+      .map_err(|error| crate::ArtifactPolicyError::Invalid(error.to_string()))?;
+    self.managed_artifact_store = Some(store);
     Ok(self)
   }
 
@@ -1720,6 +1787,13 @@ fn attach_durable_capability_authority(
   if let Some(state) = &options.managed_durable_state_store {
     state
       .configure_for_state(database_path)
+      .map_err(|failure| RuntimeExecutionError::InvalidConfiguration(failure.message))?;
+  }
+  if let (Some(artifacts), Some(policy)) =
+    (&options.managed_artifact_store, &options.artifact_policy)
+  {
+    artifacts
+      .configure_for_state(database_path, Arc::clone(policy))
       .map_err(|failure| RuntimeExecutionError::InvalidConfiguration(failure.message))?;
   }
   if let Some(pool) = &options.managed_database_pool {
@@ -2992,6 +3066,7 @@ async fn drive_reusable_lifecycle<E: RuntimeDagEngine>(
         &reusable,
         &binding,
       );
+      let _artifact_cleanup = ArtifactInvocationCleanup::new(options, &host_invocation_id);
       let succeeded = host
         .execute(&request)
         .await
@@ -4520,6 +4595,7 @@ async fn drive_workflow_lifecycle<E: RuntimeDagEngine>(
       &modules,
     );
     let host_client = host.as_ref().expect("script host was initialized");
+    let artifact_cleanup = ArtifactInvocationCleanup::new(options, &invocation_id);
     let mut execution = Box::pin(host_client.execute(&request));
     let mut cancellation_sent = false;
     let result = loop {
@@ -4539,6 +4615,7 @@ async fn drive_workflow_lifecycle<E: RuntimeDagEngine>(
       }
     };
     drop(execution);
+    drop(artifact_cleanup);
     let (payload, phase, failure_code) = match result {
       _ if cancellation_sent => (
         RunEventPayload::LifecycleActionFailed(LifecycleActionFailedData {
@@ -5885,6 +5962,7 @@ async fn execute_fork<E: RuntimeDagEngine>(
               })
               .collect(),
             reusable,
+            artifact_store: options.managed_artifact_store.clone(),
           },
         )),
       });
@@ -6082,6 +6160,7 @@ struct ParallelInvocationRequest {
   secrets: BTreeMap<String, String>,
   module_bindings: Vec<RuntimeModuleBinding>,
   reusable: Option<ReusableScriptBindingV3>,
+  artifact_store: Option<Arc<crate::ManagedArtifactStore>>,
 }
 
 async fn next_parallel_completion(
@@ -6180,6 +6259,10 @@ async fn execute_parallel_request(
       &invocation.module_bindings,
     ),
   };
+  let _artifact_cleanup = ArtifactInvocationCleanup::from_store(
+    invocation.artifact_store.clone(),
+    &invocation.invocation_id,
+  );
   match host.execute(&request).await {
     Ok(completed) => match completed.outcome {
       HostOutcome::Success { value } => Ok(value),
@@ -6336,6 +6419,7 @@ async fn execute_parallel_group<E: RuntimeDagEngine>(
               })
               .collect(),
             reusable,
+            artifact_store: options.managed_artifact_store.clone(),
           },
         )),
       });
@@ -7317,6 +7401,7 @@ async fn drive_for_each_step_lifecycle<E: RuntimeDagEngine>(
         &modules,
       )
       .map_err(RuntimeExecutionError::Stalled)?;
+      let _artifact_cleanup = ArtifactInvocationCleanup::new(options, &invocation_id);
       host.execute(&request).await
     } else {
       Err(ScriptHostClientError::Protocol(format!(
@@ -7515,6 +7600,7 @@ async fn drive_for_each_reusable_lifecycle<E: RuntimeDagEngine>(
         &binding,
       )
       .map_err(RuntimeExecutionError::Stalled)?;
+      let _artifact_cleanup = ArtifactInvocationCleanup::new(options, &host_invocation_id);
       let succeeded = host
         .execute(&request)
         .await
@@ -7821,6 +7907,7 @@ async fn execute_for_each_script<E: RuntimeDagEngine>(
       .lock()
       .await
       .insert(invocation_id.clone());
+    let _artifact_cleanup = ArtifactInvocationCleanup::new(options, &invocation_id);
     let execution = host.execute(&request).await;
     active_invocations.lock().await.remove(&invocation_id);
     match execution {
@@ -8949,6 +9036,7 @@ async fn execute_script_node<E: RuntimeDagEngine>(
     ),
   };
   let host_client = host.as_ref().expect("script host was initialized");
+  let artifact_cleanup = ArtifactInvocationCleanup::new(options, &invocation_id);
   let mut execution = Box::pin(host_client.execute(&request));
   let mut cancellation_sent = false;
   let mut timeout_sent = false;
@@ -8973,6 +9061,7 @@ async fn execute_script_node<E: RuntimeDagEngine>(
     }
   };
   drop(execution);
+  drop(artifact_cleanup);
   settle_workflow_timeout_if_due(engine, run_id, options.clock.now(), options)?;
   if timeout_sent || engine.projection(run_id)?.timeout_reached_at.is_some() {
     let projection = engine.projection(run_id)?;

@@ -108,31 +108,28 @@ export async function installLocalReleaseCandidate(
       ? []
       : [mkdir(options.temporary, { recursive: true })]),
   ]);
-  const installed = Bun.spawnSync(
-    [
-      Bun.which('bun')!,
-      'add',
-      candidate.mainArchive,
-      candidate.nativeArchive,
-      '--no-save',
-    ],
-    {
-      cwd: consumer,
-      env: {
-        ...process.env,
-        BUN_INSTALL_CACHE_DIR: options.cache,
-        ...(options.temporary === undefined
-          ? {}
-          : { TMPDIR: options.temporary }),
+  const environment = {
+    ...process.env,
+    BUN_INSTALL_CACHE_DIR: options.cache,
+    ...(options.temporary === undefined
+      ? {}
+      : { TMPDIR: options.temporary }),
+  };
+  for (const archive of [candidate.nativeArchive, candidate.mainArchive]) {
+    const installed = Bun.spawnSync(
+      [Bun.which('bun')!, 'add', archive, '--no-save'],
+      {
+        cwd: consumer,
+        env: environment,
+        stdout: 'pipe',
+        stderr: 'pipe',
       },
-      stdout: 'pipe',
-      stderr: 'pipe',
-    },
-  );
-  if (installed.exitCode !== 0) {
-    throw new Error(
-      `Could not install the WOML release candidate:\n${installed.stdout.toString()}${installed.stderr.toString()}`,
     );
+    if (installed.exitCode !== 0) {
+      throw new Error(
+        `Could not install the WOML release candidate:\n${installed.stdout.toString()}${installed.stderr.toString()}`,
+      );
+    }
   }
   return candidate;
 }

@@ -234,6 +234,42 @@ interface WomlProcessService {
   ) => Promise<WomlProcessRunResult>;
 }
 
+interface WomlArtifactPutOptions {
+  readonly name: string;
+  readonly contentType?: string;
+  readonly retention?: string;
+}
+
+interface WomlArtifactReferenceV1 {
+  readonly contract: 'woml.artifact-reference';
+  readonly contractVersion: 1;
+  readonly id: string;
+  readonly name: string;
+  readonly size: number;
+  readonly sha256: string;
+  readonly contentType: string;
+}
+
+interface WomlArtifactHeadV1 {
+  readonly artifact: WomlArtifactReferenceV1;
+  readonly createdAt: string;
+  readonly expiresAt: string;
+  readonly integrity: 'verified';
+}
+
+interface WomlArtifactsService {
+  readonly put: (
+    path: string,
+    options: WomlArtifactPutOptions
+  ) => Promise<WomlArtifactReferenceV1>;
+  readonly head: (
+    reference: WomlArtifactReferenceV1
+  ) => Promise<WomlArtifactHeadV1>;
+  readonly materialize: (
+    reference: WomlArtifactReferenceV1
+  ) => Promise<string>;
+}
+
 interface WomlBuiltinServices {
   readonly http: {
     readonly request: <T = WomlJsonValue>(input: WomlHttpRequest, options?: WomlOperationOptions) => Promise<WomlHttpResponse<T>>;
@@ -246,6 +282,7 @@ interface WomlBuiltinServices {
   readonly cache: WomlCacheService;
   readonly state: WomlStateService;
   readonly process: WomlProcessService;
+  readonly artifacts: WomlArtifactsService;
   readonly events: {
     readonly emit: (name: string, payload: WomlJsonValue, options?: WomlOperationOptions) => Promise<any>;
   };

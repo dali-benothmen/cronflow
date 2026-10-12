@@ -1,0 +1,28 @@
+<woml>
+  <workflow id="test-report-artifact" name="Preserve a test report" description="Runs project tests and keeps the machine-readable report after the runtime restarts." version="1.0.0">
+    <triggers><manual id="start" /></triggers>
+    <steps>
+      <step id="test" name="Run test suite">
+        <script>
+          return await services.process.run({
+            executable: "bun",
+            args: ["test", "--reporter=junit", "--reporter-outfile=.woml/artifact-input/junit.xml"],
+            timeout: "15m",
+            acceptExitCodes: [0, 1],
+            output: { stdout: "capture", stderr: "capture", maxBytes: 65536 }
+          }, { name: "project-tests" });
+        </script>
+      </step>
+      <step id="preserve" name="Preserve test evidence">
+        <script>
+          const artifact = await services.artifacts.put(".woml/artifact-input/junit.xml", {
+            name: "junit-test-report",
+            contentType: "application/xml",
+            retention: "14d"
+          });
+          return { artifact, testsPassed: context.steps.test.exitCode === 0 };
+        </script>
+      </step>
+    </steps>
+  </workflow>
+</woml>

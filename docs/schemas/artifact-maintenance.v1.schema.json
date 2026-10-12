@@ -1,0 +1,35 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://woml.dev/schemas/artifact-maintenance/v1",
+  "title": "WOML Artifact Maintenance v1",
+  "description": "Body-free retention, integrity, orphan-collection, and live-store measurements for durable artifacts.",
+  "x-status": "durable-artifacts-da7-frozen",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "profile", "kind", "completedAt", "eligibleArtifacts", "eligibleBlobs",
+    "estimatedBytes", "deletedArtifacts", "deletedBlobs", "deletedBytes",
+    "scrubbedBlobs", "corruptBlobs", "collectedOrphans", "liveArtifacts",
+    "liveBlobs", "liveBytes"
+  ],
+  "properties": {
+    "profile": { "const": "woml.artifact-maintenance/v1" },
+    "kind": { "enum": ["plan", "result"] },
+    "completedAt": { "type": "string", "format": "date-time" },
+    "eligibleArtifacts": { "$ref": "#/$defs/count" },
+    "eligibleBlobs": { "$ref": "#/$defs/count" },
+    "estimatedBytes": { "$ref": "#/$defs/count" },
+    "deletedArtifacts": { "$ref": "#/$defs/count" },
+    "deletedBlobs": { "$ref": "#/$defs/count" },
+    "deletedBytes": { "$ref": "#/$defs/count" },
+    "scrubbedBlobs": { "$ref": "#/$defs/count" },
+    "corruptBlobs": { "$ref": "#/$defs/count" },
+    "collectedOrphans": { "$ref": "#/$defs/count" },
+    "liveArtifacts": { "$ref": "#/$defs/count" },
+    "liveBlobs": { "$ref": "#/$defs/count" },
+    "liveBytes": { "$ref": "#/$defs/count" }
+  },
+  "$defs": {
+    "count": { "type": "integer", "minimum": 0 }
+  }
+}

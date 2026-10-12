@@ -1,0 +1,34 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://woml.dev/schemas/runtime-metrics/v2",
+  "title": "WOML Artifact Runtime Metrics v2",
+  "description": "Additive body-free artifact metrics emitted alongside frozen Runtime Metrics v1.",
+  "x-status": "durable-artifacts-da9-frozen",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["profile", "name", "type", "value", "labels"],
+  "properties": {
+    "profile": { "const": "woml.runtime-metrics/v2" },
+    "name": {
+      "enum": [
+        "woml_artifact_backend_healthy",
+        "woml_artifact_transfers_total",
+        "woml_artifact_transfer_bytes_total",
+        "woml_artifact_transfer_duration_seconds",
+        "woml_artifact_transfer_failures_total",
+        "woml_artifact_corrupt_total",
+        "woml_artifact_orphans_total",
+        "woml_artifacts_live",
+        "woml_artifact_live_bytes"
+      ]
+    },
+    "type": { "enum": ["gauge", "counter"] },
+    "value": { "type": "number", "minimum": 0 },
+    "labels": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["backend"],
+      "properties": { "backend": { "enum": ["local", "s3"] } }
+    }
+  }
+}

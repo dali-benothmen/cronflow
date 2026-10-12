@@ -44,6 +44,7 @@ describe('WOML release automation', () => {
     const { document, source } = await workflow('ci');
     expect(Object.keys(document.jobs ?? {}).sort()).toEqual([
       'architecture',
+      'artifact-filesystem',
       'cli',
       'documentation',
       'frontend',

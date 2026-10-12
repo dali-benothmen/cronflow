@@ -1,0 +1,51 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://woml.dev/schemas/artifact-operation-settlement/v1",
+  "title": "WOML Artifact Operation Settlement v1",
+  "description": "Rust-owned durable proof used to reconnect duplicate delivery and recover an artifact operation without replaying an ambiguous write.",
+  "x-status": "durable-artifacts-da1-frozen",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["contract", "contractVersion", "operationKey", "runId", "nodeId", "attemptNumber", "operation", "inputDigest", "status", "startedAt"],
+  "properties": {
+    "contract": { "const": "woml.artifact-operation-settlement" },
+    "contractVersion": { "const": 1 },
+    "operationKey": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" },
+    "runId": { "type": "string", "minLength": 1, "maxLength": 256 },
+    "nodeId": { "type": "string", "minLength": 1, "maxLength": 256 },
+    "attemptNumber": { "type": "integer", "minimum": 1, "maximum": 10 },
+    "operation": { "enum": ["put", "head", "materialize"] },
+    "inputDigest": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" },
+    "status": { "enum": ["started", "succeeded", "failed", "cancelled", "interrupted"] },
+    "artifactId": { "type": "string", "pattern": "^artifact_[0-9a-hjkmnp-tv-z]{26}$" },
+    "contentDigest": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" },
+    "size": { "type": "integer", "minimum": 0, "maximum": 1099511627776 },
+    "resultDigest": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" },
+    "errorCode": { "type": "string", "pattern": "^WOML_ARTIFACT_[A-Z0-9_]+$", "maxLength": 128 },
+    "ambiguous": { "type": "boolean" },
+    "startedAt": { "type": "string", "format": "date-time" },
+    "settledAt": { "type": "string", "format": "date-time" }
+  },
+  "allOf": [
+    {
+      "if": { "properties": { "status": { "const": "started" } }, "required": ["status"] },
+      "then": {
+        "not": {
+          "anyOf": [
+            { "required": ["resultDigest"] },
+            { "required": ["errorCode"] },
+            { "required": ["settledAt"] }
+          ]
+        }
+      }
+    },
+    {
+      "if": { "properties": { "status": { "const": "succeeded" } }, "required": ["status"] },
+      "then": { "required": ["artifactId", "contentDigest", "size", "resultDigest", "settledAt"] }
+    },
+    {
+      "if": { "properties": { "status": { "enum": ["failed", "cancelled", "interrupted"] } }, "required": ["status"] },
+      "then": { "required": ["errorCode", "ambiguous", "settledAt"] }
+    }
+  ]
+}

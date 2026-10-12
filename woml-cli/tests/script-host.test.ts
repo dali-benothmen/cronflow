@@ -2424,6 +2424,241 @@ return {
       },
     });
   });
+
+  test('Artifact v1 normalizes calls and exposes immutable bounded public values', async () => {
+    const completed: CompletedMessage[] = [];
+    const calls: CapabilityCallMessage[] = [];
+    const reference = {
+      contract: 'woml.artifact-reference',
+      contractVersion: 1,
+      id: 'artifact_01k7qh7s00a1b2c3d4e5f6g7h8',
+      name: 'Terraform plan 🌍',
+      size: 184_320,
+      sha256: 'c742b8669e07a0ca8a2a8d79b22b17504c51f7b0d81623a8045fece436f02942',
+      contentType: 'application/octet-stream',
+    } as const;
+    let host!: ScriptHost;
+    host = new ScriptHost({
+      workerUrl: new URL('../src/script-host-worker.ts', import.meta.url),
+      protocolVersion: 4,
+      send: async message => {
+        if (message.messageType === 'completed') {
+          completed.push(message);
+          return;
+        }
+        if (message.messageType !== 'capability_call') return;
+        calls.push(message);
+        const operation = message.call.operation as 'put' | 'materialize';
+        const artifactResult = {
+          contract: 'woml.artifacts',
+          contractVersion: 1,
+          kind: 'result',
+          operation,
+          data:
+            operation === 'put'
+              ? reference
+              : { artifact: reference, path: '/private/attempt/release.tfplan' },
+        } as const;
+        host.accept({
+          protocol: 'woml.script-host',
+          protocolVersion: 4,
+          messageType: 'capability_result',
+          invocationId: message.invocationId,
+          callId: message.callId,
+          result: {
+            contract: 'woml.capability-call',
+            contractVersion: 1,
+            messageType: 'result',
+            invocationId: message.invocationId,
+            callId: message.callId,
+            outcome: 'succeeded',
+            resultContractVersion: 1,
+            resultBytes: Buffer.byteLength(JSON.stringify(artifactResult)),
+            durationMs: 4,
+            result: artifactResult,
+          },
+        });
+      },
+    });
+
+    host.accept(
+      executeV4(
+        'inv_v4_artifacts',
+        `
+          const facadeFrozen = Object.isFrozen(services.artifacts);
+          const reference = await services.artifacts.put(
+            'infrastructure/release.tfplan',
+            { name: 'Terraform plan 🌍', retention: '30d' }
+          );
+          const path = await services.artifacts.materialize(reference);
+          return {
+            facadeFrozen,
+            referenceFrozen: Object.isFrozen(reference),
+            reference,
+            pathAvailable: path.endsWith('release.tfplan')
+          };
+        `
+      )
+    );
+    await host.drain();
+
+    expect(calls).toHaveLength(2);
+    expect(calls[0]?.call).toMatchObject({
+      capability: 'artifacts',
+      operation: 'put',
+      identity: { mode: 'named', operationName: 'Terraform plan 🌍' },
+      limits: { resultBytes: 16_384 },
+      input: {
+        contract: 'woml.artifacts',
+        contractVersion: 1,
+        kind: 'request',
+        operation: 'put',
+        input: {
+          sourcePath: 'infrastructure/release.tfplan',
+          name: 'Terraform plan 🌍',
+          contentType: 'application/octet-stream',
+          retentionMs: 2_592_000_000,
+        },
+      },
+    });
+    expect(calls[0]?.call.identity.operationKey).toMatch(/^sha256:[a-f0-9]{64}$/);
+    expect(calls[1]?.call).toMatchObject({
+      capability: 'artifacts',
+      operation: 'materialize',
+      identity: { mode: 'automatic' },
+      input: {
+        operation: 'materialize',
+        input: { artifact: reference },
+      },
+    });
+    expect(completed[0]?.outcome).toEqual({
+      kind: 'success',
+      value: {
+        facadeFrozen: true,
+        referenceFrozen: true,
+        reference,
+        pathAvailable: true,
+      },
+    });
+  });
+
+  test('Artifact v1 prevents private materialization paths from becoming durable output', async () => {
+    const completed: CompletedMessage[] = [];
+    const reference = {
+      contract: 'woml.artifact-reference',
+      contractVersion: 1,
+      id: 'artifact_01k7qh7s00a1b2c3d4e5f6g7h8',
+      name: 'release-plan',
+      size: 12,
+      sha256: 'c742b8669e07a0ca8a2a8d79b22b17504c51f7b0d81623a8045fece436f02942',
+      contentType: 'application/octet-stream',
+    } as const;
+    let host!: ScriptHost;
+    host = new ScriptHost({
+      workerUrl: new URL('../src/script-host-worker.ts', import.meta.url),
+      protocolVersion: 4,
+      send: async message => {
+        if (message.messageType === 'completed') {
+          completed.push(message);
+          return;
+        }
+        if (message.messageType !== 'capability_call') return;
+        const result = {
+          contract: 'woml.artifacts',
+          contractVersion: 1,
+          kind: 'result',
+          operation: 'materialize',
+          data: {
+            artifact: reference,
+            path: '/private/attempt/release.tfplan',
+          },
+        } as const;
+        host.accept({
+          protocol: 'woml.script-host',
+          protocolVersion: 4,
+          messageType: 'capability_result',
+          invocationId: message.invocationId,
+          callId: message.callId,
+          result: {
+            contract: 'woml.capability-call',
+            contractVersion: 1,
+            messageType: 'result',
+            invocationId: message.invocationId,
+            callId: message.callId,
+            outcome: 'succeeded',
+            resultContractVersion: 1,
+            resultBytes: Buffer.byteLength(JSON.stringify(result)),
+            durationMs: 1,
+            result,
+          },
+        });
+      },
+    });
+    host.accept(
+      executeV4(
+        'inv_v4_artifact_path_leak',
+        `
+          const path = await services.artifacts.materialize(${JSON.stringify(reference)});
+          return { path };
+        `
+      )
+    );
+    await host.drain();
+    expect(completed[0]?.outcome).toMatchObject({
+      kind: 'failure',
+      error: {
+        message: expect.stringContaining('attempt-scoped'),
+      },
+    });
+    expect(JSON.stringify(completed[0])).not.toContain(
+      '/private/attempt/release.tfplan'
+    );
+  });
+
+  test('Artifact v1 rejects unsafe requests before crossing the capability boundary', async () => {
+    const completed: CompletedMessage[] = [];
+    let callCount = 0;
+    const host = new ScriptHost({
+      workerUrl: new URL('../src/script-host-worker.ts', import.meta.url),
+      protocolVersion: 4,
+      send: async message => {
+        if (message.messageType === 'completed') completed.push(message);
+        if (message.messageType === 'capability_call') callCount += 1;
+      },
+    });
+    host.accept(
+      executeV4(
+        'inv_v4_artifacts_invalid',
+        `
+          const requests = [
+            () => services.artifacts.put('../secret', { name: 'bad' }),
+            () => services.artifacts.put('report.txt', {}),
+            () => services.artifacts.put('report.txt', { name: 'bad', retention: '1.5d' }),
+            () => services.artifacts.put('report.txt', { name: 'bad', contentType: 'not mime' }),
+            () => services.artifacts.head({ contract: 'woml.artifact-reference', contractVersion: 2 })
+          ];
+          const errors = [];
+          for (const invoke of requests) {
+            try {
+              await invoke();
+              errors.push('accepted');
+            } catch (error) {
+              errors.push(error.message);
+            }
+          }
+          return errors;
+        `
+      )
+    );
+    await host.drain();
+
+    expect(callCount).toBe(0);
+    expect(completed[0]?.outcome.kind).toBe('success');
+    if (completed[0]?.outcome.kind !== 'success') {
+      throw new Error('Expected local Artifact validation to be catchable.');
+    }
+    expect(completed[0].outcome.value).not.toContain('accepted');
+  });
 });
 
 describe('Script Host v5 module runtime', () => {

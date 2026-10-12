@@ -1,0 +1,40 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://woml.dev/schemas/artifact-reference/v1",
+  "title": "WOML Artifact Reference v1",
+  "description": "Bounded immutable reference to one logical durable artifact. The reference is not authorization and never contains body or backend location data.",
+  "x-status": "durable-artifacts-da1-frozen",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["contract", "contractVersion", "id", "name", "size", "sha256", "contentType"],
+  "properties": {
+    "contract": { "const": "woml.artifact-reference" },
+    "contractVersion": { "const": 1 },
+    "id": {
+      "type": "string",
+      "pattern": "^artifact_[0-9a-hjkmnp-tv-z]{26}$"
+    },
+    "name": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 256,
+      "x-maxUtf8Bytes": 256,
+      "pattern": "^[^\\u0000-\\u001F\\u007F]+$"
+    },
+    "size": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 1099511627776
+    },
+    "sha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "contentType": {
+      "type": "string",
+      "minLength": 3,
+      "maxLength": 255,
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9!#$&^_.+-]{0,126}/[A-Za-z0-9][A-Za-z0-9!#$&^_.+-]{0,126}$"
+    }
+  }
+}

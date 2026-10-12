@@ -1,0 +1,21 @@
+[
+  { "kind": "unsupported_capability", "code": "WOML_ARTIFACT_SERVICE_DISABLED", "message": "Durable artifacts are disabled by runtime policy.", "retryable": false, "ambiguous": false },
+  { "kind": "invalid_input", "code": "WOML_ARTIFACT_PATH_INVALID", "message": "The artifact source path is invalid.", "retryable": false, "ambiguous": false },
+  { "kind": "service_rejected", "code": "WOML_ARTIFACT_SOURCE_DENIED", "message": "The artifact source is outside approved roots.", "retryable": false, "ambiguous": false },
+  { "kind": "service_rejected", "code": "WOML_ARTIFACT_SOURCE_CHANGED", "message": "The artifact source changed while it was imported.", "retryable": false, "ambiguous": true },
+  { "kind": "service_rejected", "code": "WOML_ARTIFACT_SOURCE_TYPE_UNSUPPORTED", "message": "Artifact v1 accepts regular files only.", "retryable": false, "ambiguous": false },
+  { "kind": "input_too_large", "code": "WOML_ARTIFACT_TOO_LARGE", "message": "The artifact exceeds its configured byte limit.", "retryable": false, "ambiguous": false },
+  { "kind": "service_rejected", "code": "WOML_ARTIFACT_QUOTA_EXCEEDED", "message": "The artifact quota would be exceeded.", "retryable": false, "ambiguous": false },
+  { "kind": "invalid_input", "code": "WOML_ARTIFACT_RETENTION_INVALID", "message": "The requested retention violates artifact policy.", "retryable": false, "ambiguous": false },
+  { "kind": "service_rejected", "code": "WOML_ARTIFACT_NOT_FOUND", "message": "The durable artifact does not exist.", "retryable": false, "ambiguous": false },
+  { "kind": "service_rejected", "code": "WOML_ARTIFACT_ACCESS_DENIED", "message": "The current run cannot access this artifact.", "retryable": false, "ambiguous": false },
+  { "kind": "service_rejected", "code": "WOML_ARTIFACT_EXPIRED", "message": "The durable artifact has expired.", "retryable": false, "ambiguous": false },
+  { "kind": "service_rejected", "code": "WOML_ARTIFACT_QUARANTINED", "message": "Artifact policy quarantined this body.", "retryable": false, "ambiguous": false },
+  { "kind": "service_rejected", "code": "WOML_ARTIFACT_CORRUPT", "message": "Artifact integrity verification failed.", "retryable": false, "ambiguous": false },
+  { "kind": "transport_failed", "code": "WOML_ARTIFACT_BACKEND_UNAVAILABLE", "message": "The artifact backend is unavailable.", "retryable": true, "ambiguous": false },
+  { "kind": "timed_out", "code": "WOML_ARTIFACT_TIMED_OUT", "message": "The artifact transfer exceeded its deadline.", "retryable": false, "ambiguous": true },
+  { "kind": "cancelled", "code": "WOML_ARTIFACT_CANCELLED", "message": "The artifact transfer was cancelled.", "retryable": false, "ambiguous": true },
+  { "kind": "service_rejected", "code": "WOML_ARTIFACT_MATERIALIZATION_UNAVAILABLE", "message": "A private materialization could not be created.", "retryable": true, "ambiguous": false },
+  { "kind": "service_rejected", "code": "WOML_ARTIFACT_OPERATION_IDENTITY_CONFLICT", "message": "The artifact operation name was reused with different input.", "retryable": false, "ambiguous": false },
+  { "kind": "interrupted", "code": "WOML_ARTIFACT_INTERRUPTED", "message": "The artifact write outcome cannot be proven.", "retryable": false, "ambiguous": true }
+]

@@ -427,6 +427,7 @@ cp -R skills/woml .agents/skills/woml
 - [CLI reference](./docs/cli-reference.md)
 - [Services and capabilities](./docs/woml-services.md)
 - [Run local tools safely](./docs/woml-process.md)
+- [Preserve files as Durable Artifacts](./docs/woml-durable-artifacts.md)
 - [Modules](./docs/woml-modules.md)
 - [Communication providers](./docs/woml-communication-providers.md)
 - [Production deployment](./docs/woml-production-deployment.md)

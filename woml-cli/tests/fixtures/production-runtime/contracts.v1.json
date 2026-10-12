@@ -205,6 +205,29 @@
     "definitionHashes": ["sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"],
     "verified": true
   },
+  "artifactBackup": {
+    "profile": "woml.backup-manifest/v2",
+    "backupId": "backup_artifacts_01",
+    "createdAt": "2026-08-12T09:00:00Z",
+    "deploymentId": "customer-automation",
+    "activationId": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "storeVersion": 14,
+    "database": {
+      "file": "state.sqlite",
+      "sizeBytes": 1048576,
+      "digest": "sha256:eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
+    },
+    "definitionHashes": ["sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"],
+    "artifacts": {
+      "profile": "woml.artifact-backup-inventory/v1",
+      "directory": "artifacts",
+      "blobCount": 2,
+      "totalBytes": 4096,
+      "inventoryDigest": "sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+      "verified": true
+    },
+    "verified": true
+  },
   "retentionPlan": {
     "profile": "woml.retention/v1",
     "kind": "plan",

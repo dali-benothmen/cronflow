@@ -1,0 +1,27 @@
+<woml>
+  <workflow id="terraform-plan-artifact" name="Preserve a Terraform plan" description="Creates a reviewed Terraform plan and stores its exact bytes for a later approval or apply run." version="1.0.0">
+    <triggers><manual id="start" /></triggers>
+    <steps>
+      <step id="plan" name="Create Terraform plan">
+        <script>
+          return await services.process.run({
+            executable: "terraform",
+            args: ["plan", "-out", ".woml/artifact-input/release.tfplan"],
+            timeout: "10m",
+            output: { stdout: "capture", stderr: "capture", maxBytes: 65536 }
+          }, { name: "terraform-plan" });
+        </script>
+      </step>
+      <step id="preserve" name="Preserve reviewed plan">
+        <script>
+          const artifact = await services.artifacts.put(".woml/artifact-input/release.tfplan", {
+            name: "release-terraform-plan",
+            contentType: "application/octet-stream",
+            retention: "30d"
+          });
+          return { artifact, terraformExitCode: context.steps.plan.exitCode };
+        </script>
+      </step>
+    </steps>
+  </workflow>
+</woml>

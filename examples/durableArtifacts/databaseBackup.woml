@@ -1,0 +1,27 @@
+<woml>
+  <workflow id="database-backup-artifact" name="Preserve a database backup" description="Creates a PostgreSQL dump and hands later workflow steps an immutable verified reference." version="1.0.0">
+    <triggers><schedule id="nightly" cron="0 2 * * *" timezone="UTC" /></triggers>
+    <steps>
+      <step id="backup" name="Create database dump">
+        <script>
+          return await services.process.run({
+            executable: "pg_dump",
+            args: ["--format=custom", "--file=.woml/artifact-input/database.dump", secrets.POSTGRES_URL],
+            timeout: "30m",
+            output: { stdout: "discard", stderr: "capture", maxBytes: 65536 }
+          }, { name: "postgres-backup" });
+        </script>
+      </step>
+      <step id="preserve" name="Preserve database dump">
+        <script>
+          const artifact = await services.artifacts.put(".woml/artifact-input/database.dump", {
+            name: "nightly-postgres-backup",
+            contentType: "application/octet-stream",
+            retention: "30d"
+          });
+          return { artifact, completed: context.steps.backup.exitCode === 0 };
+        </script>
+      </step>
+    </steps>
+  </workflow>
+</woml>

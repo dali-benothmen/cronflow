@@ -1,0 +1,31 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://woml.dev/schemas/artifact-inspection/v1",
+  "title": "WOML Artifact Inspection v1",
+  "description": "Bounded operator-visible artifact metadata without body or backend location data.",
+  "x-status": "durable-artifacts-da9-frozen",
+  "x-forbiddenFields": ["path", "url", "signedUrl", "credentials", "body", "secret", "operationKey"],
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["profile", "artifact", "digestPrefix", "status", "createdAt", "expiresAt", "retentionMs", "provenance"],
+  "properties": {
+    "profile": { "const": "woml.artifact-inspection/v1" },
+    "artifact": { "$ref": "https://woml.dev/schemas/artifact-reference/v1" },
+    "digestPrefix": { "type": "string", "pattern": "^[0-9a-f]{12}$" },
+    "status": { "enum": ["available", "quarantined", "expired", "corrupt", "deleted"] },
+    "createdAt": { "type": "string", "format": "date-time" },
+    "expiresAt": { "type": "string", "format": "date-time" },
+    "retentionMs": { "type": "integer", "minimum": 0, "maximum": 31536000000 },
+    "provenance": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["workflowId", "runId", "nodeId", "attempt"],
+      "properties": {
+        "workflowId": { "type": "string", "minLength": 1, "maxLength": 256 },
+        "runId": { "type": "string", "minLength": 1, "maxLength": 320 },
+        "nodeId": { "type": "string", "minLength": 1, "maxLength": 320 },
+        "attempt": { "type": "integer", "minimum": 1, "maximum": 1000 }
+      }
+    }
+  }
+}

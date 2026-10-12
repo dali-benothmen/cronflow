@@ -26,6 +26,7 @@ or schema documents to write and run a workflow.
 | HTTP | [Outbound HTTP](woml-http-services.md) |
 | SQL databases | [Database](woml-database.md) |
 | Durable objects | [Storage](woml-storage.md) |
+| Immutable files and evidence | [Durable Artifacts](woml-durable-artifacts.md) |
 | Temporary acceleration | [Cache](woml-cache.md) |
 | Durable workflow memory | [Durable state](woml-durable-state.md) |
 | Internal workflow events | [Events service](woml-events-service.md) |

@@ -78,6 +78,14 @@ jobs:
       - name: Test the secure process CLI journey
         working-directory: woml-cli
         run: bun test tests/process-cli.test.ts --max-concurrency=1
+      - name: Test the durable artifact operator journey
+        working-directory: woml-cli
+        run: bun test tests/durable-artifacts-cli.test.ts --max-concurrency=1
+      - name: Enforce Durable Artifacts performance and publication contracts
+        working-directory: woml-cli
+        run: >-
+          bun run benchmark:durable-artifacts &&
+          bun scripts/verify-durable-artifacts-release.ts
       - name: Test for-each presentation and clean package
         working-directory: woml-cli
         run: >-
@@ -172,6 +180,29 @@ jobs:
           cargo --version
           git status --short
 
+  artifact-filesystem:
+    name: Artifact filesystem (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, macos-15, windows-2022]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Test Durable Artifacts paths, streaming, cancellation, recovery, and operator boundaries
+        working-directory: core
+        run: >-
+          cargo test --config profile.dev.debug=0
+          --config profile.dev.incremental=false -j 1 --locked
+          -p woml-engine --lib artifacts::tests -- --test-threads=1
+      - name: Failure diagnostics
+        if: failure()
+        run: |
+          rustc --version
+          cargo --version
+          git status --short
+
   architecture:
     name: Architecture separation
     runs-on: ubuntu-24.04
@@ -235,7 +266,7 @@ jobs:
         run: bun install --frozen-lockfile
       - name: Build the portable release package
         working-directory: woml-cli
-        run: bun run build:release
+        run: bun run build:native && bun run build:release
       - name: Verify release identity and package contracts
         working-directory: woml-cli
         run: >-
@@ -246,6 +277,9 @@ jobs:
           tests/release-family.test.ts
           tests/release-automation.test.ts
           --max-concurrency=1
+      - name: Test Durable Artifacts from the clean release package
+        working-directory: woml-cli
+        run: bun test tests/durable-artifacts-packaged-release.test.ts --max-concurrency=1
       - name: Pack, seal, and reverify the main artifact
         run: |
           bun woml-cli/scripts/release-artifact.ts pack --root release/main

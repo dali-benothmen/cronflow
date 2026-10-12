@@ -78,7 +78,7 @@ try {
   const run = JSON.parse(inspected.stdout.toString());
   const reusable = run.reusableDefinitions?.items?.[0];
   if (
-    run.profile !== 'woml.run-inspection/v5' ||
+    run.profile !== 'woml.run-inspection/v7' ||
     run.status !== 'succeeded' ||
     reusable?.invocationId !== 'discount' ||
     reusable?.status !== 'succeeded' ||

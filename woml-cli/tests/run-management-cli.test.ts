@@ -115,7 +115,7 @@ describe('Direct run management', () => {
     expect(inspection.exitCode).toBe(0);
     const inspected = JSON.parse(inspection.stdout.toString());
     expect(inspected).toMatchObject({
-      profile: 'woml.run-inspection/v2',
+      profile: 'woml.run-inspection/v7',
       runId,
       workflowId: 'hello',
       status: 'succeeded',
@@ -157,7 +157,7 @@ describe('Direct run management', () => {
     <steps>
       <step id="wait">
         <script>
-          await new Promise(resolve => setTimeout(resolve, 10000));
+          await new Promise(resolve => setTimeout(resolve, 30000));
           return { completed: true };
         </script>
       </step>
@@ -166,6 +166,11 @@ describe('Direct run management', () => {
 </woml>`,
       'utf8'
     );
+    // Initialize and validate the store before testing cross-process run
+    // management. The test is about cancellation authority, not concurrent
+    // first-open schema migration.
+    const initialized = invoke('list', '--state', statePath, '--json');
+    expect(initialized.exitCode).toBe(0);
     const child = Bun.spawn(
       [cliPath, 'test', workflowPath, '--state', statePath],
       { cwd: projectRoot, stdout: 'pipe', stderr: 'pipe' }
@@ -181,7 +186,7 @@ describe('Direct run management', () => {
       }
       stderr += decoder.decode();
     })();
-    const runDeadline = Date.now() + 10_000;
+    const runDeadline = Date.now() + 15_000;
     let runId: string | undefined;
     while (runId === undefined) {
       const listing = invoke(
@@ -226,7 +231,7 @@ describe('Direct run management', () => {
       businessOutcome: 'cancelled',
       cancellation: { requested: true },
     });
-  }, 30_000);
+  }, 35_000);
 
   test('reports unknown runs and removes the old namespace', () => {
     const statePath = join(temporaryDirectory, 'unknown.sqlite');

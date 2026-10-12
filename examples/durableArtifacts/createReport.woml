@@ -1,0 +1,70 @@
+<woml>
+  <workflow
+    id="durable-artifact-report"
+    name="Create a durable report"
+    description="Creates a local report and preserves its exact bytes as an immutable artifact."
+    version="1.0.0"
+  >
+    <triggers>
+      <manual id="start" />
+    </triggers>
+
+    <steps>
+      <step id="createReport" name="Create report">
+        <script>
+          const report = JSON.stringify({
+            generatedAt: new Date().toISOString(),
+            customer: context.payload.customer ?? "Example Co",
+            status: "ready"
+          }, null, 2);
+          await services.process.run({
+            executable: "bun",
+            args: [
+              "-e",
+              "const { mkdir } = await import('node:fs/promises'); await mkdir('.woml/artifact-input', { recursive: true }); await Bun.write('.woml/artifact-input/generated-report.json', Bun.argv[1]);",
+              report
+            ],
+            timeout: "10s"
+          }, { name: "create-report-file" });
+          return { bytes: new TextEncoder().encode(report).byteLength };
+        </script>
+      </step>
+
+      <step id="preserveReport" name="Preserve report">
+        <script>
+          const artifact = await services.artifacts.put(
+            ".woml/artifact-input/generated-report.json",
+            {
+              name: "customer-report",
+              contentType: "application/json",
+              retention: "30d"
+            }
+          );
+          return { artifact };
+        </script>
+      </step>
+
+      <step id="consumeReport" name="Verify and consume report">
+        <script>
+          const artifact = context.steps.preserveReport.artifact;
+          const metadata = await services.artifacts.head(artifact);
+          const path = await services.artifacts.materialize(artifact);
+          const consumed = await services.process.run({
+            executable: "bun",
+            args: [
+              "-e",
+              "console.log(await Bun.file(Bun.argv[1]).text())",
+              path
+            ],
+            timeout: "10s"
+          }, { name: "consume-report-file" });
+          return {
+            artifact,
+            integrity: metadata.integrity,
+            report: JSON.parse(consumed.stdout)
+          };
+        </script>
+      </step>
+    </steps>
+  </workflow>
+</woml>

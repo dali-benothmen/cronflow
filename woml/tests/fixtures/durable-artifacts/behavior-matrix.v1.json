@@ -1,0 +1,31 @@
+{
+  "accepted": [
+    "put one regular file beneath an approved read root",
+    "preserve UTF-8 display metadata without terminal control characters",
+    "reattach duplicate put delivery with identical canonical input",
+    "share physical bytes while retaining separate logical provenance",
+    "head or materialize from another step of the same run",
+    "materialize from a lifecycle hook of the same run",
+    "repeat a read-only head or materialize after interruption",
+    "retain an expired artifact while an active hold exists"
+  ],
+  "rejected": [
+    "absolute, traversal, backslash, device, link-escape, or non-regular source",
+    "same operation name with different canonical input",
+    "artifact reference used by another run",
+    "forged or modified reference fields",
+    "materialized path returned as durable artifact identity",
+    "workflow-authored mutation, rename, or deletion",
+    "retention request outside policy",
+    "unknown future contract version or field",
+    "body, path, backend key, credential, signed URL, or secret in durable metadata"
+  ],
+  "deferred": [
+    "workflow-call parent or child grants",
+    "public or signed download URLs",
+    "artifact-bound approval decisions",
+    "remote-execution artifact transport",
+    "arbitrary format parsing",
+    "transparent local encryption at rest"
+  ]
+}

@@ -797,7 +797,7 @@ impl DurableCapabilityAuthority {
             .safe_result_metadata(&request, &success.result)
             .unwrap_or_default(),
         );
-        if request.capability == "state" {
+        if matches!(request.capability.as_str(), "state" | "artifacts") {
           result_metadata.insert("durationMs".to_string(), Value::from(success.duration_ms));
         }
         RunEventPayload::OperationSucceeded(OperationSucceededData {
@@ -837,6 +837,9 @@ impl DurableCapabilityAuthority {
             "failed"
           };
           metadata.insert("outcome".to_string(), Value::String(outcome.to_string()));
+          metadata.insert("durationMs".to_string(), Value::from(failed.duration_ms));
+        }
+        if request.capability == "artifacts" {
           metadata.insert("durationMs".to_string(), Value::from(failed.duration_ms));
         }
         RunEventPayload::OperationFailed(OperationFailedData {

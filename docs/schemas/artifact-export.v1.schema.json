@@ -1,0 +1,20 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://woml.dev/schemas/artifact-export/v1",
+  "title": "WOML Audited Artifact Export v1",
+  "x-status": "durable-artifacts-da9-frozen",
+  "x-forbiddenFields": ["path", "url", "signedUrl", "credentials", "body", "secret"],
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["profile", "auditId", "artifactId", "name", "size", "digestPrefix", "exportedAt", "verified"],
+  "properties": {
+    "profile": { "const": "woml.artifact-export/v1" },
+    "auditId": { "type": "string", "pattern": "^audit_[0-9a-f]{32}$" },
+    "artifactId": { "type": "string", "pattern": "^artifact_[0-9a-hjkmnp-tv-z]{26}$" },
+    "name": { "type": "string", "minLength": 1, "maxLength": 256 },
+    "size": { "type": "integer", "minimum": 0, "maximum": 1099511627776 },
+    "digestPrefix": { "type": "string", "pattern": "^[0-9a-f]{12}$" },
+    "exportedAt": { "type": "string", "format": "date-time" },
+    "verified": { "const": true }
+  }
+}

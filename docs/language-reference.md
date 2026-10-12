@@ -1137,6 +1137,14 @@ the same store without copying its body through Bun or context. The complete
 contract, limits, integrity policy, and example are documented in
 `docs/woml-storage.md`.
 
+`services.artifacts` preserves immutable files without putting their bodies or
+private paths in context. `put(path, options)` returns a bounded reference;
+`head(reference)` verifies metadata and integrity; `materialize(reference)`
+returns a private path for the current attempt only. Rust owns path policy,
+streaming, quotas, retention, provenance, access, hashing, cleanup, backup,
+and local/S3-compatible backends. The complete author and operator guide is
+documented in `docs/woml-durable-artifacts.md`.
+
 `services.cache` provides workflow-scoped `get`, `set`, `delete`, `has`,
 `increment`, and `setIfAbsent` operations over expiring JSON values. Rust owns
 TTL enforcement, atomic mutations, bounds, LRU eviction, and the namespace.

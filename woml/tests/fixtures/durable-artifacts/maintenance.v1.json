@@ -1,0 +1,36 @@
+[
+  {
+    "profile": "woml.artifact-maintenance/v1",
+    "kind": "plan",
+    "completedAt": "2026-10-12T10:00:00.000Z",
+    "eligibleArtifacts": 2,
+    "eligibleBlobs": 1,
+    "estimatedBytes": 4096,
+    "deletedArtifacts": 0,
+    "deletedBlobs": 0,
+    "deletedBytes": 0,
+    "scrubbedBlobs": 0,
+    "corruptBlobs": 0,
+    "collectedOrphans": 0,
+    "liveArtifacts": 5,
+    "liveBlobs": 4,
+    "liveBytes": 16384
+  },
+  {
+    "profile": "woml.artifact-maintenance/v1",
+    "kind": "result",
+    "completedAt": "2026-10-12T10:00:01.000Z",
+    "eligibleArtifacts": 2,
+    "eligibleBlobs": 1,
+    "estimatedBytes": 4096,
+    "deletedArtifacts": 2,
+    "deletedBlobs": 1,
+    "deletedBytes": 4096,
+    "scrubbedBlobs": 4,
+    "corruptBlobs": 0,
+    "collectedOrphans": 1,
+    "liveArtifacts": 3,
+    "liveBlobs": 3,
+    "liveBytes": 12288
+  }
+]

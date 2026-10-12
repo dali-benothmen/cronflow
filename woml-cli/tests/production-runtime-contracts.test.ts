@@ -22,6 +22,7 @@ const schemas = [
   'runtime-metrics.v1.schema.json',
   'runtime-health.v1.schema.json',
   'backup-manifest.v1.schema.json',
+  'backup-manifest.v2.schema.json',
   'retention.v1.schema.json',
 ] as const;
 
@@ -58,6 +59,7 @@ describe('Frozen Production Runtime contracts', () => {
       ['https://woml.dev/schemas/runtime-health/v1', contracts.readiness],
       ['https://woml.dev/schemas/runtime-health/v1', contracts.healthDetail],
       ['https://woml.dev/schemas/backup-manifest/v1', contracts.backup],
+      ['https://woml.dev/schemas/backup-manifest/v2', contracts.artifactBackup],
       ['https://woml.dev/schemas/retention/v1', contracts.retentionPlan],
       ['https://woml.dev/schemas/retention/v1', contracts.retentionResult],
     ] as const;

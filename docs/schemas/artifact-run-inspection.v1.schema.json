@@ -1,0 +1,19 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://woml.dev/schemas/artifact-run-inspection/v1",
+  "title": "WOML Artifact Run Inspection v1",
+  "x-status": "durable-artifacts-da9-frozen",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["profile", "runId", "artifacts", "truncated"],
+  "properties": {
+    "profile": { "const": "woml.artifact-run-inspection/v1" },
+    "runId": { "type": "string", "minLength": 1, "maxLength": 320 },
+    "artifacts": {
+      "type": "array",
+      "maxItems": 100,
+      "items": { "$ref": "https://woml.dev/schemas/artifact-inspection/v1" }
+    },
+    "truncated": { "type": "boolean" }
+  }
+}

@@ -1,4 +1,5 @@
 import type {
+  RustArtifactObservationV1,
   RustRunListV1,
   RustRuntimeObservationV1,
 } from './rust-executor';
@@ -181,6 +182,7 @@ export class RuntimeObservability implements RuntimeObservabilitySurface {
   readonly #workflows: readonly ObservedWorkflow[];
   readonly #listRuns: () => RustRunListV1;
   readonly #observeDurable?: () => RustRuntimeObservationV1;
+  readonly #observeArtifacts?: () => RustArtifactObservationV1;
   readonly #storeSize: () => Promise<number>;
   readonly #emitLog: (text: string) => void;
   readonly #logFormat: 'text' | 'json';
@@ -208,6 +210,7 @@ export class RuntimeObservability implements RuntimeObservabilitySurface {
     readonly workflows: readonly ObservedWorkflow[];
     readonly listRuns: () => RustRunListV1;
     readonly observeDurable?: () => RustRuntimeObservationV1;
+    readonly observeArtifacts?: () => RustArtifactObservationV1;
     readonly storeSize: () => Promise<number>;
     readonly logFormat: 'text' | 'json';
     readonly emitLog: (text: string) => void;
@@ -223,6 +226,7 @@ export class RuntimeObservability implements RuntimeObservabilitySurface {
     );
     this.#listRuns = options.listRuns;
     this.#observeDurable = options.observeDurable;
+    this.#observeArtifacts = options.observeArtifacts;
     this.#storeSize = options.storeSize;
     this.#logFormat = options.logFormat;
     this.#emitLog = options.emitLog;
@@ -536,7 +540,20 @@ export class RuntimeObservability implements RuntimeObservabilitySurface {
       value,
       labels,
     });
+    const artifactMetric = (
+      name: string,
+      type: 'gauge' | 'counter',
+      value: number,
+      backend: 'local' | 's3'
+    ) => ({
+      profile: 'woml.runtime-metrics/v2',
+      name,
+      type,
+      value,
+      labels: { backend },
+    });
     const durable = this.#observeDurable?.();
+    const artifacts = this.#observeArtifacts?.();
     const statusTotal = (status: string): number =>
       durable?.statusTotals[status] ??
       snapshot.runs.filter(run => run.status === status).length;
@@ -580,6 +597,19 @@ export class RuntimeObservability implements RuntimeObservabilitySurface {
       metric('woml_for_each_iterations_pending', 'gauge', loops.reduce((sum, loop) => sum + loop.pending, 0)),
       metric('woml_for_each_iterations_completed_total', 'counter', this.#counters.get('for_each:completed') ?? 0)
     );
+    if (artifacts !== undefined) {
+      results.push(
+        artifactMetric('woml_artifact_backend_healthy', 'gauge', artifacts.backendHealthy ? 1 : 0, artifacts.backend),
+        artifactMetric('woml_artifact_transfers_total', 'counter', artifacts.transfers, artifacts.backend),
+        artifactMetric('woml_artifact_transfer_bytes_total', 'counter', artifacts.transferredBytes, artifacts.backend),
+        artifactMetric('woml_artifact_transfer_duration_seconds', 'counter', artifacts.transferDurationMs / 1000, artifacts.backend),
+        artifactMetric('woml_artifact_transfer_failures_total', 'counter', artifacts.failedTransfers, artifacts.backend),
+        artifactMetric('woml_artifact_corrupt_total', 'gauge', artifacts.corruptArtifacts, artifacts.backend),
+        artifactMetric('woml_artifact_orphans_total', 'gauge', artifacts.orphanBlobs, artifacts.backend),
+        artifactMetric('woml_artifacts_live', 'gauge', artifacts.liveArtifacts, artifacts.backend),
+        artifactMetric('woml_artifact_live_bytes', 'gauge', artifacts.liveBytes, artifacts.backend)
+      );
+    }
     for (const [operation, status] of [
       ['backup', 'completed'],
       ['retention', 'completed'],

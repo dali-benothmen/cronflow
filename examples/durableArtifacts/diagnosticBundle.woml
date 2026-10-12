@@ -1,0 +1,27 @@
+<woml>
+  <workflow id="diagnostic-bundle-artifact" name="Preserve an incident diagnostic bundle" description="Collects bounded system diagnostics and stores the bundle for a later incident-review workflow." version="1.0.0">
+    <triggers><manual id="collect" /></triggers>
+    <steps>
+      <step id="bundle" name="Create diagnostic bundle">
+        <script>
+          return await services.process.run({
+            executable: "tar",
+            args: ["-czf", ".woml/artifact-input/diagnostics.tar.gz", "logs", "config"],
+            timeout: "5m",
+            output: { stdout: "discard", stderr: "capture", maxBytes: 65536 }
+          }, { name: "diagnostic-bundle" });
+        </script>
+      </step>
+      <step id="preserve" name="Preserve diagnostics">
+        <script>
+          const artifact = await services.artifacts.put(".woml/artifact-input/diagnostics.tar.gz", {
+            name: "incident-diagnostic-bundle",
+            contentType: "application/gzip",
+            retention: "7d"
+          });
+          return { artifact, collected: context.steps.bundle.exitCode === 0 };
+        </script>
+      </step>
+    </steps>
+  </workflow>
+</woml>

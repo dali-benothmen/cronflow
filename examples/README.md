@@ -78,6 +78,7 @@ continues.
 | Durable object storage | [`storageWorkflow.woml`](storageWorkflow.woml) |
 | Expiring cache | [`cacheWorkflow.woml`](cacheWorkflow.woml) |
 | Durable user state | [`durableStateWorkflow.woml`](durableStateWorkflow.woml) |
+| Immutable files, plans, reports, backups, and diagnostics | [`durableArtifacts/`](durableArtifacts/) |
 | Internal event fan-out | [`internalEvents/`](internalEvents/) |
 | Supervised local and infrastructure tools | [`process/`](process/) |
 

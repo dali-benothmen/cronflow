@@ -64,6 +64,28 @@ const durationMultipliers = {
   d: 86_400_000,
 } as const;
 const maximumWorkflowCallTimeoutMs = 86_400_000;
+const artifactRetentionPattern = /^[1-9][0-9]*(h|d|w)$/;
+const artifactContentTypePattern =
+  /^[A-Za-z0-9][A-Za-z0-9!#$&^_.+-]{0,126}\/[A-Za-z0-9][A-Za-z0-9!#$&^_.+-]{0,126}$/;
+
+function utf8Bytes(value: string): number {
+  return new TextEncoder().encode(value).byteLength;
+}
+
+function validPortableArtifactPath(value: string): boolean {
+  if (
+    utf8Bytes(value) > 4_096 ||
+    value.length === 0 ||
+    value.startsWith('/') ||
+    /^[A-Za-z]:/.test(value) ||
+    value.includes('\\') ||
+    value.includes('//') ||
+    /[\u0000-\u001F\u007F]/.test(value)
+  ) {
+    return false;
+  }
+  return value.split('/').every(segment => segment !== '.' && segment !== '..' && segment.length > 0);
+}
 
 function isNode(value: unknown): value is AstNode {
   return (
@@ -537,6 +559,189 @@ function analyzeScript(
                 }
               }
             }
+          }
+        }
+      }
+      if (path?.[0] === 'services' && path[1] === 'artifacts') {
+        const operation = path[2];
+        if (
+          path.length !== 3 ||
+          (operation !== 'put' &&
+            operation !== 'head' &&
+            operation !== 'materialize')
+        ) {
+          fail(
+            issueAt(
+              callee,
+              source.length,
+              'WOML_ARTIFACT_OPERATION_UNSUPPORTED',
+              `Artifact service operation "${path.slice(2).join('.') || ''}" is unsupported.`,
+              'Use services.artifacts.put(), services.artifacts.head(), or services.artifacts.materialize().'
+            )
+          );
+        } else {
+          const args = (node.arguments as readonly unknown[] | undefined) ?? [];
+          if (operation === 'put') {
+            if (args.length !== 2) {
+              fail(
+                issueAt(
+                  node,
+                  source.length,
+                  'WOML_ARTIFACT_PUT_ARGUMENTS_INVALID',
+                  'services.artifacts.put() requires a source path and artifact options.',
+                  'Use services.artifacts.put("reports/result.json", { name: "result", contentType: "application/json", retention: "30d" }).'
+                )
+              );
+            } else {
+              const pathArgument = args[0];
+              const literalPath = literalString(pathArgument);
+              if (
+                isNode(pathArgument) &&
+                pathArgument.type === 'Literal' &&
+                (literalPath === undefined ||
+                  !validPortableArtifactPath(literalPath))
+              ) {
+                fail(
+                  issueAt(
+                    pathArgument,
+                    source.length,
+                    'WOML_ARTIFACT_PATH_INVALID',
+                    'A literal artifact path must be project-relative POSIX syntax without traversal.',
+                    'Example: reports/test-results.json'
+                  )
+                );
+              }
+
+              const putOptions = args[1];
+              if (!isNode(putOptions) || putOptions.type !== 'ObjectExpression') {
+                fail(
+                  issueAt(
+                    isNode(putOptions) ? putOptions : node,
+                    source.length,
+                    'WOML_ARTIFACT_PUT_OPTIONS_INVALID',
+                    'Artifact put options must be a direct object containing a stable name.',
+                    'Use { name, contentType?, retention? }.'
+                  )
+                );
+              } else {
+                const seen = new Set<string>();
+                for (const property of (putOptions.properties as readonly unknown[] | undefined) ?? []) {
+                  if (
+                    !isNode(property) ||
+                    property.type !== 'Property' ||
+                    property.computed === true ||
+                    property.kind !== 'init'
+                  ) {
+                    fail(
+                      issueAt(
+                        isNode(property) ? property : putOptions,
+                        source.length,
+                        'WOML_ARTIFACT_PUT_OPTIONS_INVALID',
+                        'Artifact put options do not support spreads, computed keys, getters, or setters.'
+                      )
+                    );
+                    continue;
+                  }
+                  const name = isNode(property.key)
+                    ? property.key.type === 'Identifier'
+                      ? property.key.name
+                      : literalString(property.key)
+                    : undefined;
+                  if (
+                    name !== 'name' &&
+                    name !== 'contentType' &&
+                    name !== 'retention'
+                  ) {
+                    fail(
+                      issueAt(
+                        property,
+                        source.length,
+                        'WOML_ARTIFACT_PUT_OPTION_UNKNOWN',
+                        `Unknown artifact put option "${name ?? ''}".`,
+                        'Artifact v1 accepts name, contentType, and retention.'
+                      )
+                    );
+                    continue;
+                  }
+                  if (seen.has(name)) {
+                    fail(
+                      issueAt(
+                        property,
+                        source.length,
+                        'WOML_ARTIFACT_PUT_OPTION_DUPLICATE',
+                        `Artifact put option "${name}" is declared more than once.`
+                      )
+                    );
+                  }
+                  seen.add(name);
+                  const value = literalString(property.value);
+                  if (value !== undefined && name === 'name') {
+                    if (
+                      utf8Bytes(value) > 256 ||
+                      value.length === 0 ||
+                      /[\u0000-\u001F\u007F]/.test(value)
+                    ) {
+                      fail(
+                        issueAt(
+                          property.value as AstNode,
+                          source.length,
+                          'WOML_ARTIFACT_NAME_INVALID',
+                          'An artifact name must contain 1 to 256 UTF-8 bytes without control characters.'
+                        )
+                      );
+                    }
+                  }
+                  if (
+                    value !== undefined &&
+                    name === 'contentType' &&
+                    !artifactContentTypePattern.test(value)
+                  ) {
+                    fail(
+                      issueAt(
+                        property.value as AstNode,
+                        source.length,
+                        'WOML_ARTIFACT_CONTENT_TYPE_INVALID',
+                        'An artifact contentType must be a portable MIME type such as application/json.'
+                      )
+                    );
+                  }
+                  if (
+                    value !== undefined &&
+                    name === 'retention' &&
+                    !artifactRetentionPattern.test(value)
+                  ) {
+                    fail(
+                      issueAt(
+                        property.value as AstNode,
+                        source.length,
+                        'WOML_ARTIFACT_RETENTION_INVALID',
+                        'Artifact retention must be a whole positive number of hours, days, or weeks.',
+                        'Examples: "24h", "30d", or "4w".'
+                      )
+                    );
+                  }
+                }
+                if (!seen.has('name')) {
+                  fail(
+                    issueAt(
+                      putOptions,
+                      source.length,
+                      'WOML_ARTIFACT_NAME_REQUIRED',
+                      'services.artifacts.put() requires the "name" option.'
+                    )
+                  );
+                }
+              }
+            }
+          } else if (args.length !== 1) {
+            fail(
+              issueAt(
+                node,
+                source.length,
+                'WOML_ARTIFACT_REFERENCE_ARGUMENTS_INVALID',
+                `services.artifacts.${operation}() requires exactly one Artifact Reference v1 value.`
+              )
+            );
           }
         }
       }
