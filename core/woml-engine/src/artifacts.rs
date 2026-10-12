@@ -4026,20 +4026,31 @@ fn ensure_private_directory(path: &Path) -> Result<(), CapabilityFailure> {
   Ok(())
 }
 
+#[cfg(unix)]
 fn harden_file_permissions(path: &Path) -> Result<(), CapabilityFailure> {
-  #[cfg(unix)]
-  {
-    use std::os::unix::fs::PermissionsExt;
-    fs::set_permissions(path, fs::Permissions::from_mode(0o600))
-      .map_err(|_| backend_unavailable())?;
-  }
+  use std::os::unix::fs::PermissionsExt;
+  fs::set_permissions(path, fs::Permissions::from_mode(0o600))
+    .map_err(|_| backend_unavailable())?;
   Ok(())
 }
 
+#[cfg(not(unix))]
+fn harden_file_permissions(_path: &Path) -> Result<(), CapabilityFailure> {
+  Ok(())
+}
+
+#[cfg(unix)]
 fn sync_directory(path: &Path) -> Result<(), CapabilityFailure> {
   File::open(path)
     .and_then(|file| file.sync_all())
     .map_err(|_| backend_unavailable())
+}
+
+#[cfg(not(unix))]
+fn sync_directory(_path: &Path) -> Result<(), CapabilityFailure> {
+  // Windows does not support opening a directory as a regular File for
+  // sync_all. File contents are still flushed before atomic publication.
+  Ok(())
 }
 
 fn new_artifact_id() -> Result<String, CapabilityFailure> {
@@ -4450,18 +4461,7 @@ mod tests {
       );
       return;
     }
-    if method == "PUT"
-      && is_blob
-      && failed_blob_puts
-        .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |remaining| {
-          if remaining > 0 {
-            Some(remaining - 1)
-          } else {
-            None
-          }
-        })
-        .is_ok()
-    {
+    if method == "PUT" && is_blob && decrement_if_positive(failed_blob_puts) {
       write_mock_response(&mut stream, 503, "", &[]);
       return;
     }
@@ -4478,17 +4478,7 @@ mod tests {
         }
       }
       "GET" => {
-        if is_blob
-          && invisible_blob_reads
-            .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |remaining| {
-              if remaining > 0 {
-                Some(remaining - 1)
-              } else {
-                None
-              }
-            })
-            .is_ok()
-        {
+        if is_blob && decrement_if_positive(invisible_blob_reads) {
           write_mock_response(&mut stream, 404, "", &[]);
           return;
         }
@@ -4503,6 +4493,17 @@ mod tests {
       }
       _ => write_mock_response(&mut stream, 400, "", &[]),
     }
+  }
+
+  fn decrement_if_positive(value: &AtomicUsize) -> bool {
+    let mut current = value.load(Ordering::SeqCst);
+    while current > 0 {
+      match value.compare_exchange_weak(current, current - 1, Ordering::SeqCst, Ordering::SeqCst) {
+        Ok(_) => return true,
+        Err(observed) => current = observed,
+      }
+    }
+    false
   }
 
   fn write_mock_response(
