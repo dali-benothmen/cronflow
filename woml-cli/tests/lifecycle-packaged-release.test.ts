@@ -138,7 +138,7 @@ describe('Packaged Lifecycle and Engine Controls release', () => {
       '--json'
     );
     expect(JSON.parse(inspection.stdout.toString())).toMatchObject({
-      profile: 'woml.run-inspection/v2',
+      profile: 'woml.run-inspection/v7',
       status: 'succeeded',
       businessOutcome: 'succeeded',
       lifecycleStatus: 'completed',

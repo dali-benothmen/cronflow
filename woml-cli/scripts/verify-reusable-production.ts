@@ -140,7 +140,7 @@ try {
   await stop(composition);
   const composed = inspection(compositionRunId, compositionState);
   if (
-    composed.profile !== 'woml.run-inspection/v5' ||
+    composed.profile !== 'woml.run-inspection/v7' ||
     composed.status !== 'succeeded' ||
     composed.reusableDefinitions?.counts.succeeded !== 7 ||
     composed.reusableDefinitions.items.some(item => item.status !== 'succeeded')

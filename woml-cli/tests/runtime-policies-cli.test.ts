@@ -97,7 +97,7 @@ describe('Integrated runtime-policy CLI boundary', () => {
     expect(JSON.parse(result.stdout)).toEqual({ value: 'hello' });
   });
 
-  test('list/get JSON use policy-aware v2/v3 operator contracts', async () => {
+  test('list/get JSON use the current policy-aware operator contracts', async () => {
     const directory = await mkdtemp(join(tmpdir(), 'woml-rp6-cli-'));
     const statePath = join(directory, 'state.sqlite');
     try {
@@ -143,7 +143,7 @@ describe('Integrated runtime-policy CLI boundary', () => {
       ]);
       expect(get.exitCode).toBe(0);
       expect(JSON.parse(get.stdout)).toMatchObject({
-        profile: 'woml.run-inspection/v3',
+        profile: 'woml.run-inspection/v7',
         runId: execution.runId,
         policy: { queue: 'orders' },
       });

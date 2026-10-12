@@ -87,7 +87,7 @@ describe('Packaged Runtime Policies release', () => {
     expect(inspected.exitCode).toBe(0);
     const inspectionText = inspected.stdout.toString();
     expect(JSON.parse(inspectionText)).toMatchObject({
-      profile: 'woml.run-inspection/v3',
+      profile: 'woml.run-inspection/v7',
       runId,
       status: 'succeeded',
       policy: {

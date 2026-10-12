@@ -850,7 +850,7 @@ describe('For-each composition', () => {
           { nativeCorePath }
         );
         expect(durableInspection).toMatchObject({
-          profile: 'woml.run-inspection/v6',
+          profile: 'woml.run-inspection/v7',
           forEach: {
             counts: { opened: 1, succeeded: 1 },
             items: [{
