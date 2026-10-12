@@ -561,6 +561,33 @@ export interface RustRetentionExecutionV1 {
   readonly compacted: boolean;
 }
 
+export interface RustArtifactMaintenanceV1 {
+  readonly profile: 'woml.artifact-maintenance/v1';
+  readonly kind: 'plan' | 'result';
+  readonly completedAt: string;
+  readonly eligibleArtifacts: number;
+  readonly eligibleBlobs: number;
+  readonly estimatedBytes: number;
+  readonly deletedArtifacts: number;
+  readonly deletedBlobs: number;
+  readonly deletedBytes: number;
+  readonly scrubbedBlobs: number;
+  readonly corruptBlobs: number;
+  readonly collectedOrphans: number;
+  readonly liveArtifacts: number;
+  readonly liveBlobs: number;
+  readonly liveBytes: number;
+}
+
+export interface RustArtifactBackupInventoryV1 {
+  readonly profile: 'woml.artifact-backup-inventory/v1';
+  readonly directory: 'artifacts';
+  readonly blobCount: number;
+  readonly totalBytes: number;
+  readonly inventoryDigest: string;
+  readonly verified: true;
+}
+
 export interface RustLifecycleWarning {
   readonly hookId: string;
   readonly actionId: string;
@@ -954,6 +981,32 @@ interface NativeCore {
     now: string
   ) => Promise<string>;
   readonly readWomlLastRetentionResult: (eventStorePath: string) => string;
+  readonly maintainWomlArtifacts?: (
+    eventStorePath: string,
+    policyJson: string,
+    modeJson: string,
+    resolvedSecretsJson: string,
+    now: string,
+    dryRun: boolean
+  ) => string;
+  readonly exportWomlArtifactBackup?: (
+    eventStorePath: string,
+    destinationPath: string,
+    policyJson: string,
+    modeJson: string,
+    resolvedSecretsJson: string
+  ) => string;
+  readonly restoreWomlArtifactBackup?: (
+    eventStorePath: string,
+    sourcePath: string,
+    policyJson: string,
+    modeJson: string,
+    resolvedSecretsJson: string
+  ) => string;
+  readonly verifyWomlArtifactBackup?: (
+    eventStorePath: string,
+    sourcePath: string
+  ) => string;
   readonly inspectWomlRunV2: (eventStorePath: string, runId: string) => string;
   readonly cancelWomlRun: (
     eventStorePath: string,
@@ -3524,6 +3577,167 @@ export function readLastRetentionResultWithRust(
   } catch (error) {
     if (error instanceof RetentionOperationError) throw error;
     decodeRetentionNativeError(error);
+  }
+}
+
+export function maintainArtifactsWithRust(
+  eventStorePath: string,
+  authority: ArtifactRuntimeAuthorityV1,
+  resolvedSecrets: Readonly<Record<string, string>>,
+  now: string,
+  dryRun: boolean,
+  options: Pick<RustExecutorOptions, 'nativeCorePath'> = {}
+): RustArtifactMaintenanceV1 {
+  const native = loadNativeCore(options.nativeCorePath ?? defaultNativeCorePath());
+  if (typeof native.maintainWomlArtifacts !== 'function') {
+    throw new RetentionOperationError(
+      'WOML_ARTIFACT_MAINTENANCE_UNAVAILABLE',
+      'The native core does not expose artifact maintenance; rebuild the Rust addon.'
+    );
+  }
+  let value: unknown;
+  try {
+    value = JSON.parse(native.maintainWomlArtifacts(
+      eventStorePath,
+      JSON.stringify(authority.artifacts.policy),
+      JSON.stringify(authority.artifacts.mode),
+      JSON.stringify(resolvedSecrets),
+      now,
+      dryRun
+    ));
+  } catch (error) {
+    throw new RetentionOperationError(
+      'WOML_ARTIFACT_MAINTENANCE_FAILED',
+      error instanceof Error ? error.message : 'Artifact maintenance failed.'
+    );
+  }
+  const fields = [
+    'profile', 'kind', 'completedAt', 'eligibleArtifacts', 'eligibleBlobs',
+    'estimatedBytes', 'deletedArtifacts', 'deletedBlobs', 'deletedBytes',
+    'scrubbedBlobs', 'corruptBlobs', 'collectedOrphans', 'liveArtifacts',
+    'liveBlobs', 'liveBytes',
+  ];
+  if (
+    !record(value) || !exactKeys(value, fields) ||
+    value.profile !== 'woml.artifact-maintenance/v1' ||
+    !['plan', 'result'].includes(String(value.kind)) ||
+    !dateTime(value.completedAt) ||
+    fields.slice(3).some(field => !count(value[field]))
+  ) {
+    throw new RetentionOperationError(
+      'WOML_ARTIFACT_MAINTENANCE_RESULT_INVALID',
+      'The native core returned invalid Artifact Maintenance v1 data.'
+    );
+  }
+  return value as unknown as RustArtifactMaintenanceV1;
+}
+
+function artifactBackupInventory(value: unknown): RustArtifactBackupInventoryV1 {
+  if (
+    !record(value) ||
+    !exactKeys(value, [
+      'profile', 'directory', 'blobCount', 'totalBytes', 'inventoryDigest', 'verified',
+    ]) ||
+    value.profile !== 'woml.artifact-backup-inventory/v1' ||
+    value.directory !== 'artifacts' ||
+    !count(value.blobCount) ||
+    !count(value.totalBytes) ||
+    typeof value.inventoryDigest !== 'string' ||
+    !/^sha256:[0-9a-f]{64}$/.test(value.inventoryDigest) ||
+    value.verified !== true
+  ) {
+    throw new BackupOperationError(
+      'WOML_BACKUP_VERIFICATION_FAILED',
+      'The native core returned invalid artifact backup inventory.'
+    );
+  }
+  return value as unknown as RustArtifactBackupInventoryV1;
+}
+
+export function exportArtifactBackupWithRust(
+  eventStorePath: string,
+  destinationPath: string,
+  authority: ArtifactRuntimeAuthorityV1,
+  resolvedSecrets: Readonly<Record<string, string>>,
+  options: Pick<RustExecutorOptions, 'nativeCorePath'> = {}
+): RustArtifactBackupInventoryV1 {
+  const native = loadNativeCore(options.nativeCorePath ?? defaultNativeCorePath());
+  if (typeof native.exportWomlArtifactBackup !== 'function') {
+    throw new BackupOperationError(
+      'WOML_BACKUP_UNAVAILABLE',
+      'The native core does not expose artifact backup; rebuild the Rust addon.'
+    );
+  }
+  try {
+    return artifactBackupInventory(JSON.parse(native.exportWomlArtifactBackup(
+      eventStorePath,
+      destinationPath,
+      JSON.stringify(authority.artifacts.policy),
+      JSON.stringify(authority.artifacts.mode),
+      JSON.stringify(resolvedSecrets)
+    )));
+  } catch (error) {
+    if (error instanceof BackupOperationError) throw error;
+    throw new BackupOperationError(
+      'WOML_BACKUP_VERIFICATION_FAILED',
+      error instanceof Error ? error.message : 'Artifact backup failed.'
+    );
+  }
+}
+
+export function restoreArtifactBackupWithRust(
+  eventStorePath: string,
+  sourcePath: string,
+  authority: ArtifactRuntimeAuthorityV1,
+  resolvedSecrets: Readonly<Record<string, string>>,
+  options: Pick<RustExecutorOptions, 'nativeCorePath'> = {}
+): RustArtifactBackupInventoryV1 {
+  const native = loadNativeCore(options.nativeCorePath ?? defaultNativeCorePath());
+  if (typeof native.restoreWomlArtifactBackup !== 'function') {
+    throw new BackupOperationError(
+      'WOML_RESTORE_UNAVAILABLE',
+      'The native core does not expose artifact restore; rebuild the Rust addon.'
+    );
+  }
+  try {
+    return artifactBackupInventory(JSON.parse(native.restoreWomlArtifactBackup(
+      eventStorePath,
+      sourcePath,
+      JSON.stringify(authority.artifacts.policy),
+      JSON.stringify(authority.artifacts.mode),
+      JSON.stringify(resolvedSecrets)
+    )));
+  } catch (error) {
+    if (error instanceof BackupOperationError) throw error;
+    throw new BackupOperationError(
+      'WOML_RESTORE_VERIFICATION_FAILED',
+      error instanceof Error ? error.message : 'Artifact restore failed.'
+    );
+  }
+}
+
+export function verifyArtifactBackupWithRust(
+  eventStorePath: string,
+  sourcePath: string,
+  options: Pick<RustExecutorOptions, 'nativeCorePath'> = {}
+): RustArtifactBackupInventoryV1 {
+  const native = loadNativeCore(options.nativeCorePath ?? defaultNativeCorePath());
+  if (typeof native.verifyWomlArtifactBackup !== 'function') {
+    throw new BackupOperationError(
+      'WOML_BACKUP_UNAVAILABLE',
+      'The native core does not expose artifact backup verification; rebuild the Rust addon.'
+    );
+  }
+  try {
+    return artifactBackupInventory(JSON.parse(
+      native.verifyWomlArtifactBackup(eventStorePath, sourcePath)
+    ));
+  } catch (error) {
+    if (error instanceof BackupOperationError) throw error;
+    throw new BackupOperationError(
+      'WOML_BACKUP_VERIFICATION_FAILED',
+      error instanceof Error ? error.message : 'Artifact backup verification failed.'
+    );
   }
 }
 

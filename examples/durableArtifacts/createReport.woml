@@ -14,7 +14,7 @@
         <script>
           const report = JSON.stringify({
             generatedAt: new Date().toISOString(),
-            customer: context.payload.customer ?? "Dali",
+            customer: context.payload.customer ?? "Example Co",
             status: "ready"
           }, null, 2);
           await services.process.run({

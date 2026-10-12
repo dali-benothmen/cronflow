@@ -302,6 +302,7 @@ v1, storage, databases, cache, or secrets. A retention result freezes
 - `runtime-metrics.v1.schema.json`
 - `runtime-health.v1.schema.json`
 - `backup-manifest.v1.schema.json`
+- `backup-manifest.v2.schema.json`
 - `retention.v1.schema.json`
 - reviewed PRO0 contracts and semantics fixtures
 

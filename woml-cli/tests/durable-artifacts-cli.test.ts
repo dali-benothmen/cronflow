@@ -182,5 +182,102 @@ describe('Durable Artifacts local runtime journey', () => {
     expect(durableHistory).not.toContain(join(temporaryDirectory, 'materialized'));
     expect(durableHistory).not.toContain(join(temporaryDirectory, 'artifact-bytes'));
     database.close();
+
+    const backupDirectory = join(temporaryDirectory, 'backup');
+    const backup = run(
+      'backup', backupDirectory,
+      '--state', state,
+      '--artifact-policy', policy,
+      '--json'
+    );
+    expect(backup.exitCode, backup.stderr?.toString() ?? '').toBe(0);
+    const manifest = JSON.parse(backup.stdout?.toString() ?? '');
+    expect(manifest).toMatchObject({
+      profile: 'woml.backup-manifest/v2',
+      artifacts: {
+        profile: 'woml.artifact-backup-inventory/v1',
+        directory: 'artifacts',
+        blobCount: 1,
+        totalBytes: 13,
+        inventoryDigest: expect.stringMatching(/^sha256:[0-9a-f]{64}$/),
+        verified: true,
+      },
+      verified: true,
+    });
+
+    const restoredBackend = join(temporaryDirectory, 'restored-artifact-bytes');
+    const restoredPolicy = join(temporaryDirectory, 'restored-artifact-policy.json');
+    await writeFile(
+      restoredPolicy,
+      JSON.stringify({
+        ...JSON.parse(await Bun.file(policy).text()),
+        materialization: {
+          directory: join(temporaryDirectory, 'restored-materialized'),
+          cleanupOnStart: true,
+          maxBytesPerAttempt: 1_048_576,
+        },
+        backend: {
+          contract: 'woml.artifact-backend',
+          contractVersion: 1,
+          kind: 'local',
+          directory: restoredBackend,
+        },
+      })
+    );
+    const restoredState = join(temporaryDirectory, 'restored/workflow-history.sqlite');
+    const restored = run(
+      'restore', backupDirectory,
+      '--state', restoredState,
+      '--artifact-policy', restoredPolicy,
+      '--json'
+    );
+    expect(restored.exitCode, restored.stderr?.toString() ?? '').toBe(0);
+    expect(JSON.parse(restored.stdout?.toString() ?? '')).toMatchObject({
+      profile: 'woml.restore-result/v1',
+      backupId: manifest.backupId,
+      statePath: restoredState,
+    });
+    expect(
+      Array.from(
+        new Bun.Glob('blobs/sha256/**/*').scanSync({
+          cwd: restoredBackend,
+          onlyFiles: true,
+        })
+      )
+    ).toHaveLength(1);
+
+    const expiring = new Database(state);
+    expiring.run(
+      "UPDATE woml_artifact_retention SET expires_at = '2000-01-01T00:00:00.000Z'"
+    );
+    expiring.close();
+    const planned = run(
+      'prune', '--before', '1h',
+      '--state', state,
+      '--artifact-policy', policy,
+      '--dry-run',
+      '--json'
+    );
+    expect(planned.exitCode, planned.stderr?.toString() ?? '').toBe(0);
+    expect(JSON.parse(planned.stdout?.toString() ?? '').artifacts).toMatchObject({
+      kind: 'plan',
+      eligibleArtifacts: 1,
+      estimatedBytes: 13,
+    });
+    const pruned = run(
+      'prune', '--before', '1h',
+      '--state', state,
+      '--artifact-policy', policy,
+      '--json'
+    );
+    expect(pruned.exitCode, pruned.stderr?.toString() ?? '').toBe(0);
+    expect(JSON.parse(pruned.stdout?.toString() ?? '').artifacts).toMatchObject({
+      kind: 'result',
+      deletedArtifacts: 1,
+      deletedBlobs: 1,
+      deletedBytes: 13,
+      liveArtifacts: 0,
+      liveBlobs: 0,
+    });
   }, 30_000);
 });

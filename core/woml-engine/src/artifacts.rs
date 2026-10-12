@@ -15,6 +15,8 @@ use std::{
 
 use chrono::{SecondsFormat, Utc};
 use futures_util::future::BoxFuture;
+use hmac::{Hmac, Mac};
+use reqwest::{Method, StatusCode, Url};
 use rusqlite::{params, Connection, OpenFlags, OptionalExtension, TransactionBehavior};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Map, Value};
@@ -42,6 +44,9 @@ const MAX_ARTIFACT_BYTES: u64 = 1_099_511_627_776;
 const MAX_RUN_BYTES: u64 = 4_398_046_511_104;
 const MAX_STORE_BYTES: u64 = 1_125_899_906_842_624;
 const MAX_TRANSFER_TIMEOUT_MS: u64 = 86_400_000;
+const ARTIFACT_MAINTENANCE_BATCH: usize = 250;
+const ARTIFACT_SCRUB_BATCH: usize = 64;
+const ARTIFACT_ORPHAN_SCAN_BATCH: usize = 1_000;
 const CROCKFORD: &[u8; 32] = b"0123456789abcdefghjkmnpqrstvwxyz";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
@@ -153,6 +158,37 @@ pub struct ArtifactReferenceV1 {
   pub content_type: String,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ArtifactMaintenanceV1 {
+  pub profile: String,
+  pub kind: String,
+  pub completed_at: String,
+  pub eligible_artifacts: u64,
+  pub eligible_blobs: u64,
+  pub estimated_bytes: u64,
+  pub deleted_artifacts: u64,
+  pub deleted_blobs: u64,
+  pub deleted_bytes: u64,
+  pub scrubbed_blobs: u64,
+  pub corrupt_blobs: u64,
+  pub collected_orphans: u64,
+  pub live_artifacts: u64,
+  pub live_blobs: u64,
+  pub live_bytes: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ArtifactBackupInventoryV1 {
+  pub profile: String,
+  pub directory: String,
+  pub blob_count: u64,
+  pub total_bytes: u64,
+  pub inventory_digest: String,
+  pub verified: bool,
+}
+
 #[derive(Debug, Error)]
 pub enum ArtifactPolicyError {
   #[error("WOML_ARTIFACT_SERVICE_DISABLED: durable artifacts are disabled by runtime policy. Corrective action: provide a reviewed Artifact Policy v1 document")]
@@ -163,17 +199,82 @@ pub enum ArtifactPolicyError {
   Invalid(String),
 }
 
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub(crate) struct PreparedArtifactPolicy {
   project_root: PathBuf,
   read_roots: Vec<PathBuf>,
-  backend_directory: PathBuf,
+  backend: PreparedArtifactBackend,
   materialization_directory: PathBuf,
   max_materialization_bytes_per_attempt: u64,
   limits: ArtifactLimits,
   retention: ArtifactRetentionPolicy,
   secret_action: KnownSecretAction,
   minimum_secret_bytes: usize,
+}
+
+impl std::fmt::Debug for PreparedArtifactPolicy {
+  fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+    formatter
+      .debug_struct("PreparedArtifactPolicy")
+      .field("project_root", &self.project_root)
+      .field("read_roots", &self.read_roots)
+      .field("backend", &self.backend)
+      .field("materialization_directory", &self.materialization_directory)
+      .field("limits", &self.limits)
+      .field("retention", &self.retention)
+      .field("secret_action", &self.secret_action)
+      .finish()
+  }
+}
+
+#[derive(Clone)]
+enum PreparedArtifactBackend {
+  Local { directory: PathBuf },
+  S3(Box<PreparedS3Backend>),
+}
+
+impl std::fmt::Debug for PreparedArtifactBackend {
+  fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+    match self {
+      Self::Local { directory } => formatter
+        .debug_struct("Local")
+        .field("directory", directory)
+        .finish(),
+      Self::S3(config) => formatter
+        .debug_struct("S3")
+        .field("bucket", &config.bucket)
+        .field("region", &config.region)
+        .field("prefix", &config.prefix)
+        .field("endpoint", &config.endpoint)
+        .field("force_path_style", &config.force_path_style)
+        .field("server_side_encryption", &config.server_side_encryption)
+        .finish_non_exhaustive(),
+    }
+  }
+}
+
+#[derive(Clone)]
+struct PreparedS3Backend {
+  bucket: String,
+  region: String,
+  prefix: String,
+  endpoint: Url,
+  force_path_style: bool,
+  credentials: S3Credentials,
+  server_side_encryption: S3ServerSideEncryption,
+}
+
+#[derive(Clone)]
+struct S3Credentials {
+  access_key: String,
+  secret_key: String,
+  session_token: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+enum S3ServerSideEncryption {
+  Aes256,
+  AwsKms { key_id: String },
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -218,6 +319,8 @@ struct AuthorizedArtifact {
   expires_at: String,
 }
 
+type StoredArtifactRow = (String, String, u64, String, String, String, String, String);
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct SourceIdentity {
   length: u64,
@@ -238,11 +341,34 @@ struct StoredSettlement {
 /// Rust-owned backend boundary. Logical identity and authorization never live
 /// in implementations of this trait; they remain in SQLite.
 trait ArtifactBackend: Send + Sync {
+  fn identity(&self) -> &str;
+  fn bind_store(&self, connection: &Connection, store_id: &str) -> Result<(), CapabilityFailure>;
   fn begin_stage(&self) -> Result<ArtifactStage, CapabilityFailure>;
-  fn publish(&self, stage: ArtifactStage, sha256: &str, size: u64)
-    -> Result<(), CapabilityFailure>;
+  fn publish(
+    &self,
+    stage: ArtifactStage,
+    sha256: &str,
+    size: u64,
+    cancellation: &CapabilityCancellationToken,
+  ) -> Result<(), CapabilityFailure>;
   fn cleanup_startup(&self, connection: &Connection) -> Result<(), CapabilityFailure>;
-  fn verify(&self, sha256: &str, size: u64) -> Result<PathBuf, CapabilityFailure>;
+  fn verify(&self, sha256: &str, size: u64) -> Result<VerifiedArtifactBlob, CapabilityFailure>;
+  fn delete(&self, sha256: &str) -> Result<(), CapabilityFailure>;
+  fn inventory(&self, limit: usize) -> Result<Vec<String>, CapabilityFailure>;
+}
+
+#[derive(Debug)]
+struct VerifiedArtifactBlob {
+  path: PathBuf,
+  temporary: bool,
+}
+
+impl Drop for VerifiedArtifactBlob {
+  fn drop(&mut self) {
+    if self.temporary {
+      let _ = fs::remove_file(&self.path);
+    }
+  }
 }
 
 #[derive(Debug)]
@@ -384,6 +510,14 @@ impl LocalArtifactBackend {
 }
 
 impl ArtifactBackend for LocalArtifactBackend {
+  fn identity(&self) -> &str {
+    self.root.to_str().unwrap_or("local")
+  }
+
+  fn bind_store(&self, connection: &Connection, store_id: &str) -> Result<(), CapabilityFailure> {
+    LocalArtifactBackend::bind_store(self, connection, store_id)
+  }
+
   fn begin_stage(&self) -> Result<ArtifactStage, CapabilityFailure> {
     let path = self
       .staging
@@ -407,7 +541,11 @@ impl ArtifactBackend for LocalArtifactBackend {
     mut stage: ArtifactStage,
     sha256: &str,
     size: u64,
+    cancellation: &CapabilityCancellationToken,
   ) -> Result<(), CapabilityFailure> {
+    if cancellation.is_cancelled() {
+      return Err(artifact_cancelled());
+    }
     let file = stage.file.take().ok_or_else(backend_unavailable)?;
     file.sync_all().map_err(|_| backend_unavailable())?;
     drop(file);
@@ -475,11 +613,800 @@ impl ArtifactBackend for LocalArtifactBackend {
     sync_directory(&self.root)
   }
 
-  fn verify(&self, sha256: &str, size: u64) -> Result<PathBuf, CapabilityFailure> {
+  fn verify(&self, sha256: &str, size: u64) -> Result<VerifiedArtifactBlob, CapabilityFailure> {
     let path = self.blob_path(sha256);
     self.verify_blob(&path, sha256, size)?;
-    Ok(path)
+    Ok(VerifiedArtifactBlob {
+      path,
+      temporary: false,
+    })
   }
+
+  fn delete(&self, sha256: &str) -> Result<(), CapabilityFailure> {
+    let path = self.blob_path(sha256);
+    match fs::remove_file(&path) {
+      Ok(()) => {
+        if let Some(parent) = path.parent() {
+          sync_directory(parent)?;
+          if fs::read_dir(parent)
+            .map_err(|_| backend_unavailable())?
+            .next()
+            .is_none()
+          {
+            let _ = fs::remove_dir(parent);
+          }
+        }
+        Ok(())
+      }
+      Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+      Err(_) => Err(backend_unavailable()),
+    }
+  }
+
+  fn inventory(&self, limit: usize) -> Result<Vec<String>, CapabilityFailure> {
+    let mut digests = Vec::new();
+    for prefix in fs::read_dir(&self.blobs).map_err(|_| backend_unavailable())? {
+      let prefix = prefix.map_err(|_| backend_unavailable())?;
+      if !prefix
+        .file_type()
+        .map_err(|_| backend_unavailable())?
+        .is_dir()
+      {
+        continue;
+      }
+      let prefix_name = prefix.file_name().to_string_lossy().into_owned();
+      for entry in fs::read_dir(prefix.path()).map_err(|_| backend_unavailable())? {
+        let entry = entry.map_err(|_| backend_unavailable())?;
+        if entry
+          .file_type()
+          .map_err(|_| backend_unavailable())?
+          .is_file()
+        {
+          let digest = format!("{}{}", prefix_name, entry.file_name().to_string_lossy());
+          if digest.len() == 64 && digest.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+            digests.push(digest);
+            if digests.len() >= limit {
+              digests.sort();
+              return Ok(digests);
+            }
+          }
+        }
+      }
+    }
+    digests.sort();
+    Ok(digests)
+  }
+}
+
+const S3_MULTIPART_THRESHOLD_BYTES: u64 = 64 * 1024 * 1024;
+const S3_MULTIPART_PART_BYTES: usize = 8 * 1024 * 1024;
+const S3_RECOVERY_ATTEMPTS: usize = 4;
+const S3_CONTROL_RESPONSE_MAX_BYTES: usize = 1024 * 1024;
+
+#[derive(Clone)]
+struct S3ArtifactBackend {
+  config: PreparedS3Backend,
+  client: reqwest::Client,
+  staging: PathBuf,
+  identity: String,
+}
+
+impl S3ArtifactBackend {
+  fn open(config: PreparedS3Backend, materializations: &Path) -> Result<Self, CapabilityFailure> {
+    let staging = materializations.join(".s3-staging");
+    ensure_private_directory(&staging)?;
+    let client = reqwest::Client::builder()
+      .https_only(config.endpoint.scheme() == "https")
+      .connect_timeout(Duration::from_secs(15))
+      .timeout(Duration::from_secs(60 * 60))
+      .redirect(reqwest::redirect::Policy::none())
+      .build()
+      .map_err(|_| backend_unavailable())?;
+    let identity = format!(
+      "s3://{}/{}@{}",
+      config.bucket,
+      config.prefix,
+      config.endpoint.origin().ascii_serialization()
+    );
+    Ok(Self {
+      config,
+      client,
+      staging,
+      identity,
+    })
+  }
+
+  fn object_key(&self, suffix: &str) -> String {
+    format!("{}{}", self.config.prefix, suffix)
+  }
+
+  fn blob_key(&self, digest: &str) -> String {
+    self.object_key(&format!("blobs/sha256/{}/{}", &digest[..2], &digest[2..]))
+  }
+
+  fn endpoint(
+    &self,
+    key: &str,
+    query: &[(String, String)],
+  ) -> Result<(Url, String, String), CapabilityFailure> {
+    let mut url = self.config.endpoint.clone();
+    let base = url.path().trim_end_matches('/').to_string();
+    let path = if self.config.force_path_style {
+      format!("{base}/{}/{key}", self.config.bucket)
+    } else {
+      let host = url.host_str().ok_or_else(backend_unavailable)?;
+      url
+        .set_host(Some(&format!("{}.{}", self.config.bucket, host)))
+        .map_err(|_| backend_unavailable())?;
+      format!("{base}/{key}")
+    };
+    url.set_path(&path);
+    let mut encoded_query = query
+      .iter()
+      .map(|(name, value)| {
+        format!(
+          "{}={}",
+          aws_percent_encode(name.as_bytes()),
+          aws_percent_encode(value.as_bytes())
+        )
+      })
+      .collect::<Vec<_>>();
+    encoded_query.sort();
+    let canonical_query = encoded_query.join("&");
+    url.set_query((!canonical_query.is_empty()).then_some(&canonical_query));
+    let canonical_uri = if url.path().is_empty() {
+      "/".to_string()
+    } else {
+      url.path().to_string()
+    };
+    Ok((url, canonical_uri, canonical_query))
+  }
+
+  async fn send(
+    &self,
+    method: Method,
+    key: &str,
+    query: Vec<(String, String)>,
+    payload_hash: String,
+    body: Option<reqwest::Body>,
+    mut extra_headers: BTreeMap<String, String>,
+  ) -> Result<reqwest::Response, CapabilityFailure> {
+    let (url, canonical_uri, canonical_query) = self.endpoint(key, &query)?;
+    let now = Utc::now();
+    let amz_date = now.format("%Y%m%dT%H%M%SZ").to_string();
+    let date = now.format("%Y%m%d").to_string();
+    let host = match url.port() {
+      Some(port) => format!("{}:{port}", url.host_str().ok_or_else(backend_unavailable)?),
+      None => url.host_str().ok_or_else(backend_unavailable)?.to_string(),
+    };
+    extra_headers.insert("host".to_string(), host);
+    extra_headers.insert("x-amz-content-sha256".to_string(), payload_hash.clone());
+    extra_headers.insert("x-amz-date".to_string(), amz_date.clone());
+    if let Some(token) = &self.config.credentials.session_token {
+      extra_headers.insert("x-amz-security-token".to_string(), token.clone());
+    }
+    let canonical_headers = extra_headers
+      .iter()
+      .map(|(name, value)| format!("{name}:{}\n", value.trim()))
+      .collect::<String>();
+    let signed_headers = extra_headers.keys().cloned().collect::<Vec<_>>().join(";");
+    let canonical_request = format!(
+      "{}\n{}\n{}\n{}\n{}\n{}",
+      method.as_str(),
+      canonical_uri,
+      canonical_query,
+      canonical_headers,
+      signed_headers,
+      payload_hash
+    );
+    let scope = format!("{date}/{}/s3/aws4_request", self.config.region);
+    let string_to_sign = format!(
+      "AWS4-HMAC-SHA256\n{}\n{}\n{}",
+      amz_date,
+      scope,
+      hex::encode(Sha256::digest(canonical_request.as_bytes()))
+    );
+    let date_key = hmac_sha256(
+      format!("AWS4{}", self.config.credentials.secret_key).as_bytes(),
+      date.as_bytes(),
+    )?;
+    let region_key = hmac_sha256(&date_key, self.config.region.as_bytes())?;
+    let service_key = hmac_sha256(&region_key, b"s3")?;
+    let signing_key = hmac_sha256(&service_key, b"aws4_request")?;
+    let signature = hex::encode(hmac_sha256(&signing_key, string_to_sign.as_bytes())?);
+    let authorization = format!(
+      "AWS4-HMAC-SHA256 Credential={}/{}, SignedHeaders={}, Signature={}",
+      self.config.credentials.access_key, scope, signed_headers, signature
+    );
+    let mut request = self
+      .client
+      .request(method, url)
+      .header("authorization", authorization);
+    for (name, value) in extra_headers {
+      request = request.header(name, value);
+    }
+    if let Some(body) = body {
+      request = request.body(body);
+    }
+    request.send().await.map_err(|_| backend_unavailable())
+  }
+
+  fn encryption_headers(&self) -> BTreeMap<String, String> {
+    match &self.config.server_side_encryption {
+      S3ServerSideEncryption::Aes256 => BTreeMap::from([(
+        "x-amz-server-side-encryption".to_string(),
+        "AES256".to_string(),
+      )]),
+      S3ServerSideEncryption::AwsKms { key_id } => BTreeMap::from([
+        (
+          "x-amz-server-side-encryption".to_string(),
+          "aws:kms".to_string(),
+        ),
+        (
+          "x-amz-server-side-encryption-aws-kms-key-id".to_string(),
+          key_id.clone(),
+        ),
+      ]),
+    }
+  }
+
+  fn run<T, F>(&self, future: F) -> Result<T, CapabilityFailure>
+  where
+    T: Send + 'static,
+    F: std::future::Future<Output = Result<T, CapabilityFailure>> + Send + 'static,
+  {
+    std::thread::spawn(move || {
+      tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .map_err(|_| backend_unavailable())?
+        .block_on(future)
+    })
+    .join()
+    .map_err(|_| backend_unavailable())?
+  }
+
+  fn upload(
+    &self,
+    path: &Path,
+    key: &str,
+    digest: &str,
+    size: u64,
+    cancellation: &CapabilityCancellationToken,
+  ) -> Result<(), CapabilityFailure> {
+    if size >= S3_MULTIPART_THRESHOLD_BYTES {
+      return self.upload_multipart(path, key, size, cancellation);
+    }
+    for attempt in 0..S3_RECOVERY_ATTEMPTS {
+      if cancellation.is_cancelled() {
+        return Err(artifact_cancelled());
+      }
+      let backend = self.clone();
+      let path = path.to_path_buf();
+      let key = key.to_string();
+      let digest = digest.to_string();
+      let cancellation = cancellation.clone();
+      let outcome = self.run(async move {
+        let body = streaming_request_body(path, cancellation)?;
+        let mut headers = backend.encryption_headers();
+        headers.insert("if-none-match".to_string(), "*".to_string());
+        headers.insert("content-length".to_string(), size.to_string());
+        let response = backend
+          .send(Method::PUT, &key, vec![], digest, Some(body), headers)
+          .await?;
+        if response.status().is_success() || response.status() == StatusCode::PRECONDITION_FAILED {
+          Ok(())
+        } else {
+          Err(backend_unavailable())
+        }
+      });
+      if outcome.is_ok() {
+        return outcome;
+      }
+      if attempt + 1 < S3_RECOVERY_ATTEMPTS {
+        std::thread::sleep(Duration::from_millis(25 * (attempt as u64 + 1)));
+      }
+    }
+    Err(backend_unavailable())
+  }
+
+  fn upload_multipart(
+    &self,
+    path: &Path,
+    key: &str,
+    size: u64,
+    cancellation: &CapabilityCancellationToken,
+  ) -> Result<(), CapabilityFailure> {
+    let backend = self.clone();
+    let path = path.to_path_buf();
+    let key = key.to_string();
+    let cancellation = cancellation.clone();
+    self.run(async move {
+      let empty_hash = hex::encode(Sha256::digest([]));
+      let initiated = backend
+        .send(
+          Method::POST,
+          &key,
+          vec![("uploads".to_string(), String::new())],
+          empty_hash.clone(),
+          None,
+          backend.encryption_headers(),
+        )
+        .await?;
+      if !initiated.status().is_success() {
+        return Err(backend_unavailable());
+      }
+      let initiated = bounded_response_text(initiated, S3_CONTROL_RESPONSE_MAX_BYTES).await?;
+      let upload_id = xml_values(&initiated, "UploadId")
+        .into_iter()
+        .next()
+        .ok_or_else(backend_unavailable)?;
+      let outcome = async {
+        let mut source = File::open(&path).map_err(|_| backend_unavailable())?;
+        let mut parts = Vec::new();
+        let mut uploaded = 0_u64;
+        let mut part_number = 1_u32;
+        while uploaded < size {
+          if cancellation.is_cancelled() {
+            return Err(artifact_cancelled());
+          }
+          let remaining = usize::try_from((size - uploaded).min(S3_MULTIPART_PART_BYTES as u64))
+            .map_err(|_| backend_unavailable())?;
+          let mut bytes = vec![0_u8; remaining];
+          source
+            .read_exact(&mut bytes)
+            .map_err(|_| backend_unavailable())?;
+          let part_hash = hex::encode(Sha256::digest(&bytes));
+          let response = backend
+            .send(
+              Method::PUT,
+              &key,
+              vec![
+                ("partNumber".to_string(), part_number.to_string()),
+                ("uploadId".to_string(), upload_id.clone()),
+              ],
+              part_hash,
+              Some(reqwest::Body::from(bytes)),
+              BTreeMap::from([("content-length".to_string(), remaining.to_string())]),
+            )
+            .await?;
+          if !response.status().is_success() {
+            return Err(backend_unavailable());
+          }
+          let etag = response
+            .headers()
+            .get("etag")
+            .and_then(|value| value.to_str().ok())
+            .map(str::to_string)
+            .ok_or_else(backend_unavailable)?;
+          parts.push((part_number, etag));
+          uploaded += remaining as u64;
+          part_number += 1;
+        }
+        let completion = format!(
+          "<CompleteMultipartUpload>{}</CompleteMultipartUpload>",
+          parts
+            .iter()
+            .map(|(number, etag)| format!(
+              "<Part><PartNumber>{number}</PartNumber><ETag>{}</ETag></Part>",
+              xml_escape(etag)
+            ))
+            .collect::<String>()
+        );
+        let completion_hash = hex::encode(Sha256::digest(completion.as_bytes()));
+        let response = backend
+          .send(
+            Method::POST,
+            &key,
+            vec![("uploadId".to_string(), upload_id.clone())],
+            completion_hash,
+            Some(reqwest::Body::from(completion)),
+            BTreeMap::from([("content-type".to_string(), "application/xml".to_string())]),
+          )
+          .await?;
+        if response.status().is_success() {
+          Ok(())
+        } else {
+          Err(backend_unavailable())
+        }
+      }
+      .await;
+      if outcome.is_err() {
+        let _ = backend
+          .send(
+            Method::DELETE,
+            &key,
+            vec![("uploadId".to_string(), upload_id)],
+            empty_hash,
+            None,
+            BTreeMap::new(),
+          )
+          .await;
+      }
+      outcome
+    })
+  }
+
+  fn download_verified(
+    &self,
+    key: &str,
+    digest: &str,
+    size: u64,
+  ) -> Result<VerifiedArtifactBlob, CapabilityFailure> {
+    let backend = self.clone();
+    let key = key.to_string();
+    let digest = digest.to_string();
+    let path = self
+      .staging
+      .join(format!("{}.download", uuid::Uuid::new_v4().simple()));
+    let download_path = path.clone();
+    let outcome = self.run(async move {
+      let empty_hash = hex::encode(Sha256::digest([]));
+      let mut response = None;
+      let mut final_status = None;
+      for attempt in 0..S3_RECOVERY_ATTEMPTS {
+        match backend
+          .send(
+            Method::GET,
+            &key,
+            vec![],
+            empty_hash.clone(),
+            None,
+            BTreeMap::new(),
+          )
+          .await
+        {
+          Ok(candidate) if candidate.status().is_success() => {
+            response = Some(candidate);
+            break;
+          }
+          Ok(candidate) => final_status = Some(candidate.status()),
+          Err(_) => final_status = None,
+        }
+        if attempt + 1 < S3_RECOVERY_ATTEMPTS {
+          tokio::time::sleep(Duration::from_millis(25 * (attempt as u64 + 1))).await;
+        }
+      }
+      let mut response = response.ok_or_else(|| {
+        if final_status == Some(StatusCode::NOT_FOUND) {
+          artifact_corrupt()
+        } else {
+          backend_unavailable()
+        }
+      })?;
+      let mut options = OpenOptions::new();
+      options.create_new(true).write(true);
+      #[cfg(unix)]
+      {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+      }
+      let mut target = options
+        .open(&download_path)
+        .map_err(|_| backend_unavailable())?;
+      let mut hasher = Sha256::new();
+      let mut received = 0_u64;
+      while let Some(chunk) = response.chunk().await.map_err(|_| backend_unavailable())? {
+        received = received.saturating_add(chunk.len() as u64);
+        if received > size {
+          return Err(artifact_corrupt());
+        }
+        hasher.update(&chunk);
+        target
+          .write_all(&chunk)
+          .map_err(|_| backend_unavailable())?;
+      }
+      target.sync_all().map_err(|_| backend_unavailable())?;
+      if received != size || hex::encode(hasher.finalize()) != digest {
+        return Err(artifact_corrupt());
+      }
+      Ok(())
+    });
+    if let Err(error) = outcome {
+      let _ = fs::remove_file(&path);
+      return Err(error);
+    }
+    Ok(VerifiedArtifactBlob {
+      path,
+      temporary: true,
+    })
+  }
+
+  fn list_inventory(&self, limit: usize) -> Result<Vec<String>, CapabilityFailure> {
+    let backend = self.clone();
+    let prefix = self.object_key("blobs/sha256/");
+    self.run(async move {
+      let empty_hash = hex::encode(Sha256::digest([]));
+      let response = backend
+        .send(
+          Method::GET,
+          "",
+          vec![
+            ("list-type".to_string(), "2".to_string()),
+            ("max-keys".to_string(), limit.min(1_000).to_string()),
+            ("prefix".to_string(), prefix.clone()),
+          ],
+          empty_hash,
+          None,
+          BTreeMap::new(),
+        )
+        .await?;
+      if !response.status().is_success() {
+        return Err(backend_unavailable());
+      }
+      let body = bounded_response_text(response, S3_CONTROL_RESPONSE_MAX_BYTES).await?;
+      let mut digests = xml_values(&body, "Key")
+        .into_iter()
+        .filter_map(|key| key.strip_prefix(&prefix).map(str::to_string))
+        .map(|suffix| suffix.replace('/', ""))
+        .filter(|digest| digest.len() == 64 && digest.bytes().all(|byte| byte.is_ascii_hexdigit()))
+        .take(limit)
+        .collect::<Vec<_>>();
+      digests.sort();
+      Ok(digests)
+    })
+  }
+}
+
+impl ArtifactBackend for S3ArtifactBackend {
+  fn identity(&self) -> &str {
+    &self.identity
+  }
+
+  fn bind_store(&self, _connection: &Connection, store_id: &str) -> Result<(), CapabilityFailure> {
+    let backend = self.clone();
+    let key = self.object_key("store-id");
+    let expected = format!("woml.artifact-store/v1\n{store_id}\n");
+    self.run(async move {
+      let empty_hash = hex::encode(Sha256::digest([]));
+      let response = backend
+        .send(
+          Method::GET,
+          &key,
+          vec![],
+          empty_hash.clone(),
+          None,
+          BTreeMap::new(),
+        )
+        .await?;
+      if response.status().is_success() {
+        let body = bounded_response_text(response, 1024).await?;
+        return if body == expected {
+          Ok(())
+        } else {
+          Err(backend_unavailable())
+        };
+      }
+      if response.status() != StatusCode::NOT_FOUND {
+        return Err(backend_unavailable());
+      }
+      let digest = hex::encode(Sha256::digest(expected.as_bytes()));
+      let mut headers = backend.encryption_headers();
+      headers.insert("if-none-match".to_string(), "*".to_string());
+      headers.insert("content-length".to_string(), expected.len().to_string());
+      let response = backend
+        .send(
+          Method::PUT,
+          &key,
+          vec![],
+          digest,
+          Some(reqwest::Body::from(expected.clone())),
+          headers,
+        )
+        .await?;
+      if response.status().is_success() {
+        return Ok(());
+      }
+      if response.status() != StatusCode::PRECONDITION_FAILED {
+        return Err(backend_unavailable());
+      }
+      for attempt in 0..S3_RECOVERY_ATTEMPTS {
+        let response = backend
+          .send(
+            Method::GET,
+            &key,
+            vec![],
+            empty_hash.clone(),
+            None,
+            BTreeMap::new(),
+          )
+          .await?;
+        if response.status().is_success() {
+          let body = bounded_response_text(response, 1024).await?;
+          return if body == expected {
+            Ok(())
+          } else {
+            Err(backend_unavailable())
+          };
+        }
+        if attempt + 1 < S3_RECOVERY_ATTEMPTS {
+          tokio::time::sleep(Duration::from_millis(25 * (attempt as u64 + 1))).await;
+        }
+      }
+      Err(backend_unavailable())
+    })
+  }
+
+  fn begin_stage(&self) -> Result<ArtifactStage, CapabilityFailure> {
+    let path = self
+      .staging
+      .join(format!("{}.part", uuid::Uuid::new_v4().simple()));
+    let mut options = OpenOptions::new();
+    options.create_new(true).write(true).read(true);
+    #[cfg(unix)]
+    {
+      use std::os::unix::fs::OpenOptionsExt;
+      options.mode(0o600);
+    }
+    let file = options.open(&path).map_err(|_| backend_unavailable())?;
+    Ok(ArtifactStage {
+      path,
+      file: Some(file),
+    })
+  }
+
+  fn publish(
+    &self,
+    mut stage: ArtifactStage,
+    sha256: &str,
+    size: u64,
+    cancellation: &CapabilityCancellationToken,
+  ) -> Result<(), CapabilityFailure> {
+    let file = stage.file.take().ok_or_else(backend_unavailable)?;
+    file.sync_all().map_err(|_| backend_unavailable())?;
+    drop(file);
+    self.upload(
+      &stage.path,
+      &self.blob_key(sha256),
+      sha256,
+      size,
+      cancellation,
+    )?;
+    let verified = self.verify(sha256, size)?;
+    drop(verified);
+    fs::remove_file(&stage.path).map_err(|_| backend_unavailable())
+  }
+
+  fn cleanup_startup(&self, connection: &Connection) -> Result<(), CapabilityFailure> {
+    cleanup_directory_contents(&self.staging)?;
+    for digest in self.inventory(ARTIFACT_ORPHAN_SCAN_BATCH)? {
+      let reachable: bool = connection
+        .query_row(
+          "SELECT EXISTS(SELECT 1 FROM woml_artifact_blobs WHERE sha256 = ?1)",
+          [&digest],
+          |row| row.get(0),
+        )
+        .map_err(|_| backend_unavailable())?;
+      if !reachable {
+        self.delete(&digest)?;
+      }
+    }
+    Ok(())
+  }
+
+  fn verify(&self, sha256: &str, size: u64) -> Result<VerifiedArtifactBlob, CapabilityFailure> {
+    self.download_verified(&self.blob_key(sha256), sha256, size)
+  }
+
+  fn delete(&self, sha256: &str) -> Result<(), CapabilityFailure> {
+    let backend = self.clone();
+    let key = self.blob_key(sha256);
+    self.run(async move {
+      let response = backend
+        .send(
+          Method::DELETE,
+          &key,
+          vec![],
+          hex::encode(Sha256::digest([])),
+          None,
+          BTreeMap::new(),
+        )
+        .await?;
+      if response.status().is_success() || response.status() == StatusCode::NOT_FOUND {
+        Ok(())
+      } else {
+        Err(backend_unavailable())
+      }
+    })
+  }
+
+  fn inventory(&self, limit: usize) -> Result<Vec<String>, CapabilityFailure> {
+    self.list_inventory(limit)
+  }
+}
+
+fn streaming_request_body(
+  path: PathBuf,
+  cancellation: CapabilityCancellationToken,
+) -> Result<reqwest::Body, CapabilityFailure> {
+  let source = File::open(path).map_err(|_| backend_unavailable())?;
+  let stream = futures_util::stream::try_unfold(
+    (source, cancellation),
+    |(mut source, cancellation)| async move {
+      if cancellation.is_cancelled() {
+        return Err(std::io::Error::new(
+          std::io::ErrorKind::Interrupted,
+          "artifact upload cancelled",
+        ));
+      }
+      let mut buffer = vec![0_u8; STREAM_BUFFER_BYTES];
+      let read = source.read(&mut buffer)?;
+      if read == 0 {
+        return Ok(None);
+      }
+      buffer.truncate(read);
+      Ok(Some((bytes::Bytes::from(buffer), (source, cancellation))))
+    },
+  );
+  Ok(reqwest::Body::wrap_stream(stream))
+}
+
+async fn bounded_response_text(
+  mut response: reqwest::Response,
+  maximum_bytes: usize,
+) -> Result<String, CapabilityFailure> {
+  let mut bytes = Vec::new();
+  while let Some(chunk) = response.chunk().await.map_err(|_| backend_unavailable())? {
+    if bytes.len().saturating_add(chunk.len()) > maximum_bytes {
+      return Err(backend_unavailable());
+    }
+    bytes.extend_from_slice(&chunk);
+  }
+  String::from_utf8(bytes).map_err(|_| backend_unavailable())
+}
+
+fn hmac_sha256(key: &[u8], value: &[u8]) -> Result<Vec<u8>, CapabilityFailure> {
+  let mut mac = Hmac::<Sha256>::new_from_slice(key).map_err(|_| backend_unavailable())?;
+  mac.update(value);
+  Ok(mac.finalize().into_bytes().to_vec())
+}
+
+fn aws_percent_encode(value: &[u8]) -> String {
+  let mut encoded = String::new();
+  for byte in value {
+    if byte.is_ascii_alphanumeric() || matches!(*byte, b'-' | b'_' | b'.' | b'~') {
+      encoded.push(*byte as char);
+    } else {
+      encoded.push_str(&format!("%{byte:02X}"));
+    }
+  }
+  encoded
+}
+
+fn xml_values(source: &str, tag: &str) -> Vec<String> {
+  let start = format!("<{tag}>");
+  let end = format!("</{tag}>");
+  let mut values = Vec::new();
+  let mut remaining = source;
+  while let Some(offset) = remaining.find(&start) {
+    let value_start = offset + start.len();
+    let Some(value_end) = remaining[value_start..].find(&end) else {
+      break;
+    };
+    values.push(xml_unescape(
+      &remaining[value_start..value_start + value_end],
+    ));
+    remaining = &remaining[value_start + value_end + end.len()..];
+  }
+  values
+}
+
+fn xml_escape(value: &str) -> String {
+  value
+    .replace('&', "&amp;")
+    .replace('<', "&lt;")
+    .replace('>', "&gt;")
+    .replace('"', "&quot;")
+    .replace('\'', "&apos;")
+}
+
+fn xml_unescape(value: &str) -> String {
+  value
+    .replace("&lt;", "<")
+    .replace("&gt;", ">")
+    .replace("&quot;", "\"")
+    .replace("&apos;", "'")
+    .replace("&amp;", "&")
 }
 
 #[derive(Default)]
@@ -508,7 +1435,9 @@ impl ManagedArtifactStore {
     let store = Arc::new(ArtifactStore::open(state_path, policy)?);
     let mut configured = self.store.lock().map_err(|_| backend_unavailable())?;
     if let Some(existing) = configured.as_ref() {
-      if existing.state_path == store.state_path && existing.backend.root == store.backend.root {
+      if existing.state_path == store.state_path
+        && existing.backend.identity() == store.backend.identity()
+      {
         return Ok(());
       }
       return Err(artifact_failure(
@@ -543,7 +1472,7 @@ impl ManagedArtifactStore {
 struct ArtifactStore {
   state_path: PathBuf,
   policy: Arc<PreparedArtifactPolicy>,
-  backend: LocalArtifactBackend,
+  backend: Arc<dyn ArtifactBackend>,
   materializations: PathBuf,
 }
 
@@ -552,7 +1481,7 @@ impl std::fmt::Debug for ArtifactStore {
     formatter
       .debug_struct("ArtifactStore")
       .field("state_path", &self.state_path)
-      .field("backend", &self.backend.root)
+      .field("backend", &self.backend.identity())
       .finish()
   }
 }
@@ -562,14 +1491,32 @@ impl ArtifactStore {
     state_path: &Path,
     policy: Arc<PreparedArtifactPolicy>,
   ) -> Result<Self, CapabilityFailure> {
+    Self::open_with_startup_cleanup(state_path, policy, true)
+  }
+
+  fn open_with_startup_cleanup(
+    state_path: &Path,
+    policy: Arc<PreparedArtifactPolicy>,
+    startup_cleanup: bool,
+  ) -> Result<Self, CapabilityFailure> {
     DurableEventStore::open(state_path).map_err(|_| backend_unavailable())?;
     let state_path = fs::canonicalize(state_path).map_err(|_| backend_unavailable())?;
     harden_file_permissions(&state_path)?;
-    let backend = LocalArtifactBackend::open(&policy.backend_directory)?;
     ensure_private_directory(&policy.materialization_directory)?;
     let materializations = fs::canonicalize(&policy.materialization_directory)
       .map_err(|_| materialization_unavailable())?;
-    cleanup_directory_contents(&materializations)?;
+    if startup_cleanup {
+      cleanup_directory_contents(&materializations)?;
+    }
+    let backend: Arc<dyn ArtifactBackend> = match &policy.backend {
+      PreparedArtifactBackend::Local { directory } => {
+        Arc::new(LocalArtifactBackend::open(directory)?)
+      }
+      PreparedArtifactBackend::S3(config) => Arc::new(S3ArtifactBackend::open(
+        config.as_ref().clone(),
+        &materializations,
+      )?),
+    };
     let store = Self {
       state_path,
       policy,
@@ -581,7 +1528,9 @@ impl ArtifactStore {
     validate_schema(&connection)?;
     let store_id = ensure_store_identity(&connection)?;
     store.backend.bind_store(&connection, &store_id)?;
-    store.backend.cleanup_startup(&connection)?;
+    if startup_cleanup {
+      store.backend.cleanup_startup(&connection)?;
+    }
     Ok(store)
   }
 
@@ -617,6 +1566,176 @@ impl ArtifactStore {
       .execute_batch("PRAGMA foreign_keys = ON;")
       .map_err(|_| backend_unavailable())?;
     Ok(connection)
+  }
+
+  fn maintenance(
+    &self,
+    now: chrono::DateTime<Utc>,
+    dry_run: bool,
+  ) -> Result<ArtifactMaintenanceV1, CapabilityFailure> {
+    let mut connection = self.connection()?;
+    validate_schema(&connection)?;
+    let candidates = artifact_retention_candidates(
+      &connection,
+      &now.to_rfc3339_opts(SecondsFormat::Millis, true),
+      ARTIFACT_MAINTENANCE_BATCH,
+    )?;
+    let mut report = ArtifactMaintenanceV1 {
+      profile: "woml.artifact-maintenance/v1".to_string(),
+      kind: if dry_run { "plan" } else { "result" }.to_string(),
+      completed_at: timestamp(),
+      eligible_artifacts: candidates.len() as u64,
+      eligible_blobs: candidates
+        .iter()
+        .map(|(_, digest, _)| digest)
+        .collect::<std::collections::BTreeSet<_>>()
+        .len() as u64,
+      estimated_bytes: candidates.iter().map(|(_, _, size)| *size).sum(),
+      deleted_artifacts: 0,
+      deleted_blobs: 0,
+      deleted_bytes: 0,
+      scrubbed_blobs: 0,
+      corrupt_blobs: 0,
+      collected_orphans: 0,
+      live_artifacts: 0,
+      live_blobs: 0,
+      live_bytes: 0,
+    };
+    if !dry_run && !candidates.is_empty() {
+      let transaction = connection
+        .transaction_with_behavior(TransactionBehavior::Immediate)
+        .map_err(|_| backend_unavailable())?;
+      let current = artifact_retention_candidates(
+        &transaction,
+        &now.to_rfc3339_opts(SecondsFormat::Millis, true),
+        ARTIFACT_MAINTENANCE_BATCH,
+      )?;
+      let artifact_ids = current
+        .iter()
+        .map(|(artifact_id, _, _)| artifact_id.clone())
+        .collect::<Vec<_>>();
+      let digests = current
+        .iter()
+        .map(|(_, digest, size)| (digest.clone(), *size))
+        .collect::<std::collections::BTreeMap<_, _>>();
+      for artifact_id in &artifact_ids {
+        transaction
+          .execute(
+            "DELETE FROM woml_artifact_transfers WHERE artifact_id = ?1",
+            [artifact_id],
+          )
+          .map_err(|_| backend_unavailable())?;
+        for table in [
+          "woml_artifact_access",
+          "woml_artifact_retention",
+          "woml_artifact_provenance",
+        ] {
+          transaction
+            .execute(
+              &format!("DELETE FROM {table} WHERE artifact_id = ?1"),
+              [artifact_id],
+            )
+            .map_err(|_| backend_unavailable())?;
+        }
+        transaction
+          .execute(
+            "DELETE FROM woml_artifacts WHERE artifact_id = ?1",
+            [artifact_id],
+          )
+          .map_err(|_| backend_unavailable())?;
+      }
+      let mut unreachable = Vec::new();
+      for (digest, size) in digests {
+        let referenced: bool = transaction
+          .query_row(
+            "SELECT EXISTS(SELECT 1 FROM woml_artifacts WHERE sha256 = ?1)",
+            [&digest],
+            |row| row.get(0),
+          )
+          .map_err(|_| backend_unavailable())?;
+        if !referenced {
+          transaction
+            .execute(
+              "DELETE FROM woml_artifact_blobs WHERE sha256 = ?1",
+              [&digest],
+            )
+            .map_err(|_| backend_unavailable())?;
+          unreachable.push((digest, size));
+        }
+      }
+      transaction.commit().map_err(|_| backend_unavailable())?;
+      report.deleted_artifacts = artifact_ids.len() as u64;
+      for (digest, size) in unreachable {
+        self.backend.delete(&digest)?;
+        report.deleted_blobs += 1;
+        report.deleted_bytes = report.deleted_bytes.saturating_add(size);
+      }
+    }
+    if !dry_run {
+      let mut statement = connection
+        .prepare("SELECT sha256, size FROM woml_artifact_blobs ORDER BY sha256 LIMIT ?1")
+        .map_err(|_| backend_unavailable())?;
+      let live = statement
+        .query_map([ARTIFACT_SCRUB_BATCH as u64], |row| {
+          Ok((row.get::<_, String>(0)?, row.get::<_, u64>(1)?))
+        })
+        .map_err(|_| backend_unavailable())?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|_| backend_unavailable())?;
+      drop(statement);
+      for (digest, size) in live {
+        report.scrubbed_blobs += 1;
+        if self.backend.verify(&digest, size).is_err() {
+          connection
+            .execute(
+              "UPDATE woml_artifacts SET status = 'corrupt'
+               WHERE sha256 = ?1 AND status != 'deleted'",
+              [&digest],
+            )
+            .map_err(|_| backend_unavailable())?;
+          report.corrupt_blobs += 1;
+        }
+      }
+      for digest in self.backend.inventory(ARTIFACT_ORPHAN_SCAN_BATCH)? {
+        let reachable: bool = connection
+          .query_row(
+            "SELECT EXISTS(SELECT 1 FROM woml_artifact_blobs WHERE sha256 = ?1)",
+            [&digest],
+            |row| row.get(0),
+          )
+          .map_err(|_| backend_unavailable())?;
+        if !reachable {
+          self.backend.delete(&digest)?;
+          report.collected_orphans += 1;
+        }
+      }
+    }
+    let (live_artifacts, live_blobs, live_bytes): (u64, u64, u64) = connection
+      .query_row(
+        "SELECT
+           (SELECT COUNT(*) FROM woml_artifacts WHERE status != 'deleted'),
+           (SELECT COUNT(*) FROM woml_artifact_blobs),
+           (SELECT COALESCE(SUM(size), 0) FROM woml_artifact_blobs)",
+        [],
+        |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+      )
+      .map_err(|_| backend_unavailable())?;
+    report.live_artifacts = live_artifacts;
+    report.live_blobs = live_blobs;
+    report.live_bytes = live_bytes;
+    report.completed_at = timestamp();
+    if !dry_run {
+      let encoded = serde_json::to_string(&report).map_err(|_| backend_unavailable())?;
+      connection
+        .execute(
+          "INSERT INTO woml_artifact_store_metadata(key, value)
+           VALUES ('last_maintenance_v1', ?1)
+           ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+          [encoded],
+        )
+        .map_err(|_| backend_unavailable())?;
+    }
+    Ok(report)
   }
 
   fn put(
@@ -732,7 +1851,7 @@ impl ArtifactStore {
       size,
       &self.policy.limits,
     )?;
-    self.backend.publish(stage, &sha256, size)?;
+    self.backend.publish(stage, &sha256, size, cancellation)?;
     transaction
       .execute(
         "INSERT OR IGNORE INTO woml_artifact_blobs(sha256, size, created_at)
@@ -868,7 +1987,7 @@ impl ArtifactStore {
     if artifact.reference.size > self.policy.max_materialization_bytes_per_attempt {
       return Err(artifact_too_large());
     }
-    let source_path = self
+    let source = self
       .backend
       .verify(&artifact.reference.sha256, artifact.reference.size)?;
     let directory = self.invocation_materialization_directory(&request.invocation_id);
@@ -888,7 +2007,7 @@ impl ArtifactStore {
         return Err(artifact_too_large());
       }
       stream_materialization(
-        &source_path,
+        &source.path,
         &final_path,
         &artifact.reference.sha256,
         artifact.reference.size,
@@ -919,7 +2038,7 @@ impl ArtifactStore {
     validate_reference(supplied)?;
     let connection = self.connection()?;
     validate_schema(&connection)?;
-    let stored: Option<(String, String, u64, String, String, String, String, String)> = connection
+    let stored: Option<StoredArtifactRow> = connection
       .query_row(
         "SELECT a.artifact_id, a.name, a.size, a.sha256, a.content_type,
                 a.status, a.created_at, r.expires_at
@@ -1071,13 +2190,34 @@ impl ManagedArtifactPutHandler {
     mode: ArtifactRuntimeMode,
     resolved_secrets: &BTreeMap<String, String>,
   ) -> Result<Self, ArtifactPolicyError> {
-    let policy = Arc::new(PreparedArtifactPolicy::prepare(policy, mode)?);
+    let policy = Arc::new(PreparedArtifactPolicy::prepare(
+      policy,
+      mode,
+      resolved_secrets,
+    )?);
     let concurrency = Arc::new(Semaphore::new(policy.limits.max_concurrent_transfers));
-    let known_secrets = resolved_secrets
+    let mut known_secrets = resolved_secrets
       .values()
       .map(|secret| secret.as_bytes().to_vec())
       .filter(|secret| secret.len() >= policy.minimum_secret_bytes)
-      .collect();
+      .collect::<Vec<_>>();
+    if let PreparedArtifactBackend::S3(backend) = &policy.backend {
+      for value in [
+        Some(&backend.credentials.access_key),
+        Some(&backend.credentials.secret_key),
+        backend.credentials.session_token.as_ref(),
+      ]
+      .into_iter()
+      .flatten()
+      {
+        if value.len() >= policy.minimum_secret_bytes {
+          let bytes = value.as_bytes().to_vec();
+          if !known_secrets.contains(&bytes) {
+            known_secrets.push(bytes);
+          }
+        }
+      }
+    }
     Ok(Self {
       store,
       policy,
@@ -1106,6 +2246,229 @@ impl ManagedArtifactPutHandler {
       concurrency: Arc::clone(&self.concurrency),
       operation: ArtifactReadOperation::Materialize,
     }
+  }
+}
+
+pub fn maintain_artifacts(
+  state_path: impl AsRef<Path>,
+  policy: ArtifactPolicyV1,
+  mode: ArtifactRuntimeMode,
+  resolved_secrets: &BTreeMap<String, String>,
+  now: chrono::DateTime<Utc>,
+  dry_run: bool,
+) -> Result<ArtifactMaintenanceV1, CapabilityFailure> {
+  let managed = Arc::new(ManagedArtifactStore::default());
+  let handler =
+    ManagedArtifactPutHandler::new(Arc::clone(&managed), policy, mode, resolved_secrets).map_err(
+      |error| {
+        artifact_failure(
+          CapabilityFailureKind::InvalidInput,
+          "WOML_ARTIFACT_POLICY_INVALID",
+          &error.to_string(),
+          false,
+          false,
+        )
+      },
+    )?;
+  managed.configure_for_state(state_path.as_ref(), handler.policy())?;
+  managed.configured()?.maintenance(now, dry_run)
+}
+
+pub fn export_artifact_backup(
+  state_path: impl AsRef<Path>,
+  destination: impl AsRef<Path>,
+  policy: ArtifactPolicyV1,
+  mode: ArtifactRuntimeMode,
+  resolved_secrets: &BTreeMap<String, String>,
+) -> Result<ArtifactBackupInventoryV1, CapabilityFailure> {
+  let policy = Arc::new(
+    PreparedArtifactPolicy::prepare(policy, mode, resolved_secrets).map_err(|error| {
+      artifact_failure(
+        CapabilityFailureKind::InvalidInput,
+        "WOML_ARTIFACT_POLICY_INVALID",
+        &error.to_string(),
+        false,
+        false,
+      )
+    })?,
+  );
+  let store = ArtifactStore::open_with_startup_cleanup(state_path.as_ref(), policy, false)?;
+  let destination = destination.as_ref();
+  ensure_private_directory(destination)?;
+  if fs::read_dir(destination)
+    .map_err(|_| backend_unavailable())?
+    .next()
+    .is_some()
+  {
+    return Err(backend_unavailable());
+  }
+  let connection = store.connection()?;
+  let inventory = artifact_blob_inventory(&connection)?;
+  let cancellation = CapabilityCancellationToken::default();
+  for (digest, size) in &inventory {
+    let source = store.backend.verify(digest, *size)?;
+    let target = destination
+      .join("blobs/sha256")
+      .join(&digest[..2])
+      .join(&digest[2..]);
+    ensure_private_directory(target.parent().ok_or_else(backend_unavailable)?)?;
+    stream_materialization(&source.path, &target, digest, *size, &cancellation)?;
+  }
+  sync_directory(destination)?;
+  Ok(artifact_backup_inventory(&inventory))
+}
+
+pub fn restore_artifact_backup(
+  state_path: impl AsRef<Path>,
+  source: impl AsRef<Path>,
+  policy: ArtifactPolicyV1,
+  mode: ArtifactRuntimeMode,
+  resolved_secrets: &BTreeMap<String, String>,
+) -> Result<ArtifactBackupInventoryV1, CapabilityFailure> {
+  let policy = Arc::new(
+    PreparedArtifactPolicy::prepare(policy, mode, resolved_secrets).map_err(|error| {
+      artifact_failure(
+        CapabilityFailureKind::InvalidInput,
+        "WOML_ARTIFACT_POLICY_INVALID",
+        &error.to_string(),
+        false,
+        false,
+      )
+    })?,
+  );
+  let store = ArtifactStore::open_with_startup_cleanup(state_path.as_ref(), policy, false)?;
+  let connection = store.connection()?;
+  let inventory = artifact_blob_inventory(&connection)?;
+  let source = fs::canonicalize(source.as_ref()).map_err(|_| backend_unavailable())?;
+  let metadata = fs::symlink_metadata(&source).map_err(|_| backend_unavailable())?;
+  if !metadata.is_dir() || metadata.file_type().is_symlink() || is_windows_reparse(&metadata) {
+    return Err(backend_unavailable());
+  }
+  let cancellation = CapabilityCancellationToken::default();
+  for (digest, size) in &inventory {
+    let backup_path = source
+      .join("blobs/sha256")
+      .join(&digest[..2])
+      .join(&digest[2..]);
+    verify_materialized_file(&backup_path, digest, *size)?;
+    let mut stage = store.backend.begin_stage()?;
+    let target = stage.file.as_mut().ok_or_else(backend_unavailable)?;
+    let mut input = File::open(&backup_path).map_err(|_| backend_unavailable())?;
+    let mut buffer = vec![0_u8; STREAM_BUFFER_BYTES];
+    loop {
+      let read = input.read(&mut buffer).map_err(|_| backend_unavailable())?;
+      if read == 0 {
+        break;
+      }
+      target
+        .write_all(&buffer[..read])
+        .map_err(|_| backend_unavailable())?;
+    }
+    store.backend.publish(stage, digest, *size, &cancellation)?;
+  }
+  for (digest, size) in &inventory {
+    drop(store.backend.verify(digest, *size)?);
+  }
+  Ok(artifact_backup_inventory(&inventory))
+}
+
+pub fn verify_artifact_backup(
+  state_path: impl AsRef<Path>,
+  source: impl AsRef<Path>,
+) -> Result<ArtifactBackupInventoryV1, CapabilityFailure> {
+  DurableEventStore::open(state_path.as_ref()).map_err(|_| backend_unavailable())?;
+  let connection = Connection::open_with_flags(
+    state_path.as_ref(),
+    OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
+  )
+  .map_err(|_| backend_unavailable())?;
+  let inventory = artifact_blob_inventory(&connection)?;
+  let source = fs::canonicalize(source.as_ref()).map_err(|_| backend_unavailable())?;
+  let metadata = fs::symlink_metadata(&source).map_err(|_| backend_unavailable())?;
+  if !metadata.is_dir() || metadata.file_type().is_symlink() || is_windows_reparse(&metadata) {
+    return Err(backend_unavailable());
+  }
+  for (digest, size) in &inventory {
+    verify_materialized_file(
+      &source
+        .join("blobs/sha256")
+        .join(&digest[..2])
+        .join(&digest[2..]),
+      digest,
+      *size,
+    )?;
+  }
+  let expected = inventory
+    .iter()
+    .map(|(digest, _)| digest.clone())
+    .collect::<std::collections::BTreeSet<_>>();
+  let mut actual = std::collections::BTreeSet::new();
+  let blobs = source.join("blobs/sha256");
+  if blobs.exists() {
+    for prefix in fs::read_dir(&blobs).map_err(|_| backend_unavailable())? {
+      let prefix = prefix.map_err(|_| backend_unavailable())?;
+      if !prefix
+        .file_type()
+        .map_err(|_| backend_unavailable())?
+        .is_dir()
+      {
+        return Err(backend_unavailable());
+      }
+      for entry in fs::read_dir(prefix.path()).map_err(|_| backend_unavailable())? {
+        let entry = entry.map_err(|_| backend_unavailable())?;
+        if !entry
+          .file_type()
+          .map_err(|_| backend_unavailable())?
+          .is_file()
+        {
+          return Err(backend_unavailable());
+        }
+        actual.insert(format!(
+          "{}{}",
+          prefix.file_name().to_string_lossy(),
+          entry.file_name().to_string_lossy()
+        ));
+      }
+    }
+  }
+  if actual != expected {
+    return Err(artifact_corrupt());
+  }
+  Ok(artifact_backup_inventory(&inventory))
+}
+
+fn artifact_blob_inventory(
+  connection: &Connection,
+) -> Result<Vec<(String, u64)>, CapabilityFailure> {
+  validate_schema(connection)?;
+  let mut statement = connection
+    .prepare("SELECT sha256, size FROM woml_artifact_blobs ORDER BY sha256")
+    .map_err(|_| backend_unavailable())?;
+  let inventory = statement
+    .query_map([], |row| {
+      Ok((row.get::<_, String>(0)?, row.get::<_, u64>(1)?))
+    })
+    .map_err(|_| backend_unavailable())?
+    .collect::<Result<Vec<_>, _>>()
+    .map_err(|_| backend_unavailable())?;
+  Ok(inventory)
+}
+
+fn artifact_backup_inventory(inventory: &[(String, u64)]) -> ArtifactBackupInventoryV1 {
+  let mut digest = Sha256::new();
+  digest.update(b"woml.artifact-backup-inventory\0v1\0");
+  for (sha256, size) in inventory {
+    digest.update((sha256.len() as u64).to_be_bytes());
+    digest.update(sha256.as_bytes());
+    digest.update(size.to_be_bytes());
+  }
+  ArtifactBackupInventoryV1 {
+    profile: "woml.artifact-backup-inventory/v1".to_string(),
+    directory: "artifacts".to_string(),
+    blob_count: inventory.len() as u64,
+    total_bytes: inventory.iter().map(|(_, size)| *size).sum(),
+    inventory_digest: format!("sha256:{}", hex::encode(digest.finalize())),
+    verified: true,
   }
 }
 
@@ -1432,6 +2795,7 @@ impl PreparedArtifactPolicy {
   fn prepare(
     policy: ArtifactPolicyV1,
     mode: ArtifactRuntimeMode,
+    resolved_secrets: &BTreeMap<String, String>,
   ) -> Result<Self, ArtifactPolicyError> {
     if policy.contract != ARTIFACT_POLICY_CONTRACT
       || policy.contract_version != ARTIFACT_POLICY_CONTRACT_VERSION
@@ -1473,27 +2837,50 @@ impl PreparedArtifactPolicy {
         read_roots.push(canonical);
       }
     }
-    let backend_directory = match &policy.backend {
+    let backend = match &policy.backend {
       ArtifactBackendPolicy::Local {
         contract,
         contract_version,
         directory,
       } if contract == "woml.artifact-backend" && *contract_version == 1 => {
-        let path = Path::new(directory);
-        if path.is_absolute() {
-          path.to_path_buf()
+        let authored = Path::new(directory);
+        let directory = if authored.is_absolute() {
+          authored.to_path_buf()
         } else {
-          project_root.join(path)
-        }
+          project_root.join(authored)
+        };
+        PreparedArtifactBackend::Local { directory }
       }
       ArtifactBackendPolicy::Local { .. } => {
         return Err(ArtifactPolicyError::Invalid(
           "the backend does not match Artifact Backend v1".to_string(),
         ))
       }
+      ArtifactBackendPolicy::S3 {
+        contract,
+        contract_version,
+        bucket,
+        region,
+        prefix,
+        endpoint,
+        force_path_style,
+        authentication,
+        server_side_encryption,
+      } if contract == "woml.artifact-backend" && *contract_version == 1 => {
+        PreparedArtifactBackend::S3(Box::new(prepare_s3_backend(
+          bucket,
+          region,
+          prefix,
+          endpoint.as_deref(),
+          *force_path_style,
+          authentication,
+          server_side_encryption,
+          resolved_secrets,
+        )?))
+      }
       ArtifactBackendPolicy::S3 { .. } => {
         return Err(ArtifactPolicyError::Invalid(
-          "the S3-compatible backend is reserved but not executable in DA3".to_string(),
+          "the S3 backend does not match Artifact Backend v1".to_string(),
         ))
       }
     };
@@ -1506,7 +2893,7 @@ impl PreparedArtifactPolicy {
     Ok(Self {
       project_root,
       read_roots,
-      backend_directory,
+      backend,
       materialization_directory,
       max_materialization_bytes_per_attempt: policy.materialization.max_bytes_per_attempt,
       limits: policy.limits,
@@ -1515,6 +2902,146 @@ impl PreparedArtifactPolicy {
       minimum_secret_bytes: policy.secret_scanning.minimum_secret_bytes,
     })
   }
+}
+
+#[derive(Deserialize)]
+#[serde(tag = "mode", rename_all = "lowercase", deny_unknown_fields)]
+enum AuthoredS3Authentication {
+  Ambient,
+  Secrets {
+    #[serde(rename = "accessKeySecret")]
+    access_key_secret: String,
+    #[serde(rename = "secretKeySecret")]
+    secret_key_secret: String,
+    #[serde(rename = "sessionTokenSecret")]
+    session_token_secret: Option<String>,
+  },
+}
+
+#[derive(Deserialize)]
+#[serde(tag = "mode", deny_unknown_fields)]
+enum AuthoredS3Encryption {
+  #[serde(rename = "aes256")]
+  Aes256,
+  #[serde(rename = "aws-kms")]
+  AwsKms {
+    #[serde(rename = "keyId")]
+    key_id: String,
+  },
+}
+
+#[allow(clippy::too_many_arguments)]
+fn prepare_s3_backend(
+  bucket: &str,
+  region: &str,
+  prefix: &str,
+  endpoint: Option<&str>,
+  force_path_style: bool,
+  authentication: &Value,
+  server_side_encryption: &Value,
+  resolved_secrets: &BTreeMap<String, String>,
+) -> Result<PreparedS3Backend, ArtifactPolicyError> {
+  if bucket.len() < 3
+    || bucket.len() > 63
+    || !bucket.bytes().all(|byte| {
+      byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'.' || byte == b'-'
+    })
+    || !bucket
+      .as_bytes()
+      .first()
+      .is_some_and(u8::is_ascii_alphanumeric)
+    || !bucket
+      .as_bytes()
+      .last()
+      .is_some_and(u8::is_ascii_alphanumeric)
+    || region.is_empty()
+    || region.len() > 128
+    || prefix.len() > 512
+    || !prefix
+      .bytes()
+      .all(|byte| byte.is_ascii_alphanumeric() || b"!_.*'()/-".contains(&byte))
+  {
+    return Err(ArtifactPolicyError::Invalid(
+      "the S3 bucket, region, or prefix is invalid".to_string(),
+    ));
+  }
+  let endpoint = endpoint
+    .map(str::to_string)
+    .unwrap_or_else(|| format!("https://s3.{region}.amazonaws.com"));
+  let endpoint = Url::parse(&endpoint)
+    .map_err(|_| ArtifactPolicyError::Invalid("the S3 endpoint is not a valid URL".to_string()))?;
+  if endpoint.scheme() != "https"
+    || endpoint.username() != ""
+    || endpoint.password().is_some()
+    || endpoint.query().is_some()
+    || endpoint.fragment().is_some()
+  {
+    return Err(ArtifactPolicyError::Invalid(
+      "the S3 endpoint must be a credential-free HTTPS URL".to_string(),
+    ));
+  }
+  let authentication: AuthoredS3Authentication = serde_json::from_value(authentication.clone())
+    .map_err(|_| {
+      ArtifactPolicyError::Invalid("the S3 authentication contract is invalid".to_string())
+    })?;
+  let secret = |name: &str| {
+    resolved_secrets
+      .get(name)
+      .filter(|value| !value.is_empty() && value.len() <= 16_384)
+      .cloned()
+      .ok_or_else(|| {
+        ArtifactPolicyError::Invalid(format!("the S3 credential secret {name} is unavailable"))
+      })
+  };
+  let credentials = match authentication {
+    AuthoredS3Authentication::Ambient => S3Credentials {
+      access_key: std::env::var("AWS_ACCESS_KEY_ID").map_err(|_| {
+        ArtifactPolicyError::Invalid("ambient AWS_ACCESS_KEY_ID is unavailable".to_string())
+      })?,
+      secret_key: std::env::var("AWS_SECRET_ACCESS_KEY").map_err(|_| {
+        ArtifactPolicyError::Invalid("ambient AWS_SECRET_ACCESS_KEY is unavailable".to_string())
+      })?,
+      session_token: std::env::var("AWS_SESSION_TOKEN").ok(),
+    },
+    AuthoredS3Authentication::Secrets {
+      access_key_secret,
+      secret_key_secret,
+      session_token_secret,
+    } => S3Credentials {
+      access_key: secret(&access_key_secret)?,
+      secret_key: secret(&secret_key_secret)?,
+      session_token: session_token_secret.as_deref().map(secret).transpose()?,
+    },
+  };
+  if credentials.access_key.is_empty() || credentials.secret_key.is_empty() {
+    return Err(ArtifactPolicyError::Invalid(
+      "the S3 credentials are empty".to_string(),
+    ));
+  }
+  let encryption: AuthoredS3Encryption = serde_json::from_value(server_side_encryption.clone())
+    .map_err(|_| {
+      ArtifactPolicyError::Invalid("the S3 encryption contract is invalid".to_string())
+    })?;
+  let server_side_encryption = match encryption {
+    AuthoredS3Encryption::Aes256 => S3ServerSideEncryption::Aes256,
+    AuthoredS3Encryption::AwsKms { key_id } if !key_id.is_empty() && key_id.len() <= 2_048 => {
+      S3ServerSideEncryption::AwsKms { key_id }
+    }
+    AuthoredS3Encryption::AwsKms { .. } => {
+      return Err(ArtifactPolicyError::Invalid(
+        "the S3 KMS key ID is invalid".to_string(),
+      ))
+    }
+  };
+  Ok(PreparedS3Backend {
+    bucket: bucket.to_string(),
+    region: region.to_string(),
+    prefix: prefix.to_string(),
+    endpoint,
+    force_path_style,
+    credentials,
+    server_side_encryption,
+  })
 }
 
 fn validate_policy_limits(policy: &ArtifactPolicyV1) -> Result<(), ArtifactPolicyError> {
@@ -1638,6 +3165,49 @@ fn ensure_store_identity(connection: &Connection) -> Result<String, CapabilityFa
     )
     .map_err(|_| backend_unavailable())?;
   Ok(store_id)
+}
+
+fn artifact_retention_candidates(
+  connection: &Connection,
+  now: &str,
+  limit: usize,
+) -> Result<Vec<(String, String, u64)>, CapabilityFailure> {
+  let mut statement = connection
+    .prepare(
+      "SELECT a.artifact_id, a.sha256, a.size
+       FROM woml_artifacts AS a
+       JOIN woml_artifact_retention AS retention
+         ON retention.artifact_id = a.artifact_id
+       WHERE retention.expires_at <= ?1
+         AND a.status IN ('available','quarantined','expired','corrupt')
+         AND NOT EXISTS(
+           SELECT 1
+           FROM woml_artifact_access AS access
+           JOIN woml_runs AS runs ON runs.run_id = access.run_id
+           LEFT JOIN woml_run_summaries AS summaries ON summaries.run_id = runs.run_id
+           WHERE access.artifact_id = a.artifact_id
+             AND access.revoked_at IS NULL
+             AND (
+               summaries.run_id IS NULL
+               OR summaries.status NOT IN ('succeeded','failed','cancelled')
+             )
+         )
+       ORDER BY retention.expires_at, a.artifact_id
+       LIMIT ?2",
+    )
+    .map_err(|_| backend_unavailable())?;
+  let candidates = statement
+    .query_map(params![now, limit as u64], |row| {
+      Ok((
+        row.get::<_, String>(0)?,
+        row.get::<_, String>(1)?,
+        row.get::<_, u64>(2)?,
+      ))
+    })
+    .map_err(|_| backend_unavailable())?
+    .collect::<Result<Vec<_>, _>>()
+    .map_err(|_| backend_unavailable())?;
+  Ok(candidates)
 }
 
 fn validate_schema(connection: &Connection) -> Result<(), CapabilityFailure> {
@@ -2346,6 +3916,11 @@ fn artifact_interrupted() -> CapabilityFailure {
 mod tests {
   use super::*;
   use crate::{derive_operation_key, CapabilityCallIdentity, CapabilityCallLimits};
+  use std::{
+    net::{TcpListener, TcpStream},
+    sync::atomic::{AtomicBool, AtomicUsize, Ordering},
+    thread::JoinHandle,
+  };
 
   struct TempDir(PathBuf);
 
@@ -2368,6 +3943,269 @@ mod tests {
     fn drop(&mut self) {
       let _ = fs::remove_dir_all(&self.0);
     }
+  }
+
+  #[derive(Debug, Clone)]
+  struct MockS3Request {
+    method: String,
+    target: String,
+    headers: BTreeMap<String, String>,
+  }
+
+  struct MockS3Server {
+    endpoint: String,
+    requests: Arc<Mutex<Vec<MockS3Request>>>,
+    stop: Arc<AtomicBool>,
+    thread: Option<JoinHandle<()>>,
+  }
+
+  impl MockS3Server {
+    fn start() -> Self {
+      let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+      listener.set_nonblocking(true).unwrap();
+      let address = listener.local_addr().unwrap();
+      let objects = Arc::new(Mutex::new(BTreeMap::<String, Vec<u8>>::new()));
+      let requests = Arc::new(Mutex::new(Vec::new()));
+      let stop = Arc::new(AtomicBool::new(false));
+      let failed_blob_puts = Arc::new(AtomicUsize::new(1));
+      let invisible_blob_reads = Arc::new(AtomicUsize::new(1));
+      let thread_objects = Arc::clone(&objects);
+      let thread_requests = Arc::clone(&requests);
+      let thread_stop = Arc::clone(&stop);
+      let thread = std::thread::spawn(move || {
+        while !thread_stop.load(Ordering::SeqCst) {
+          match listener.accept() {
+            Ok((stream, _)) => handle_mock_s3_connection(
+              stream,
+              &thread_objects,
+              &thread_requests,
+              &failed_blob_puts,
+              &invisible_blob_reads,
+            ),
+            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+              std::thread::sleep(Duration::from_millis(2));
+            }
+            Err(_) => break,
+          }
+        }
+      });
+      Self {
+        endpoint: format!("http://{address}"),
+        requests,
+        stop,
+        thread: Some(thread),
+      }
+    }
+  }
+
+  impl Drop for MockS3Server {
+    fn drop(&mut self) {
+      self.stop.store(true, Ordering::SeqCst);
+      let _ = TcpStream::connect(self.endpoint.trim_start_matches("http://"));
+      if let Some(thread) = self.thread.take() {
+        let _ = thread.join();
+      }
+    }
+  }
+
+  fn handle_mock_s3_connection(
+    mut stream: TcpStream,
+    objects: &Arc<Mutex<BTreeMap<String, Vec<u8>>>>,
+    requests: &Arc<Mutex<Vec<MockS3Request>>>,
+    failed_blob_puts: &AtomicUsize,
+    invisible_blob_reads: &AtomicUsize,
+  ) {
+    let _ = stream.set_read_timeout(Some(Duration::from_secs(2)));
+    let mut received = Vec::new();
+    let mut buffer = [0_u8; 8192];
+    let (header_end, content_length) = loop {
+      let Ok(read) = stream.read(&mut buffer) else {
+        return;
+      };
+      if read == 0 {
+        return;
+      }
+      received.extend_from_slice(&buffer[..read]);
+      if received.len() > 2 * 1024 * 1024 {
+        return;
+      }
+      if let Some(position) = received.windows(4).position(|value| value == b"\r\n\r\n") {
+        let header_end = position + 4;
+        let headers = String::from_utf8_lossy(&received[..position]);
+        let content_length = headers
+          .lines()
+          .find_map(|line| {
+            let (name, value) = line.split_once(':')?;
+            name
+              .eq_ignore_ascii_case("content-length")
+              .then(|| value.trim().parse::<usize>().ok())
+              .flatten()
+          })
+          .unwrap_or(0);
+        break (header_end, content_length);
+      }
+    };
+    while received.len() < header_end + content_length {
+      let Ok(read) = stream.read(&mut buffer) else {
+        return;
+      };
+      if read == 0 {
+        return;
+      }
+      received.extend_from_slice(&buffer[..read]);
+    }
+    let head = String::from_utf8_lossy(&received[..header_end - 4]);
+    let mut lines = head.lines();
+    let Some(request_line) = lines.next() else {
+      return;
+    };
+    let mut request_parts = request_line.split_whitespace();
+    let method = request_parts.next().unwrap_or_default().to_string();
+    let target = request_parts.next().unwrap_or_default().to_string();
+    let headers = lines
+      .filter_map(|line| {
+        let (name, value) = line.split_once(':')?;
+        Some((name.to_ascii_lowercase(), value.trim().to_string()))
+      })
+      .collect::<BTreeMap<_, _>>();
+    requests.lock().unwrap().push(MockS3Request {
+      method: method.clone(),
+      target: target.clone(),
+      headers: headers.clone(),
+    });
+    let body = received[header_end..header_end + content_length].to_vec();
+    let path = target.split('?').next().unwrap_or_default();
+    let key = path.strip_prefix("/woml-test/").unwrap_or_default();
+    let is_blob = key.contains("blobs/sha256/");
+
+    if method == "GET" && target.contains("list-type=2") {
+      let prefix = target
+        .split('?')
+        .nth(1)
+        .unwrap_or_default()
+        .split('&')
+        .find_map(|part| part.strip_prefix("prefix="))
+        .map(percent_decode_test)
+        .unwrap_or_default();
+      let contents = objects
+        .lock()
+        .unwrap()
+        .keys()
+        .filter(|key| key.starts_with(&prefix))
+        .map(|key| format!("<Contents><Key>{key}</Key></Contents>"))
+        .collect::<String>();
+      write_mock_response(
+        &mut stream,
+        200,
+        &format!("<ListBucketResult>{contents}</ListBucketResult>"),
+        &[],
+      );
+      return;
+    }
+    if method == "PUT"
+      && is_blob
+      && failed_blob_puts
+        .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |remaining| {
+          if remaining > 0 {
+            Some(remaining - 1)
+          } else {
+            None
+          }
+        })
+        .is_ok()
+    {
+      write_mock_response(&mut stream, 503, "", &[]);
+      return;
+    }
+    match method.as_str() {
+      "PUT" => {
+        let mut objects = objects.lock().unwrap();
+        if headers.get("if-none-match").map(String::as_str) == Some("*")
+          && objects.contains_key(key)
+        {
+          write_mock_response(&mut stream, 412, "", &[]);
+        } else {
+          objects.insert(key.to_string(), body);
+          write_mock_response(&mut stream, 200, "", &[("ETag", "\"mock\"")]);
+        }
+      }
+      "GET" => {
+        if is_blob
+          && invisible_blob_reads
+            .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |remaining| {
+              if remaining > 0 {
+                Some(remaining - 1)
+              } else {
+                None
+              }
+            })
+            .is_ok()
+        {
+          write_mock_response(&mut stream, 404, "", &[]);
+          return;
+        }
+        match objects.lock().unwrap().get(key).cloned() {
+          Some(value) => write_mock_bytes(&mut stream, 200, &value, &[]),
+          None => write_mock_response(&mut stream, 404, "", &[]),
+        }
+      }
+      "DELETE" => {
+        objects.lock().unwrap().remove(key);
+        write_mock_response(&mut stream, 204, "", &[]);
+      }
+      _ => write_mock_response(&mut stream, 400, "", &[]),
+    }
+  }
+
+  fn write_mock_response(
+    stream: &mut TcpStream,
+    status: u16,
+    body: &str,
+    headers: &[(&str, &str)],
+  ) {
+    write_mock_bytes(stream, status, body.as_bytes(), headers);
+  }
+
+  fn write_mock_bytes(stream: &mut TcpStream, status: u16, body: &[u8], headers: &[(&str, &str)]) {
+    let reason = match status {
+      200 => "OK",
+      204 => "No Content",
+      400 => "Bad Request",
+      404 => "Not Found",
+      412 => "Precondition Failed",
+      503 => "Service Unavailable",
+      _ => "Unknown",
+    };
+    let extra = headers
+      .iter()
+      .map(|(name, value)| format!("{name}: {value}\r\n"))
+      .collect::<String>();
+    let response = format!(
+      "HTTP/1.1 {status} {reason}\r\nContent-Length: {}\r\nConnection: close\r\n{extra}\r\n",
+      body.len()
+    );
+    let _ = stream.write_all(response.as_bytes());
+    let _ = stream.write_all(body);
+    let _ = stream.flush();
+  }
+
+  fn percent_decode_test(value: &str) -> String {
+    let bytes = value.as_bytes();
+    let mut decoded = Vec::with_capacity(bytes.len());
+    let mut index = 0;
+    while index < bytes.len() {
+      if bytes[index] == b'%' && index + 2 < bytes.len() {
+        let encoded = std::str::from_utf8(&bytes[index + 1..index + 3]).unwrap_or_default();
+        if let Ok(byte) = u8::from_str_radix(encoded, 16) {
+          decoded.push(byte);
+          index += 3;
+          continue;
+        }
+      }
+      decoded.push(bytes[index]);
+      index += 1;
+    }
+    String::from_utf8(decoded).unwrap()
   }
 
   fn policy(root: &Path, backend: &Path) -> ArtifactPolicyV1 {
@@ -3060,6 +4898,362 @@ mod tests {
       .configure_for_state(&temp.path().join("second.sqlite"), second_put.policy())
       .unwrap_err();
     assert_eq!(failure.code, "WOML_ARTIFACT_BACKEND_UNAVAILABLE");
+  }
+
+  #[tokio::test]
+  async fn maintenance_protects_active_runs_then_collects_expired_artifacts_and_orphans() {
+    let temp = TempDir::new().unwrap();
+    fs::write(temp.path().join("report.txt"), b"durable artifact").unwrap();
+    let state = temp.path().join("state.sqlite");
+    let backend = temp.path().join("artifacts-v1");
+    let artifact_policy = policy(temp.path(), &backend);
+    let managed = Arc::new(ManagedArtifactStore::default());
+    let put = ManagedArtifactPutHandler::new(
+      Arc::clone(&managed),
+      artifact_policy.clone(),
+      ArtifactRuntimeMode::Foreground,
+      &BTreeMap::new(),
+    )
+    .unwrap();
+    managed.configure_for_state(&state, put.policy()).unwrap();
+    let stored = put
+      .execute_request_scoped(
+        &call("report.txt", "report"),
+        Some("workflow".to_string()),
+        CapabilityCancellationToken::default(),
+      )
+      .await
+      .unwrap();
+    let reference: ArtifactReferenceV1 = serde_json::from_value(stored["data"].clone()).unwrap();
+    drop(put);
+    drop(managed);
+
+    let connection = Connection::open(&state).unwrap();
+    connection
+      .execute(
+        "UPDATE woml_artifact_retention SET expires_at = '2000-01-01T00:00:00.000Z'",
+        [],
+      )
+      .unwrap();
+    let definition_hash = format!("sha256:{}", "a".repeat(64));
+    connection
+      .execute(
+        "INSERT INTO woml_definitions(
+           definition_hash, workflow_id, schema_version, model_json, created_at
+         ) VALUES (?1, 'workflow', 1, '{}', ?2)",
+        params![definition_hash, timestamp()],
+      )
+      .unwrap();
+    connection
+      .execute(
+        "INSERT INTO woml_runs(run_id, workflow_id, definition_hash, created_at)
+         VALUES ('run-artifact', 'workflow', ?1, ?2)",
+        params![definition_hash, timestamp()],
+      )
+      .unwrap();
+    connection
+      .execute(
+        "INSERT INTO woml_run_summaries(
+           run_id, workflow_id, status, admitted_at, updated_at
+         ) VALUES ('run-artifact', 'workflow', 'waiting', ?1, ?1)",
+        [timestamp()],
+      )
+      .unwrap();
+    drop(connection);
+
+    let protected = maintain_artifacts(
+      &state,
+      artifact_policy.clone(),
+      ArtifactRuntimeMode::Foreground,
+      &BTreeMap::new(),
+      Utc::now(),
+      true,
+    )
+    .unwrap();
+    assert_eq!(protected.eligible_artifacts, 0);
+
+    Connection::open(&state)
+      .unwrap()
+      .execute(
+        "UPDATE woml_run_summaries SET status = 'succeeded', updated_at = ?1
+         WHERE run_id = 'run-artifact'",
+        [timestamp()],
+      )
+      .unwrap();
+    let orphan_digest = hex::encode(Sha256::digest(b"orphan"));
+    let orphan = backend
+      .join("blobs/sha256")
+      .join(&orphan_digest[..2])
+      .join(&orphan_digest[2..]);
+    fs::create_dir_all(orphan.parent().unwrap()).unwrap();
+    fs::write(&orphan, b"orphan").unwrap();
+    let collected = maintain_artifacts(
+      &state,
+      artifact_policy,
+      ArtifactRuntimeMode::Foreground,
+      &BTreeMap::new(),
+      Utc::now(),
+      false,
+    )
+    .unwrap();
+    assert_eq!(collected.deleted_artifacts, 1);
+    assert_eq!(collected.deleted_blobs, 1);
+    assert_eq!(collected.deleted_bytes, reference.size);
+    // Startup recovery is allowed to collect the orphan before the bounded
+    // maintenance scan accounts for it.
+    assert!(collected.collected_orphans <= 1);
+    assert_eq!(collected.live_artifacts, 0);
+    assert_eq!(collected.live_blobs, 0);
+    assert!(!orphan.exists());
+  }
+
+  #[tokio::test]
+  async fn artifact_backup_round_trips_verified_bytes_and_rejects_corruption() {
+    let temp = TempDir::new().unwrap();
+    fs::write(temp.path().join("report.txt"), b"durable artifact backup").unwrap();
+    let state = temp.path().join("state.sqlite");
+    let source_backend = temp.path().join("source-artifacts-v1");
+    let source_policy = policy(temp.path(), &source_backend);
+    let managed = Arc::new(ManagedArtifactStore::default());
+    let put = ManagedArtifactPutHandler::new(
+      Arc::clone(&managed),
+      source_policy.clone(),
+      ArtifactRuntimeMode::Foreground,
+      &BTreeMap::new(),
+    )
+    .unwrap();
+    managed.configure_for_state(&state, put.policy()).unwrap();
+    let stored = put
+      .execute_request_scoped(
+        &call("report.txt", "report"),
+        Some("workflow".to_string()),
+        CapabilityCancellationToken::default(),
+      )
+      .await
+      .unwrap();
+    let reference: ArtifactReferenceV1 = serde_json::from_value(stored["data"].clone()).unwrap();
+    drop(put);
+    drop(managed);
+
+    let backup = temp.path().join("backup-artifacts");
+    let exported = export_artifact_backup(
+      &state,
+      &backup,
+      source_policy,
+      ArtifactRuntimeMode::Foreground,
+      &BTreeMap::new(),
+    )
+    .unwrap();
+    assert_eq!(exported.blob_count, 1);
+    assert_eq!(exported.total_bytes, reference.size);
+    assert_eq!(verify_artifact_backup(&state, &backup).unwrap(), exported);
+
+    let restored_backend = temp.path().join("restored-artifacts-v1");
+    let restored = restore_artifact_backup(
+      &state,
+      &backup,
+      policy(temp.path(), &restored_backend),
+      ArtifactRuntimeMode::Foreground,
+      &BTreeMap::new(),
+    )
+    .unwrap();
+    assert_eq!(restored, exported);
+    let restored_blob = restored_backend
+      .join("blobs/sha256")
+      .join(&reference.sha256[..2])
+      .join(&reference.sha256[2..]);
+    assert_eq!(
+      fs::read(&restored_blob).unwrap(),
+      b"durable artifact backup"
+    );
+
+    let backup_blob = backup
+      .join("blobs/sha256")
+      .join(&reference.sha256[..2])
+      .join(&reference.sha256[2..]);
+    fs::write(backup_blob, b"corrupt").unwrap();
+    let failure = verify_artifact_backup(&state, &backup).unwrap_err();
+    assert_eq!(failure.code, "WOML_ARTIFACT_CORRUPT");
+  }
+
+  fn assert_backend_conformance(backend: &dyn ArtifactBackend, store_id: &str) {
+    let connection = Connection::open_in_memory().unwrap();
+    initialize_schema(&connection).unwrap();
+    backend.bind_store(&connection, store_id).unwrap();
+    let bytes = b"portable artifact backend";
+    let digest = hex::encode(Sha256::digest(bytes));
+
+    let mut stage = backend.begin_stage().unwrap();
+    stage.file.as_mut().unwrap().write_all(bytes).unwrap();
+    backend
+      .publish(
+        stage,
+        &digest,
+        bytes.len() as u64,
+        &CapabilityCancellationToken::default(),
+      )
+      .unwrap();
+    let verified = backend.verify(&digest, bytes.len() as u64).unwrap();
+    assert_eq!(fs::read(&verified.path).unwrap(), bytes);
+    drop(verified);
+    assert_eq!(backend.inventory(10).unwrap(), vec![digest.clone()]);
+
+    let mut duplicate = backend.begin_stage().unwrap();
+    duplicate.file.as_mut().unwrap().write_all(bytes).unwrap();
+    backend
+      .publish(
+        duplicate,
+        &digest,
+        bytes.len() as u64,
+        &CapabilityCancellationToken::default(),
+      )
+      .unwrap();
+    assert_eq!(backend.inventory(10).unwrap(), vec![digest.clone()]);
+
+    let mut cancelled = backend.begin_stage().unwrap();
+    cancelled
+      .file
+      .as_mut()
+      .unwrap()
+      .write_all(b"cancelled")
+      .unwrap();
+    let cancellation = CapabilityCancellationToken::default();
+    cancellation.cancel();
+    let failure = backend
+      .publish(
+        cancelled,
+        &hex::encode(Sha256::digest(b"cancelled")),
+        9,
+        &cancellation,
+      )
+      .unwrap_err();
+    assert_eq!(failure.code, "WOML_ARTIFACT_CANCELLED");
+
+    backend.delete(&digest).unwrap();
+    backend.delete(&digest).unwrap();
+    assert!(backend.inventory(10).unwrap().is_empty());
+  }
+
+  #[test]
+  fn local_and_s3_backends_share_the_frozen_conformance_suite() {
+    let local_root = TempDir::new().unwrap();
+    let local = LocalArtifactBackend::open(&local_root.path().join("local")).unwrap();
+    assert_backend_conformance(&local, "store-local");
+
+    let s3_root = TempDir::new().unwrap();
+    let server = MockS3Server::start();
+    let s3_config = |access_key: &str| PreparedS3Backend {
+      bucket: "woml-test".to_string(),
+      region: "eu-central-1".to_string(),
+      prefix: "tenant-a/".to_string(),
+      endpoint: Url::parse(&server.endpoint).unwrap(),
+      force_path_style: true,
+      credentials: S3Credentials {
+        access_key: access_key.to_string(),
+        secret_key: "test-secret-key".to_string(),
+        session_token: Some("test-session-token".to_string()),
+      },
+      server_side_encryption: S3ServerSideEncryption::Aes256,
+    };
+    let s3 = S3ArtifactBackend::open(s3_config("ACCESS_ONE"), s3_root.path()).unwrap();
+    assert_backend_conformance(&s3, "store-s3");
+
+    // A new backend instance resolves credentials again, which permits
+    // operator-controlled rotation without changing durable metadata.
+    let rotated = S3ArtifactBackend::open(s3_config("ACCESS_TWO"), s3_root.path()).unwrap();
+    let connection = Connection::open_in_memory().unwrap();
+    initialize_schema(&connection).unwrap();
+    rotated.bind_store(&connection, "store-s3").unwrap();
+
+    let requests = server.requests.lock().unwrap().clone();
+    let blob_puts = requests
+      .iter()
+      .filter(|request| request.method == "PUT" && request.target.contains("blobs/sha256"))
+      .count();
+    let blob_gets = requests
+      .iter()
+      .filter(|request| request.method == "GET" && request.target.contains("blobs/sha256"))
+      .count();
+    assert!(
+      blob_puts >= 3,
+      "transient upload and duplicate publication must retry safely"
+    );
+    assert!(
+      blob_gets >= 3,
+      "eventual visibility must recover before verification succeeds"
+    );
+    assert!(requests.iter().any(|request| {
+      request
+        .headers
+        .get("authorization")
+        .is_some_and(|value| value.contains("Credential=ACCESS_ONE/"))
+        && request
+          .headers
+          .get("x-amz-server-side-encryption")
+          .map(String::as_str)
+          == Some("AES256")
+    }));
+    assert!(requests.iter().any(|request| {
+      request
+        .headers
+        .get("authorization")
+        .is_some_and(|value| value.contains("Credential=ACCESS_TWO/"))
+    }));
+    let wire_log = format!("{requests:?}");
+    assert!(!wire_log.contains("test-secret-key"));
+  }
+
+  #[test]
+  fn rust_resolves_s3_credentials_symbolically_and_redacts_policy_debugging() {
+    let temp = TempDir::new().unwrap();
+    let mut authored = policy(temp.path(), &temp.path().join("unused-local"));
+    authored.backend = ArtifactBackendPolicy::S3 {
+      contract: "woml.artifact-backend".to_string(),
+      contract_version: 1,
+      bucket: "woml-production-artifacts".to_string(),
+      region: "eu-central-1".to_string(),
+      prefix: "runtime-a/".to_string(),
+      endpoint: Some("https://objects.example.com".to_string()),
+      force_path_style: true,
+      authentication: Box::new(json!({
+        "mode": "secrets",
+        "accessKeySecret": "S3_ACCESS_KEY",
+        "secretKeySecret": "S3_SECRET_KEY",
+        "sessionTokenSecret": "S3_SESSION_TOKEN"
+      })),
+      server_side_encryption: Box::new(json!({
+        "mode": "aws-kms",
+        "keyId": "alias/woml-artifacts"
+      })),
+    };
+    let missing = PreparedArtifactPolicy::prepare(
+      authored.clone(),
+      ArtifactRuntimeMode::Foreground,
+      &BTreeMap::new(),
+    )
+    .unwrap_err();
+    assert!(missing.to_string().contains("S3_ACCESS_KEY"));
+
+    let secrets = BTreeMap::from([
+      ("S3_ACCESS_KEY".to_string(), "access-value".to_string()),
+      ("S3_SECRET_KEY".to_string(), "secret-value".to_string()),
+      ("S3_SESSION_TOKEN".to_string(), "session-value".to_string()),
+    ]);
+    let prepared =
+      PreparedArtifactPolicy::prepare(authored.clone(), ArtifactRuntimeMode::Foreground, &secrets)
+        .unwrap();
+    let debug = format!("{prepared:?}");
+    for value in secrets.values() {
+      assert!(!debug.contains(value));
+    }
+
+    if let ArtifactBackendPolicy::S3 { endpoint, .. } = &mut authored.backend {
+      *endpoint = Some("http://objects.example.com".to_string());
+    }
+    assert!(
+      PreparedArtifactPolicy::prepare(authored, ArtifactRuntimeMode::Foreground, &secrets,)
+        .is_err()
+    );
   }
 
   #[test]

@@ -21,20 +21,25 @@ import {
   inspectBackupStoreWithRust,
   prepareRestoredStoreWithRust,
   recordVerifiedBackupWithRust,
+  exportArtifactBackupWithRust,
+  restoreArtifactBackupWithRust,
+  verifyArtifactBackupWithRust,
   type RustBackupStoreInspection,
+  type RustArtifactBackupInventoryV1,
 } from './rust-executor';
+import type { ArtifactRuntimeAuthorityV1 } from './artifact-policy';
 import {
   readRuntimeDescriptor,
   runtimeDescriptorPath,
 } from './runtime-control';
 
 export const backupUsage =
-  'Usage: woml backup <backup-directory> [--state <path>] [--json]';
+  'Usage: woml backup <backup-directory> [--state <path>] [--artifact-policy <path>] [--json]';
 export const restoreUsage =
-  'Usage: woml restore <backup-directory> [--state <path>] [--replace] [--json]';
+  'Usage: woml restore <backup-directory> [--state <path>] [--artifact-policy <path>] [--replace] [--json]';
 
 export interface BackupManifestV1 {
-  readonly profile: 'woml.backup-manifest/v1';
+  readonly profile: 'woml.backup-manifest/v1' | 'woml.backup-manifest/v2';
   readonly backupId: string;
   readonly createdAt: string;
   readonly deploymentId: string;
@@ -46,6 +51,7 @@ export interface BackupManifestV1 {
     readonly digest: string;
   };
   readonly definitionHashes: readonly string[];
+  readonly artifacts?: RustArtifactBackupInventoryV1;
   readonly verified: true;
 }
 
@@ -53,6 +59,7 @@ export interface BackupArguments {
   readonly backupDirectory: string;
   readonly statePath: string;
   readonly json: boolean;
+  readonly artifactPolicyPath?: string;
 }
 
 export interface RestoreArguments extends BackupArguments {
@@ -86,6 +93,7 @@ function parseArguments(
   let statePath = resolve('.woml/state.sqlite');
   let json = false;
   let replace = false;
+  let artifactPolicyPath: string | undefined;
   const seen = new Set<string>();
   for (let index = 0; index < options.length; index += 1) {
     const option = options[index]!;
@@ -101,19 +109,21 @@ function parseArguments(
       replace = true;
       continue;
     }
-    if (option !== '--state') {
+    if (option !== '--state' && option !== '--artifact-policy') {
       throw new ProductionBackupError('WOML_CLI_ARGUMENTS_INVALID', usage);
     }
     const value = options[++index];
     if (value === undefined || value.length === 0 || value.startsWith('--')) {
       throw new ProductionBackupError('WOML_CLI_ARGUMENTS_INVALID', usage);
     }
-    statePath = resolve(value);
+    if (option === '--state') statePath = resolve(value);
+    if (option === '--artifact-policy') artifactPolicyPath = resolve(value);
   }
   const base = {
     backupDirectory: resolve(rawDirectory),
     statePath,
     json,
+    ...(artifactPolicyPath === undefined ? {} : { artifactPolicyPath }),
   };
   return command === 'restore' ? { ...base, replace } : base;
 }
@@ -223,10 +233,17 @@ function decodeManifest(value: unknown): BackupManifestV1 {
   }
   const item = value as Record<string, unknown>;
   const database = item.database;
+  const hasArtifacts = item.profile === 'woml.backup-manifest/v2';
+  const expectedKeys = [
+    'activationId', 'backupId', 'createdAt', 'database', 'definitionHashes',
+    'deploymentId', 'profile', 'storeVersion', 'verified',
+    ...(hasArtifacts ? ['artifacts'] : []),
+  ];
   const keys = Object.keys(item).sort().join(',');
   if (
-    keys !== ['activationId', 'backupId', 'createdAt', 'database', 'definitionHashes', 'deploymentId', 'profile', 'storeVersion', 'verified'].sort().join(',') ||
-    item.profile !== 'woml.backup-manifest/v1' ||
+    keys !== expectedKeys.sort().join(',') ||
+    !['woml.backup-manifest/v1', 'woml.backup-manifest/v2'].includes(String(item.profile)) ||
+    (hasArtifacts && !validArtifactInventory(item.artifacts)) ||
     typeof item.backupId !== 'string' ||
     item.backupId.length < 1 ||
     item.backupId.length > 320 ||
@@ -254,10 +271,23 @@ function decodeManifest(value: unknown): BackupManifestV1 {
   ) {
     throw new ProductionBackupError(
       'WOML_BACKUP_MANIFEST_INVALID',
-      'Backup Manifest v1 is malformed or unsupported.'
+      'Backup Manifest v1/v2 is malformed or unsupported.'
     );
   }
   return value as BackupManifestV1;
+}
+
+function validArtifactInventory(value: unknown): value is RustArtifactBackupInventoryV1 {
+  if (value === null || typeof value !== 'object' || Array.isArray(value)) return false;
+  const item = value as Record<string, unknown>;
+  return Object.keys(item).sort().join(',') === [
+    'profile', 'directory', 'blobCount', 'totalBytes', 'inventoryDigest', 'verified',
+  ].sort().join(',') &&
+    item.profile === 'woml.artifact-backup-inventory/v1' &&
+    item.directory === 'artifacts' &&
+    Number.isSafeInteger(item.blobCount) && Number(item.blobCount) >= 0 &&
+    Number.isSafeInteger(item.totalBytes) && Number(item.totalBytes) >= 0 &&
+    isDigest(item.inventoryDigest) && item.verified === true;
 }
 
 function sameInventory(
@@ -278,12 +308,6 @@ export async function verifyBackupDirectory(
     throw new ProductionBackupError('WOML_BACKUP_NOT_FOUND', 'The backup directory does not exist.');
   }
   const entries = (await readdir(backupDirectory)).sort();
-  if (entries.length !== 2 || entries[0] !== 'manifest.json' || entries[1] !== 'state.sqlite') {
-    throw new ProductionBackupError(
-      'WOML_BACKUP_INCOMPLETE',
-      'The backup directory must contain exactly manifest.json and state.sqlite.'
-    );
-  }
   const manifestPath = join(backupDirectory, 'manifest.json');
   const databasePath = join(backupDirectory, 'state.sqlite');
   await assertNoSymlink(manifestPath);
@@ -307,6 +331,15 @@ export async function verifyBackupDirectory(
     );
   }
   const manifest = decodeManifest(decoded);
+  const expectedEntries = manifest.artifacts === undefined
+    ? ['manifest.json', 'state.sqlite']
+    : ['artifacts', 'manifest.json', 'state.sqlite'];
+  if (JSON.stringify(entries) !== JSON.stringify(expectedEntries)) {
+    throw new ProductionBackupError(
+      'WOML_BACKUP_INCOMPLETE',
+      `The backup directory must contain exactly ${expectedEntries.join(', ')}.`
+    );
+  }
   const measured = await digestFile(databasePath);
   if (
     measured.digest !== manifest.database.digest ||
@@ -332,12 +365,45 @@ export async function verifyBackupDirectory(
       'The backup definition inventory does not match its manifest.'
     );
   }
+  if (manifest.artifacts !== undefined) {
+    const artifactDirectory = join(backupDirectory, manifest.artifacts.directory);
+    await assertNoSymlink(artifactDirectory);
+    const artifactEntry = await lstat(artifactDirectory).catch(() => undefined);
+    if (!artifactEntry?.isDirectory()) {
+      throw new ProductionBackupError(
+        'WOML_BACKUP_INCOMPLETE',
+        'The artifact backup directory is missing or unsafe.'
+      );
+    }
+    let verified: RustArtifactBackupInventoryV1;
+    try {
+      verified = verifyArtifactBackupWithRust(databasePath, artifactDirectory, {
+        nativeCorePath,
+      });
+    } catch (error) {
+      throw new ProductionBackupError(
+        'WOML_BACKUP_CHECKSUM_MISMATCH',
+        'One or more backed-up artifact blobs failed verification.',
+        { cause: error }
+      );
+    }
+    if (JSON.stringify(verified) !== JSON.stringify(manifest.artifacts)) {
+      throw new ProductionBackupError(
+        'WOML_BACKUP_INVENTORY_MISMATCH',
+        'The artifact backup inventory does not match its manifest.'
+      );
+    }
+  }
   return manifest;
 }
 
 export async function createProductionBackup(
   args: BackupArguments,
-  options: { readonly nativeCorePath?: string } = {}
+  options: {
+    readonly nativeCorePath?: string;
+    readonly artifactAuthority?: ArtifactRuntimeAuthorityV1;
+    readonly artifactSecrets?: Readonly<Record<string, string>>;
+  } = {}
 ): Promise<BackupManifestV1> {
   await assertNoSymlink(args.statePath);
   const source = await lstat(args.statePath).catch(() => undefined);
@@ -384,6 +450,15 @@ export async function createProductionBackup(
     }
     await chmod(databasePath, 0o600);
     const database = await digestFile(databasePath);
+    const artifacts = options.artifactAuthority === undefined
+      ? undefined
+      : exportArtifactBackupWithRust(
+          databasePath,
+          join(temporaryDirectory, 'artifacts'),
+          options.artifactAuthority,
+          options.artifactSecrets ?? {},
+          { nativeCorePath: options.nativeCorePath }
+        );
     if (inventory.deploymentId === undefined || inventory.activationId === undefined) {
       throw new ProductionBackupError(
         'WOML_BACKUP_VERIFICATION_FAILED',
@@ -391,7 +466,9 @@ export async function createProductionBackup(
       );
     }
     const manifest: BackupManifestV1 = {
-      profile: 'woml.backup-manifest/v1',
+      profile: artifacts === undefined
+        ? 'woml.backup-manifest/v1'
+        : 'woml.backup-manifest/v2',
       backupId,
       createdAt,
       deploymentId: inventory.deploymentId,
@@ -403,6 +480,7 @@ export async function createProductionBackup(
         digest: database.digest,
       },
       definitionHashes: inventory.definitionHashes,
+      ...(artifacts === undefined ? {} : { artifacts }),
       verified: true,
     };
     await writeFile(
@@ -479,7 +557,11 @@ async function rejectActiveTarget(statePath: string, nativeCorePath?: string): P
 
 export async function restoreProductionBackup(
   args: RestoreArguments,
-  options: { readonly nativeCorePath?: string } = {}
+  options: {
+    readonly nativeCorePath?: string;
+    readonly artifactAuthority?: ArtifactRuntimeAuthorityV1;
+    readonly artifactSecrets?: Readonly<Record<string, string>>;
+  } = {}
 ): Promise<{
   readonly profile: 'woml.restore-result/v1';
   readonly backupId: string;
@@ -538,6 +620,27 @@ export async function restoreProductionBackup(
         'WOML_RESTORE_VERIFICATION_FAILED',
         'The prepared restore target does not match the backup inventory.'
       );
+    }
+    if (manifest.artifacts !== undefined) {
+      if (options.artifactAuthority === undefined) {
+        throw new ProductionBackupError(
+          'WOML_RESTORE_ARTIFACT_POLICY_REQUIRED',
+          'This backup contains durable artifacts. Re-run restore with --artifact-policy.'
+        );
+      }
+      const restoredArtifacts = restoreArtifactBackupWithRust(
+        temporaryPath,
+        join(args.backupDirectory, manifest.artifacts.directory),
+        options.artifactAuthority,
+        options.artifactSecrets ?? {},
+        { nativeCorePath: options.nativeCorePath }
+      );
+      if (JSON.stringify(restoredArtifacts) !== JSON.stringify(manifest.artifacts)) {
+        throw new ProductionBackupError(
+          'WOML_RESTORE_VERIFICATION_FAILED',
+          'The restored artifact inventory does not match the backup manifest.'
+        );
+      }
     }
     await syncFile(temporaryPath);
     if (targetExists) {

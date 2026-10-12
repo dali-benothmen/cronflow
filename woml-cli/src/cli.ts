@@ -121,6 +121,7 @@ import {
 } from './process-policy';
 import {
   artifactGrantSummary,
+  artifactPolicySecretNames,
   ArtifactPolicyError,
   loadArtifactPolicy,
 } from './artifact-policy';
@@ -2947,7 +2948,8 @@ async function runApprovalWorkflow(
   await mkdir(dirname(args.statePath), { recursive: true });
   const secrets = await resolvedSecrets(
     workflow,
-    dependencies.createSecretStore()
+    dependencies.createSecretStore(),
+    args.runtimeCapabilities
   );
   const runtimeOptions = {
     nativeCorePath: dependencies.nativeCorePath,
@@ -3115,7 +3117,8 @@ async function runNotificationWorkflow(
 ): Promise<void> {
   const secrets = await resolvedSecrets(
     workflow,
-    dependencies.createSecretStore()
+    dependencies.createSecretStore(),
+    args.runtimeCapabilities
   );
   await mkdir(dirname(args.statePath), { recursive: true });
   const runtimeProgress = durableRetryProgress(io, args);
@@ -3492,7 +3495,8 @@ async function executeOneShot(
     const onProgress = durableRetryProgress(io, args);
     const secrets = await resolvedSecrets(
       workflow,
-      dependencies.createSecretStore()
+      dependencies.createSecretStore(),
+      args.runtimeCapabilities
     );
     const execution =
       args.resumeRunId === undefined
@@ -4015,14 +4019,23 @@ function workflowPresentation(
 
 async function resolvedSecrets(
   workflow: CompiledWorkflowDefinition,
-  store: SecretStore
+  store: SecretStore,
+  runtimeCapabilities?: RuntimeCapabilitiesV1
 ): Promise<Readonly<Record<string, string>>> {
   const references = [...workflowSecretReferences(workflow)];
   await preflightSecretReferences(references, store);
+  return resolvedNamedSecrets([
+    ...references.map(reference => reference.name),
+    ...artifactPolicySecretNames(runtimeCapabilities),
+  ], store);
+}
+
+async function resolvedNamedSecrets(
+  names: readonly string[],
+  store: SecretStore
+): Promise<Readonly<Record<string, string>>> {
   const values: Record<string, string> = {};
-  for (const name of [
-    ...new Set(references.map(reference => reference.name)),
-  ]) {
+  for (const name of new Set(names)) {
     const value = await store.get(name);
     if (value === undefined || value.length === 0) {
       throw new SecretStoreError(
@@ -4326,7 +4339,11 @@ async function activateWorkflows(
             productionSources.map(async source => ({
               workflow: source.workflow,
               definitionHash: source.definitionHash,
-              resolvedSecrets: await resolvedSecrets(source.workflow, store),
+              resolvedSecrets: await resolvedSecrets(
+                source.workflow,
+                store,
+                args.runtimeCapabilities
+              ),
               runtimeModules: source.runtimeModules,
             }))
           );
@@ -4873,6 +4890,15 @@ async function activateWorkflows(
       foregroundPresentation.verbose(
         `Deployment activation ${currentActivationId.slice(7, 19)} is ready with ${productionSources.length} workflow(s).`
       );
+      const automaticArtifactAuthority = args.runtimeCapabilities?.artifacts === undefined
+        ? undefined
+        : { artifacts: args.runtimeCapabilities.artifacts };
+      const automaticArtifactSecrets = automaticArtifactAuthority === undefined
+        ? undefined
+        : await resolvedNamedSecrets(
+            artifactPolicySecretNames(automaticArtifactAuthority),
+            store
+          );
       automaticRetention = profileSync('runtime', 'runtime.schedule_retention', measurements => {
         if (measurements !== undefined) {
           measurements.counts.enabled = args.retention?.enabled === true ? 1 : 0;
@@ -4882,6 +4908,12 @@ async function activateWorkflows(
         configuration: args.retention,
         nativeCorePath: dependencies.nativeCorePath,
         ownerId: `retention_runtime_${runtime.runtimeId}`,
+        ...(automaticArtifactAuthority === undefined
+          ? {}
+          : { artifactAuthority: automaticArtifactAuthority }),
+        ...(automaticArtifactSecrets === undefined
+          ? {}
+          : { artifactSecrets: automaticArtifactSecrets }),
         onResult: execution => {
           observability?.setComponent('retention', 'retention', 'ready');
           observability?.recordMaintenance('retention', 'completed');
@@ -5693,8 +5725,19 @@ async function runCliUnprofiled(
   if (args[0] === 'backup') {
     try {
       const parsed = parseBackupArguments(args);
+      const artifactAuthority = parsed.artifactPolicyPath === undefined
+        ? undefined
+        : await loadArtifactPolicy(parsed.artifactPolicyPath, 'foreground');
+      const artifactSecrets = artifactAuthority === undefined
+        ? undefined
+        : await resolvedNamedSecrets(
+            artifactPolicySecretNames(artifactAuthority),
+            dependencies.createSecretStore()
+          );
       const manifest = await createProductionBackup(parsed, {
         nativeCorePath: dependencies.nativeCorePath,
+        ...(artifactAuthority === undefined ? {} : { artifactAuthority }),
+        ...(artifactSecrets === undefined ? {} : { artifactSecrets }),
       });
       io.stdout(
         parsed.json
@@ -5706,6 +5749,12 @@ async function runCliUnprofiled(
               `Store version: ${manifest.storeVersion}`,
               `Definitions: ${manifest.definitionHashes.length}`,
               `Database: ${manifest.database.sizeBytes} bytes (${manifest.database.digest})`,
+              ...(manifest.artifacts === undefined
+                ? []
+                : [
+                    `Artifacts: ${manifest.artifacts.blobCount} blobs · ${manifest.artifacts.totalBytes} bytes`,
+                    `Artifact inventory: ${manifest.artifacts.inventoryDigest}`,
+                  ]),
             ].join('\n') + '\n'
       );
       return 0;
@@ -5725,8 +5774,19 @@ async function runCliUnprofiled(
   if (args[0] === 'restore') {
     try {
       const parsed = parseRestoreArguments(args);
+      const artifactAuthority = parsed.artifactPolicyPath === undefined
+        ? undefined
+        : await loadArtifactPolicy(parsed.artifactPolicyPath, 'foreground');
+      const artifactSecrets = artifactAuthority === undefined
+        ? undefined
+        : await resolvedNamedSecrets(
+            artifactPolicySecretNames(artifactAuthority),
+            dependencies.createSecretStore()
+          );
       const restored = await restoreProductionBackup(parsed, {
         nativeCorePath: dependencies.nativeCorePath,
+        ...(artifactAuthority === undefined ? {} : { artifactAuthority }),
+        ...(artifactSecrets === undefined ? {} : { artifactSecrets }),
       });
       io.stdout(
         parsed.json
@@ -5758,8 +5818,19 @@ async function runCliUnprofiled(
   if (args[0] === 'prune') {
     try {
       const parsed = parsePruneArguments(args);
+      const artifactAuthority = parsed.artifactPolicyPath === undefined
+        ? undefined
+        : await loadArtifactPolicy(parsed.artifactPolicyPath, 'foreground');
+      const artifactSecrets = artifactAuthority === undefined
+        ? undefined
+        : await resolvedNamedSecrets(
+            artifactPolicySecretNames(artifactAuthority),
+            dependencies.createSecretStore()
+          );
       const outcome = await runProductionRetention(parsed, {
         nativeCorePath: dependencies.nativeCorePath,
+        ...(artifactAuthority === undefined ? {} : { artifactAuthority }),
+        ...(artifactSecrets === undefined ? {} : { artifactSecrets }),
       });
       if ('eligibleRuns' in outcome) {
         io.stdout(
@@ -5770,13 +5841,24 @@ async function runCliUnprofiled(
                 `Policy: ${outcome.policyId}`,
                 `Eligible terminal runs: ${outcome.eligibleRuns}`,
                 `Estimated removable history: ${outcome.estimatedBytes} bytes`,
+                ...(outcome.artifacts === undefined
+                  ? []
+                  : [
+                      `Eligible artifacts: ${outcome.artifacts.eligibleArtifacts}`,
+                      `Estimated removable artifact bytes: ${outcome.artifacts.estimatedBytes}`,
+                    ]),
                 `Execute: woml prune --before ${parsed.before} --state ${JSON.stringify(parsed.statePath)}`,
               ].join('\n') + '\n'
         );
       } else {
         io.stdout(
           parsed.json
-            ? `${JSON.stringify(outcome.result)}\n`
+            ? `${JSON.stringify({
+                ...outcome.result,
+                ...(outcome.artifacts === undefined
+                  ? {}
+                  : { artifacts: outcome.artifacts }),
+              })}\n`
             : [
                 'WOML retention completed.',
                 `Policy: ${outcome.result.policyId}`,
@@ -5784,6 +5866,15 @@ async function runCliUnprofiled(
                 `Removed logical history: ${outcome.result.deletedBytes} bytes`,
                 `Batches: ${outcome.batches}`,
                 `Durable state entries deleted: ${outcome.result.stateEntriesDeleted}`,
+                ...(outcome.artifacts === undefined
+                  ? []
+                  : [
+                      `Deleted artifacts: ${outcome.artifacts.deletedArtifacts}`,
+                      `Deleted artifact blobs: ${outcome.artifacts.deletedBlobs}`,
+                      `Removed artifact bytes: ${outcome.artifacts.deletedBytes}`,
+                      `Integrity scrub: ${outcome.artifacts.scrubbedBlobs} checked · ${outcome.artifacts.corruptBlobs} corrupt`,
+                      `Live artifact store: ${outcome.artifacts.liveArtifacts} artifacts · ${outcome.artifacts.liveBytes} bytes`,
+                    ]),
                 `WAL checkpoint: ${outcome.checkpointedFrames}/${outcome.checkpointLogFrames} frames${outcome.checkpointBusy === 0 ? '' : ' (readers still active)'}`,
                 `Compaction: ${outcome.compacted ? 'completed' : 'not requested'}`,
               ].join('\n') + '\n'

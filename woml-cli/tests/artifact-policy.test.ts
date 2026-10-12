@@ -5,6 +5,7 @@ import { join } from 'node:path';
 import { afterEach, describe, expect, test } from 'bun:test';
 
 import {
+  artifactPolicySecretNames,
   ArtifactPolicyError,
   preflightArtifactPolicy,
 } from '../src/artifact-policy';
@@ -69,6 +70,8 @@ describe('Artifact Policy v1 preflight', () => {
     const prepared = await preflightArtifactPolicy(policy, root, 'foreground');
     expect(prepared.projectRoot).toBe(root);
     expect(prepared.readRoots).toEqual([root, join(root, 'reports')]);
+    expect(prepared.backend.kind).toBe('local');
+    if (prepared.backend.kind !== 'local') throw new Error('expected local backend');
     expect(prepared.backend.directory).toBe(join(root, '.woml/artifacts-v1'));
     expect(prepared.materialization.directory).toBe(
       join(root, '.woml/materialized-v1')
@@ -98,6 +101,97 @@ describe('Artifact Policy v1 preflight', () => {
     await expect(
       preflightArtifactPolicy(
         { ...policy, surprise: true },
+        root,
+        'foreground'
+      )
+    ).rejects.toMatchObject({ code: 'WOML_ARTIFACT_POLICY_INVALID' });
+  });
+
+  test('normalizes an S3 backend while keeping credentials symbolic', async () => {
+    const { root, policy } = await fixture();
+    const prepared = await preflightArtifactPolicy(
+      {
+        ...policy,
+        backend: {
+          contract: 'woml.artifact-backend',
+          contractVersion: 1,
+          kind: 's3',
+          bucket: 'woml-artifacts-production',
+          region: 'eu-central-1',
+          prefix: 'customer-a/',
+          endpoint: 'https://objects.example.com',
+          forcePathStyle: true,
+          authentication: {
+            mode: 'secrets',
+            accessKeySecret: 'S3_ACCESS_KEY',
+            secretKeySecret: 'S3_SECRET_KEY',
+            sessionTokenSecret: 'S3_SESSION_TOKEN',
+          },
+          serverSideEncryption: { mode: 'aws-kms', keyId: 'alias/woml-artifacts' },
+        },
+      },
+      root,
+      'foreground'
+    );
+    expect(prepared.backend).toMatchObject({
+      kind: 's3',
+      bucket: 'woml-artifacts-production',
+      prefix: 'customer-a/',
+      endpoint: 'https://objects.example.com',
+      authentication: {
+        mode: 'secrets',
+        accessKeySecret: 'S3_ACCESS_KEY',
+        secretKeySecret: 'S3_SECRET_KEY',
+        sessionTokenSecret: 'S3_SESSION_TOKEN',
+      },
+    });
+    expect(
+      artifactPolicySecretNames({ artifacts: { mode: 'foreground', policy: prepared } })
+    ).toEqual(['S3_ACCESS_KEY', 'S3_SECRET_KEY', 'S3_SESSION_TOKEN']);
+  });
+
+  test('rejects insecure endpoints and embedded S3 credentials', async () => {
+    const { root, policy } = await fixture();
+    const backend = {
+      contract: 'woml.artifact-backend',
+      contractVersion: 1,
+      kind: 's3',
+      bucket: 'woml-artifacts-production',
+      region: 'eu-central-1',
+      prefix: '',
+      endpoint: 'http://objects.example.com',
+      forcePathStyle: true,
+      authentication: { mode: 'ambient' },
+      serverSideEncryption: { mode: 'aes256' },
+    };
+    await expect(
+      preflightArtifactPolicy({ ...policy, backend }, root, 'foreground')
+    ).rejects.toMatchObject({ code: 'WOML_ARTIFACT_POLICY_INVALID' });
+    await expect(
+      preflightArtifactPolicy(
+        {
+          ...policy,
+          backend: { ...backend, endpoint: 'https://objects.example.com?credential=value' },
+        },
+        root,
+        'foreground'
+      )
+    ).rejects.toMatchObject({ code: 'WOML_ARTIFACT_POLICY_INVALID' });
+    await expect(
+      preflightArtifactPolicy(
+        {
+          ...policy,
+          backend: {
+            ...backend,
+            endpoint: 'https://objects.example.com',
+            authentication: {
+              mode: 'secrets',
+              accessKeySecret: 'S3_ACCESS_KEY',
+              secretKeySecret: 'S3_SECRET_KEY',
+              accessKey: 'embedded-value-is-forbidden',
+            },
+          },
+        },
         root,
         'foreground'
       )

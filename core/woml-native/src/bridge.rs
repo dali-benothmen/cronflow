@@ -15,20 +15,22 @@ use serde_json::{Map, Value};
 use woml_engine::model::ValueExpression;
 use woml_engine::{
   create_online_backup, execute_retention, execute_workflow, execute_workflow_durable,
-  execute_workflow_durable_outcome, inspect_backup_store, last_retention_result, plan_retention,
-  prepare_restored_store, recent_run_presentations_from_store_v1, record_verified_backup,
-  recover_durable_runs, resolve_human_approval_durable, resume_workflow_durable,
+  execute_workflow_durable_outcome, export_artifact_backup, inspect_backup_store,
+  last_retention_result, maintain_artifacts, plan_retention, prepare_restored_store,
+  recent_run_presentations_from_store_v1, record_verified_backup, recover_durable_runs,
+  resolve_human_approval_durable, restore_artifact_backup, resume_workflow_durable,
   resume_workflow_durable_any_outcome, resume_workflow_durable_outcome,
   run_notification_provider_journey_with_custom, run_presentation_from_store_v1,
-  settle_approval_timeout_durable, ApprovalDecision, ApprovalDecisionOutcome, ArtifactPolicyV1,
-  ArtifactRuntimeMode, BackupError, CompiledReusableInvocation, CompiledWorkflowDefinition,
-  CustomNotificationJourneyOptions, CustomProviderScriptArtifact, DurableEventStore,
-  DurableStoreError, ExternalTriggerAdmissionCommand, IntervalProgress, IntervalProgressReporter,
-  LifecycleProgress, NotificationHostClientError, NotificationHostProcessOptions,
-  NotificationJourneyDiagnostics, NotificationJourneyError, ParallelFailurePolicy, ProcessPolicyV1,
-  ProcessRuntimeMode, RetentionError, RetentionPolicyV1, RunFailure, RunPresentationError,
-  RunStatus, RuntimeExecutionError, RuntimeExecutionOptions, RuntimeModuleArtifact,
-  RuntimePolicyProgress, RuntimePolicyProgressReporter, ScheduleProgress, ScheduleProgressReporter,
+  settle_approval_timeout_durable, verify_artifact_backup, ApprovalDecision,
+  ApprovalDecisionOutcome, ArtifactPolicyV1, ArtifactRuntimeMode, BackupError,
+  CompiledReusableInvocation, CompiledWorkflowDefinition, CustomNotificationJourneyOptions,
+  CustomProviderScriptArtifact, DurableEventStore, DurableStoreError,
+  ExternalTriggerAdmissionCommand, IntervalProgress, IntervalProgressReporter, LifecycleProgress,
+  NotificationHostClientError, NotificationHostProcessOptions, NotificationJourneyDiagnostics,
+  NotificationJourneyError, ParallelFailurePolicy, ProcessPolicyV1, ProcessRuntimeMode,
+  RetentionError, RetentionPolicyV1, RunFailure, RunPresentationError, RunStatus,
+  RuntimeExecutionError, RuntimeExecutionOptions, RuntimeModuleArtifact, RuntimePolicyProgress,
+  RuntimePolicyProgressReporter, ScheduleProgress, ScheduleProgressReporter,
   ScriptHostProcessOptions, SystemEngineClock, TriggerAdmissionRequest, TriggerProgress,
   TriggerProgressReporter, WebhookDefinitionRegistration, WebhookRuntimeError, WomlWebhookServer,
   WomlWebhookServerConfig, WorkflowCallProgress, WorkflowCallProgressReporter,
@@ -2325,6 +2327,122 @@ pub fn read_woml_last_retention_result(event_store_path: String) -> napi::Result
     last_retention_result(PathBuf::from(event_store_path)).map_err(native_retention_error)?;
   serde_json::to_string(&result)
     .map_err(|error| napi::Error::from_reason(format!("Could not encode retention audit: {error}")))
+}
+
+#[napi]
+pub fn maintain_woml_artifacts(
+  event_store_path: String,
+  policy_json: String,
+  mode_json: String,
+  resolved_secrets_json: String,
+  now: String,
+  dry_run: bool,
+) -> napi::Result<String> {
+  let policy: ArtifactPolicyV1 = serde_json::from_str(&policy_json)
+    .map_err(|_| napi::Error::from_reason("Artifact Policy v1 is invalid.".to_string()))?;
+  let mode: ArtifactRuntimeMode = serde_json::from_str(&mode_json)
+    .map_err(|_| napi::Error::from_reason("Artifact runtime mode is invalid.".to_string()))?;
+  let secrets: BTreeMap<String, String> = serde_json::from_str(&resolved_secrets_json)
+    .map_err(|_| napi::Error::from_reason("Resolved artifact secrets are invalid.".to_string()))?;
+  let now = DateTime::parse_from_rfc3339(&now)
+    .map_err(|_| napi::Error::from_reason("Artifact maintenance time is invalid.".to_string()))?
+    .with_timezone(&Utc);
+  let result = maintain_artifacts(
+    PathBuf::from(event_store_path),
+    policy,
+    mode,
+    &secrets,
+    now,
+    dry_run,
+  )
+  .map_err(|failure| napi::Error::from_reason(format!("{}: {}", failure.code, failure.message)))?;
+  serde_json::to_string(&result).map_err(|error| {
+    napi::Error::from_reason(format!("Could not encode artifact maintenance: {error}"))
+  })
+}
+
+fn decode_artifact_maintenance_authority(
+  policy_json: &str,
+  mode_json: &str,
+  resolved_secrets_json: &str,
+) -> napi::Result<(
+  ArtifactPolicyV1,
+  ArtifactRuntimeMode,
+  BTreeMap<String, String>,
+)> {
+  let policy = serde_json::from_str(policy_json)
+    .map_err(|_| napi::Error::from_reason("Artifact Policy v1 is invalid.".to_string()))?;
+  let mode = serde_json::from_str(mode_json)
+    .map_err(|_| napi::Error::from_reason("Artifact runtime mode is invalid.".to_string()))?;
+  let secrets = serde_json::from_str(resolved_secrets_json)
+    .map_err(|_| napi::Error::from_reason("Resolved artifact secrets are invalid.".to_string()))?;
+  Ok((policy, mode, secrets))
+}
+
+#[napi]
+pub fn export_woml_artifact_backup(
+  event_store_path: String,
+  destination_path: String,
+  policy_json: String,
+  mode_json: String,
+  resolved_secrets_json: String,
+) -> napi::Result<String> {
+  let (policy, mode, secrets) =
+    decode_artifact_maintenance_authority(&policy_json, &mode_json, &resolved_secrets_json)?;
+  let result = export_artifact_backup(
+    PathBuf::from(event_store_path),
+    PathBuf::from(destination_path),
+    policy,
+    mode,
+    &secrets,
+  )
+  .map_err(|failure| napi::Error::from_reason(format!("{}: {}", failure.code, failure.message)))?;
+  serde_json::to_string(&result).map_err(|error| {
+    napi::Error::from_reason(format!(
+      "Could not encode artifact backup inventory: {error}"
+    ))
+  })
+}
+
+#[napi]
+pub fn restore_woml_artifact_backup(
+  event_store_path: String,
+  source_path: String,
+  policy_json: String,
+  mode_json: String,
+  resolved_secrets_json: String,
+) -> napi::Result<String> {
+  let (policy, mode, secrets) =
+    decode_artifact_maintenance_authority(&policy_json, &mode_json, &resolved_secrets_json)?;
+  let result = restore_artifact_backup(
+    PathBuf::from(event_store_path),
+    PathBuf::from(source_path),
+    policy,
+    mode,
+    &secrets,
+  )
+  .map_err(|failure| napi::Error::from_reason(format!("{}: {}", failure.code, failure.message)))?;
+  serde_json::to_string(&result).map_err(|error| {
+    napi::Error::from_reason(format!(
+      "Could not encode artifact restore inventory: {error}"
+    ))
+  })
+}
+
+#[napi]
+pub fn verify_woml_artifact_backup(
+  event_store_path: String,
+  source_path: String,
+) -> napi::Result<String> {
+  let result = verify_artifact_backup(PathBuf::from(event_store_path), PathBuf::from(source_path))
+    .map_err(|failure| {
+      napi::Error::from_reason(format!("{}: {}", failure.code, failure.message))
+    })?;
+  serde_json::to_string(&result).map_err(|error| {
+    napi::Error::from_reason(format!(
+      "Could not encode artifact backup verification: {error}"
+    ))
+  })
 }
 
 #[napi]

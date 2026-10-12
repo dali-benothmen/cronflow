@@ -19,6 +19,15 @@ woml backup ./backups/orders-2026-08-12 \
   --state ./data/state.sqlite
 ```
 
+When Durable Artifacts are enabled, pass the same operator-owned policy used by
+the runtime:
+
+```bash
+woml backup ./backups/orders-2026-08-12 \
+  --state ./data/state.sqlite \
+  --artifact-policy ./artifact-policy.json
+```
+
 The destination must not already exist. WOML acquires the durable maintenance
 lease, asks SQLite for one coherent online snapshot, validates the copied
 database, verifies every compiled definition and required module artifact,
@@ -26,7 +35,7 @@ writes SHA-256 size/checksum metadata, and publishes the directory atomically.
 Concurrent workflow writes may continue; the backup represents one consistent
 point in time.
 
-Each backup contains exactly:
+Without Durable Artifacts, each backup contains exactly:
 
 ```text
 orders-2026-08-12/
@@ -37,6 +46,13 @@ orders-2026-08-12/
 `manifest.json` conforms to
 [Backup Manifest v1](schemas/backup-manifest.v1.schema.json). `--json` prints
 that same manifest for automation.
+
+An artifact-aware backup uses
+[Backup Manifest v2](schemas/backup-manifest.v2.schema.json) and adds a private
+content-addressed `artifacts/` directory. Rust streams each referenced blob from
+the configured local or S3-compatible backend and verifies its size and SHA-256
+digest. Artifact names, bodies, credentials, and backend paths never enter the
+manifest.
 
 An interrupted backup remains an unpublished temporary directory and is not a
 valid recovery point. A completed backup is accepted only after its checksum,
@@ -51,6 +67,19 @@ Stop the target runtime, then restore into a clean state location:
 woml restore ./backups/orders-2026-08-12 \
   --state ./data/state.sqlite
 ```
+
+For an artifact-aware v2 backup, provide a target artifact policy:
+
+```bash
+woml restore ./backups/orders-2026-08-12 \
+  --state ./data/state.sqlite \
+  --artifact-policy ./artifact-policy.json
+```
+
+`--artifact-policy` is required for a v2 backup. It may target a different
+conforming local or S3-compatible backend, which makes a verified backup the
+supported migration path between storage backends. WOML verifies every blob
+before publishing the restored SQLite authority.
 
 Restore verifies the manifest and database again before changing the target.
 It rejects symlinks, incomplete directories, altered bytes, unsupported future

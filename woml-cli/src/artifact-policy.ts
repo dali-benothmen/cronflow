@@ -31,13 +31,37 @@ export interface ArtifactPolicyV1 {
     readonly knownSecretAction: 'reject' | 'quarantine' | 'allow';
     readonly minimumSecretBytes: 8;
   };
-  readonly backend: {
-    readonly contract: 'woml.artifact-backend';
-    readonly contractVersion: 1;
-    readonly kind: 'local';
-    readonly directory: string;
-  };
+  readonly backend: ArtifactBackendV1;
 }
+
+export type ArtifactBackendV1 =
+  | {
+      readonly contract: 'woml.artifact-backend';
+      readonly contractVersion: 1;
+      readonly kind: 'local';
+      readonly directory: string;
+    }
+  | {
+      readonly contract: 'woml.artifact-backend';
+      readonly contractVersion: 1;
+      readonly kind: 's3';
+      readonly bucket: string;
+      readonly region: string;
+      readonly prefix: string;
+      readonly endpoint?: string;
+      readonly forcePathStyle: boolean;
+      readonly authentication:
+        | { readonly mode: 'ambient' }
+        | {
+            readonly mode: 'secrets';
+            readonly accessKeySecret: string;
+            readonly secretKeySecret: string;
+            readonly sessionTokenSecret?: string;
+          };
+      readonly serverSideEncryption:
+        | { readonly mode: 'aes256' }
+        | { readonly mode: 'aws-kms'; readonly keyId: string };
+    };
 
 export interface ArtifactRuntimeAuthorityV1 {
   readonly artifacts: {
@@ -88,7 +112,21 @@ export async function loadArtifactPolicy(
 }
 
 export function artifactGrantSummary(authority: ArtifactRuntimeAuthorityV1): string {
-  return `Artifact capability (${authority.artifacts.mode}): local immutable backend enabled`;
+  return `Artifact capability (${authority.artifacts.mode}): ${authority.artifacts.policy.backend.kind} immutable backend enabled`;
+}
+
+export function artifactPolicySecretNames(
+  authority: Partial<ArtifactRuntimeAuthorityV1> | undefined
+): readonly string[] {
+  const backend = authority?.artifacts?.policy.backend;
+  if (backend?.kind !== 's3' || backend.authentication.mode !== 'secrets') return [];
+  return [
+    backend.authentication.accessKeySecret,
+    backend.authentication.secretKeySecret,
+    ...(backend.authentication.sessionTokenSecret === undefined
+      ? []
+      : [backend.authentication.sessionTokenSecret]),
+  ];
 }
 
 export async function preflightArtifactPolicy(
@@ -121,8 +159,8 @@ export async function preflightArtifactPolicy(
   const limits = strictObject(policy.limits, 'limits', ['maxArtifactBytes', 'maxRunBytes', 'maxStoreBytes', 'maxConcurrentTransfers', 'transferTimeoutMs']);
   const retention = strictObject(policy.retention, 'retention', ['defaultMs', 'minimumMs', 'maximumMs']);
   const secretScanning = strictObject(policy.secretScanning, 'secretScanning', ['knownSecretAction', 'minimumSecretBytes']);
-  const backend = strictObject(policy.backend, 'backend', ['contract', 'contractVersion', 'kind', 'directory']);
-  if (backend.contract !== 'woml.artifact-backend' || backend.contractVersion !== 1 || backend.kind !== 'local') invalid('DA3 supports Artifact Backend v1 kind local only.');
+  const backendValue = strictRecord(policy.backend, 'backend');
+  const backend = normalizeBackend(backendValue, projectRoot);
   const normalized: ArtifactPolicyV1 = {
     contract: 'woml.artifact-policy', contractVersion: 1, enabled: true,
     modes: { foreground: modes.foreground as boolean, background: modes.background as boolean },
@@ -149,13 +187,110 @@ export async function preflightArtifactPolicy(
       knownSecretAction: enumValue(secretScanning.knownSecretAction, ['reject', 'quarantine', 'allow'], 'knownSecretAction'),
       minimumSecretBytes: exactInteger(secretScanning.minimumSecretBytes, 8, 'minimumSecretBytes'),
     },
-    backend: {
-      contract: 'woml.artifact-backend', contractVersion: 1, kind: 'local',
-      directory: resolvePath(projectRoot, boundedString(backend.directory, 'backend.directory', 4096)),
-    },
+    backend,
   };
   if (normalized.limits.maxRunBytes < normalized.limits.maxArtifactBytes || normalized.limits.maxStoreBytes < normalized.limits.maxArtifactBytes || normalized.retention.minimumMs > normalized.retention.defaultMs || normalized.retention.defaultMs > normalized.retention.maximumMs) invalid('Artifact limits and retention bounds are inconsistent.');
   return normalized;
+}
+
+function normalizeBackend(
+  value: Record<string, unknown>,
+  projectRoot: string
+): ArtifactBackendV1 {
+  if (value.kind === 'local') {
+    const backend = strictObject(value, 'backend', [
+      'contract', 'contractVersion', 'kind', 'directory',
+    ]);
+    if (backend.contract !== 'woml.artifact-backend' || backend.contractVersion !== 1) {
+      invalid('The local backend does not match Artifact Backend v1.');
+    }
+    return {
+      contract: 'woml.artifact-backend',
+      contractVersion: 1,
+      kind: 'local',
+      directory: resolvePath(
+        projectRoot,
+        boundedString(backend.directory, 'backend.directory', 4096)
+      ),
+    };
+  }
+  const fields = [
+    'contract', 'contractVersion', 'kind', 'bucket', 'region', 'prefix',
+    'forcePathStyle', 'authentication', 'serverSideEncryption',
+    ...(value.endpoint === undefined ? [] : ['endpoint']),
+  ];
+  const backend = strictObject(value, 'backend', fields);
+  if (backend.contract !== 'woml.artifact-backend' || backend.contractVersion !== 1 || backend.kind !== 's3') {
+    invalid('The backend does not match Artifact Backend v1.');
+  }
+  const bucket = boundedString(backend.bucket, 'backend.bucket', 63);
+  if (!/^[a-z0-9][a-z0-9.-]{1,61}[a-z0-9]$/.test(bucket)) invalid('backend.bucket is invalid.');
+  const region = boundedString(backend.region, 'backend.region', 128);
+  const prefix = typeof backend.prefix === 'string' ? backend.prefix : invalid('backend.prefix is invalid.');
+  if (Buffer.byteLength(prefix) > 512 || !/^(?:[A-Za-z0-9!_.*'()/-]+)?$/.test(prefix)) invalid('backend.prefix is invalid.');
+  if (typeof backend.forcePathStyle !== 'boolean') invalid('backend.forcePathStyle must be boolean.');
+  const endpoint = backend.endpoint === undefined
+    ? undefined
+    : boundedString(backend.endpoint, 'backend.endpoint', 2048);
+  if (endpoint !== undefined) {
+    let parsed: URL;
+    try { parsed = new URL(endpoint); } catch { invalid('backend.endpoint must be a valid HTTPS URL.'); }
+    if (
+      parsed!.protocol !== 'https:' ||
+      parsed!.username !== '' ||
+      parsed!.password !== '' ||
+      parsed!.search !== '' ||
+      parsed!.hash !== ''
+    ) {
+      invalid('backend.endpoint must be a credential-free HTTPS URL.');
+    }
+  }
+  const authenticationValue = strictRecord(backend.authentication, 'backend.authentication');
+  let authentication: Extract<ArtifactBackendV1, { kind: 's3' }>['authentication'];
+  if (authenticationValue.mode === 'ambient') {
+    strictObject(authenticationValue, 'backend.authentication', ['mode']);
+    authentication = { mode: 'ambient' };
+  } else {
+    const authenticationFields = [
+      'mode', 'accessKeySecret', 'secretKeySecret',
+      ...(authenticationValue.sessionTokenSecret === undefined ? [] : ['sessionTokenSecret']),
+    ];
+    const authored = strictObject(authenticationValue, 'backend.authentication', authenticationFields);
+    if (authored.mode !== 'secrets') invalid('backend.authentication.mode is invalid.');
+    const accessKeySecret = secretName(authored.accessKeySecret, 'accessKeySecret');
+    const secretKeySecret = secretName(authored.secretKeySecret, 'secretKeySecret');
+    authentication = {
+      mode: 'secrets', accessKeySecret, secretKeySecret,
+      ...(authored.sessionTokenSecret === undefined
+        ? {}
+        : { sessionTokenSecret: secretName(authored.sessionTokenSecret, 'sessionTokenSecret') }),
+    };
+  }
+  const encryptionValue = strictRecord(backend.serverSideEncryption, 'backend.serverSideEncryption');
+  const serverSideEncryption: Extract<ArtifactBackendV1, { kind: 's3' }>['serverSideEncryption'] =
+    encryptionValue.mode === 'aes256'
+      ? (strictObject(encryptionValue, 'backend.serverSideEncryption', ['mode']), { mode: 'aes256' })
+      : (() => {
+          const authored = strictObject(encryptionValue, 'backend.serverSideEncryption', ['mode', 'keyId']);
+          if (authored.mode !== 'aws-kms') invalid('backend.serverSideEncryption.mode is invalid.');
+          return { mode: 'aws-kms' as const, keyId: boundedString(authored.keyId, 'backend.serverSideEncryption.keyId', 2048) };
+        })();
+  return {
+    contract: 'woml.artifact-backend', contractVersion: 1, kind: 's3',
+    bucket, region, prefix, ...(endpoint === undefined ? {} : { endpoint }),
+    forcePathStyle: backend.forcePathStyle, authentication, serverSideEncryption,
+  };
+}
+
+function secretName(value: unknown, label: string): string {
+  const name = boundedString(value, `backend.authentication.${label}`, 128);
+  if (!/^[A-Z][A-Z0-9_]{0,127}$/.test(name)) invalid(`backend.authentication.${label} is invalid.`);
+  return name;
+}
+
+function strictRecord(value: unknown, label: string): Record<string, unknown> {
+  if (value === null || typeof value !== 'object' || Array.isArray(value)) invalid(`${label} must be an object.`);
+  return value as Record<string, unknown>;
 }
 
 function strictObject(value: unknown, label: string, fields: readonly string[]): Record<string, unknown> {

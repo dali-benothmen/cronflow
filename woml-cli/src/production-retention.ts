@@ -6,10 +6,13 @@ import {
   executeRetentionWithRust,
   executeRetentionWithRustAsync,
   planRetentionWithRust,
+  maintainArtifactsWithRust,
+  type RustArtifactMaintenanceV1,
   type RetentionPolicyV1,
   type RustRetentionExecutionV1,
   type RustRetentionPlanV1,
 } from './rust-executor';
+import type { ArtifactRuntimeAuthorityV1 } from './artifact-policy';
 
 export interface AutomaticRetentionConfiguration {
   readonly enabled: boolean;
@@ -21,14 +24,14 @@ export interface AutomaticRetentionConfiguration {
 
 export interface AutomaticRetentionHandle {
   readonly nextRunAt?: string;
-  runNow(): Promise<RustRetentionExecutionV1 | undefined>;
+  runNow(): Promise<(RustRetentionExecutionV1 & { readonly artifacts?: RustArtifactMaintenanceV1 }) | undefined>;
   close(): void;
 }
 
 type RetentionTimer = number | ReturnType<typeof setTimeout>;
 
 export const pruneUsage =
-  'Usage: woml prune --before <duration> [--state <path>] [--dry-run] [--compact] [--json]';
+  'Usage: woml prune --before <duration> [--state <path>] [--artifact-policy <path>] [--dry-run] [--compact] [--json]';
 
 const MAX_RETENTION_MILLISECONDS = 3_650 * 24 * 60 * 60 * 1_000;
 
@@ -39,6 +42,7 @@ export interface PruneArguments {
   readonly dryRun: boolean;
   readonly compact: boolean;
   readonly json: boolean;
+  readonly artifactPolicyPath?: string;
 }
 
 export class ProductionRetentionError extends Error {
@@ -86,6 +90,7 @@ export function parsePruneArguments(args: readonly string[]): PruneArguments {
   let dryRun = false;
   let compact = false;
   let json = false;
+  let artifactPolicyPath: string | undefined;
   const seen = new Set<string>();
   for (let index = 1; index < args.length; index += 1) {
     const option = args[index]!;
@@ -109,12 +114,13 @@ export function parsePruneArguments(args: readonly string[]): PruneArguments {
     if (
       value === undefined ||
       value.startsWith('--') ||
-      !['--state', '--before'].includes(option)
+      !['--state', '--before', '--artifact-policy'].includes(option)
     ) {
       throw new ProductionRetentionError('WOML_CLI_ARGUMENTS_INVALID', pruneUsage);
     }
     if (option === '--state') statePath = resolve(value);
     if (option === '--before') before = value;
+    if (option === '--artifact-policy') artifactPolicyPath = resolve(value);
   }
   if (before === undefined || (dryRun && compact)) {
     throw new ProductionRetentionError('WOML_CLI_ARGUMENTS_INVALID', pruneUsage);
@@ -126,6 +132,7 @@ export function parsePruneArguments(args: readonly string[]): PruneArguments {
     dryRun,
     compact,
     json,
+    ...(artifactPolicyPath === undefined ? {} : { artifactPolicyPath }),
   };
 }
 
@@ -162,8 +169,16 @@ async function assertStateDatabase(path: string): Promise<void> {
 
 export async function runProductionRetention(
   args: PruneArguments,
-  options: { readonly nativeCorePath?: string; readonly now?: Date } = {}
-): Promise<RustRetentionPlanV1 | RustRetentionExecutionV1> {
+  options: {
+    readonly nativeCorePath?: string;
+    readonly now?: Date;
+    readonly artifactAuthority?: ArtifactRuntimeAuthorityV1;
+    readonly artifactSecrets?: Readonly<Record<string, string>>;
+  } = {}
+): Promise<
+  | (RustRetentionPlanV1 & { readonly artifacts?: RustArtifactMaintenanceV1 })
+  | (RustRetentionExecutionV1 & { readonly artifacts?: RustArtifactMaintenanceV1 })
+> {
   await assertStateDatabase(args.statePath);
   const now = options.now ?? new Date();
   const policy = retentionPolicy(now, {
@@ -173,11 +188,22 @@ export async function runProductionRetention(
     identity: `cli:${args.before}`,
   });
   if (args.dryRun) {
-    return planRetentionWithRust(args.statePath, policy, now.toISOString(), {
+    const result = planRetentionWithRust(args.statePath, policy, now.toISOString(), {
       nativeCorePath: options.nativeCorePath,
     });
+    const artifacts = options.artifactAuthority === undefined
+      ? undefined
+      : maintainArtifactsWithRust(
+          args.statePath,
+          options.artifactAuthority,
+          options.artifactSecrets ?? {},
+          now.toISOString(),
+          true,
+          { nativeCorePath: options.nativeCorePath }
+        );
+    return { ...result, ...(artifacts === undefined ? {} : { artifacts }) };
   }
-  return executeRetentionWithRust(
+  const result = executeRetentionWithRust(
     args.statePath,
     policy,
     `lease_${randomUUID().replaceAll('-', '')}`,
@@ -186,6 +212,17 @@ export async function runProductionRetention(
     now.toISOString(),
     { nativeCorePath: options.nativeCorePath }
   );
+  const artifacts = options.artifactAuthority === undefined
+    ? undefined
+    : maintainArtifactsWithRust(
+        args.statePath,
+        options.artifactAuthority,
+        options.artifactSecrets ?? {},
+        now.toISOString(),
+        false,
+        { nativeCorePath: options.nativeCorePath }
+      );
+  return { ...result, ...(artifacts === undefined ? {} : { artifacts }) };
 }
 
 const DAY_MS = 24 * 60 * 60 * 1_000;
@@ -207,6 +244,8 @@ export function startAutomaticRetention(options: {
   readonly clearTimer?: (timer: RetentionTimer) => void;
   readonly onResult?: (execution: RustRetentionExecutionV1) => void;
   readonly onError?: (error: unknown) => void;
+  readonly artifactAuthority?: ArtifactRuntimeAuthorityV1;
+  readonly artifactSecrets?: Readonly<Record<string, string>>;
 }): AutomaticRetentionHandle {
   const configuration = options.configuration;
   if (configuration?.enabled !== true) {
@@ -219,9 +258,9 @@ export function startAutomaticRetention(options: {
   const next = nextRetentionTime(now(), hour);
   let timer: RetentionTimer | undefined;
   let closed = false;
-  let active: Promise<RustRetentionExecutionV1 | undefined> | undefined;
+  let active: Promise<(RustRetentionExecutionV1 & { readonly artifacts?: RustArtifactMaintenanceV1 }) | undefined> | undefined;
 
-  const runNow = (): Promise<RustRetentionExecutionV1 | undefined> => {
+  const runNow = (): Promise<(RustRetentionExecutionV1 & { readonly artifacts?: RustArtifactMaintenanceV1 }) | undefined> => {
     if (closed) return Promise.resolve(undefined);
     if (active !== undefined) return active;
     const current = now();
@@ -241,8 +280,22 @@ export function startAutomaticRetention(options: {
       { nativeCorePath: options.nativeCorePath }
     )
       .then(execution => {
-        options.onResult?.(execution);
-        return execution;
+        const artifacts = options.artifactAuthority === undefined
+          ? undefined
+          : maintainArtifactsWithRust(
+              options.statePath,
+              options.artifactAuthority,
+              options.artifactSecrets ?? {},
+              current.toISOString(),
+              false,
+              { nativeCorePath: options.nativeCorePath }
+            );
+        const combined = {
+          ...execution,
+          ...(artifacts === undefined ? {} : { artifacts }),
+        };
+        options.onResult?.(combined);
+        return combined;
       })
       .catch(error => {
         options.onError?.(error);

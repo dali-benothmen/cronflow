@@ -272,6 +272,19 @@ out-of-order replies, and generic failures. No generic protocol field changes.
 DA1 fixtures validate the complete Artifact v1 payload inside the unchanged
 Capability Call v1 schema.
 
+## DA7 and DA8 operational contracts
+
+- [Artifact Maintenance v1](../schemas/artifact-maintenance.v1.schema.json)
+  freezes body-free retention, integrity, orphan-collection, and live-store
+  measurements returned by `woml prune --json`.
+- [Backup Manifest v2](../schemas/backup-manifest.v2.schema.json) binds a
+  coherent SQLite snapshot to a fully verified content-addressed artifact
+  inventory while preserving Backup Manifest v1 for stores without artifacts.
+- [Artifact Backend v1](../schemas/artifact-backend.v1.schema.json) keeps local
+  and S3-compatible storage behind identical workflow semantics. S3 credential
+  values are resolved from the secret authority and never persisted in policy,
+  metadata, events, backup manifests, or diagnostics.
+
 ## Frozen DA0 decisions
 
 1. `services.artifacts` is separate from mutable `services.storage`.

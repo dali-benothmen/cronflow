@@ -39,6 +39,7 @@ async function contractValidators() {
     'artifacts.v1.schema.json',
     'artifact-operation-metadata.v1.schema.json',
     'artifact-operation-settlement.v1.schema.json',
+    'artifact-maintenance.v1.schema.json',
   ]) {
     ajv.addSchema(await json(resolve(schemaRoot, name)));
   }
@@ -54,6 +55,7 @@ async function contractValidators() {
     backend: get('https://woml.dev/schemas/artifact-backend/v1'),
     metadata: get('https://woml.dev/schemas/artifact-operation-metadata/v1'),
     settlement: get('https://woml.dev/schemas/artifact-operation-settlement/v1'),
+    maintenance: get('https://woml.dev/schemas/artifact-maintenance/v1'),
     capability: get('https://cronflow.dev/schemas/capability-call/v1'),
     capabilityFailure: get(
       'https://cronflow.dev/schemas/capability-call/v1#/$defs/failure'
@@ -172,6 +174,23 @@ describe('Frozen Durable Artifacts v1 contracts', () => {
       'succeeded',
       'interrupted',
     ]);
+  });
+
+  test('freezes body-free artifact retention and integrity measurements', async () => {
+    const validators = await contractValidators();
+    const reports = (await json(
+      resolve(fixtureRoot, 'maintenance.v1.json')
+    )) as JsonObject[];
+    for (const report of reports) {
+      expect(
+        validators.maintenance(report),
+        JSON.stringify(validators.maintenance.errors)
+      ).toBe(true);
+      const encoded = JSON.stringify(report);
+      for (const forbidden of ['name', 'path', 'contentType', 'body', 'credential']) {
+        expect(encoded).not.toContain(forbidden);
+      }
+    }
   });
 
   test('freezes every author-facing failure code and ambiguity classification', async () => {
