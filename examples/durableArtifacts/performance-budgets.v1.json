@@ -1,0 +1,8 @@
+{
+  "profile": "woml.durable-artifacts-performance-budgets/v1",
+  "streamBufferBytesMax": 65536,
+  "fixtureBytes": 8388608,
+  "streamingThroughputBytesPerSecondMin": 1048576,
+  "startupRecoveryMsMax": 5000,
+  "metadataInspectionMsMax": 1000
+}

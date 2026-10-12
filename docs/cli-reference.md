@@ -104,13 +104,27 @@ woml stop [--state <path>] [--json]
 
 - `inspect` is the live, colored terminal view of runtime and run health.
 - `list` filters recent durable runs.
-- `get` shows one redacted run, its steps, attempts, waits, and control flow.
+- `get` shows one redacted run, its steps, attempts, waits, control flow, and
+  bounded metadata for artifacts created by that run.
 - `cancel` records a durable cancellation request and propagates it through
   supervised work.
 - `stop` gracefully stops the background runtime that owns the selected store.
 
 Run and runtime inspection deliberately omit payloads, secrets, credentials,
 and operation keys.
+
+### Inspect and export durable artifacts
+
+```bash
+woml artifacts inspect <artifactId> [--state <path>] [--json]
+woml artifacts export <artifactId> --output <path> \
+  --artifact-policy <path> [--state <path>] [--json]
+```
+
+`inspect` returns name, size, digest prefix, status, retention, and provenance;
+it cannot read the body. `export` is the explicit, audited operator boundary
+for verified bytes. It requires the active artifact policy and refuses to
+overwrite an existing destination. Neither command creates a public URL.
 
 ### Follow logs
 
@@ -164,9 +178,9 @@ JSON output.
 ## Backup and retention
 
 ```bash
-woml backup <backup-directory> [--state <path>] [--json]
-woml restore <backup-directory> [--state <path>] [--replace] [--json]
-woml prune --before <duration> [--state <path>] [--dry-run] [--compact] [--json]
+woml backup <backup-directory> [--state <path>] [--artifact-policy <path>] [--json]
+woml restore <backup-directory> [--state <path>] [--artifact-policy <path>] [--replace] [--json]
+woml prune --before <duration> [--state <path>] [--artifact-policy <path>] [--dry-run] [--compact] [--json]
 ```
 
 - `backup` creates a coherent manifest and checksummed durable snapshot.

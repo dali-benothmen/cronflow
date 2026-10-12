@@ -75,6 +75,7 @@ import {
   listRunsWithRust,
   observeRuntimeWithRust,
   BackupOperationError,
+  ArtifactOperationError,
   RetentionOperationError,
   RunManagementError,
   RunInspectionError,
@@ -99,6 +100,11 @@ import {
   type RustRuntimeModuleArtifact,
   type RuntimeCapabilitiesV1,
   type StoredRunRequirementsV1,
+  exportArtifactWithRust,
+  inspectArtifactWithRust,
+  inspectRunArtifactsWithRust,
+  observeArtifactsWithRust,
+  type RustArtifactInspectionV1,
 } from './rust-executor';
 import {
   ApprovalServerBindError,
@@ -278,6 +284,14 @@ function getUsage(): string {
   return 'Usage: woml get <runId> [--state <path>] [--json]';
 }
 
+function artifactsUsage(): string {
+  return [
+    'Usage:',
+    '  woml artifacts inspect <artifactId> [--state <path>] [--json]',
+    '  woml artifacts export <artifactId> --output <path> --artifact-policy <path> [--state <path>] [--json]',
+  ].join('\n');
+}
+
 function cancelUsage(): string {
   return 'Usage: woml cancel <runId> [--state <path>] [--json]';
 }
@@ -308,7 +322,7 @@ function typesUsage(): string {
 }
 
 function usage(): string {
-  return `${runUsage()}\n${testUsage()}\n${logFollowUsage}\n${checkUsage()}\n${typesUsage()}\n${inspectUsage}\n${backupUsage}\n${restoreUsage}\n${pruneUsage}\n${listUsage()}\n${getUsage()}\n${cancelUsage()}\n${stopUsage()}\n${emitUsage()}\n${secretsUsage()}\n${providerDoctorUsage()}`;
+  return `${runUsage()}\n${testUsage()}\n${logFollowUsage}\n${checkUsage()}\n${typesUsage()}\n${inspectUsage}\n${artifactsUsage()}\n${backupUsage}\n${restoreUsage}\n${pruneUsage}\n${listUsage()}\n${getUsage()}\n${cancelUsage()}\n${stopUsage()}\n${emitUsage()}\n${secretsUsage()}\n${providerDoctorUsage()}`;
 }
 
 interface RunArguments {
@@ -635,6 +649,15 @@ interface RunGetArguments {
   readonly json: boolean;
 }
 
+interface ArtifactCommandArguments {
+  readonly operation: 'inspect' | 'export';
+  readonly artifactId: string;
+  readonly statePath: string;
+  readonly json: boolean;
+  readonly outputPath?: string;
+  readonly artifactPolicyPath?: string;
+}
+
 interface RunListArguments {
   readonly statePath: string;
   readonly json: boolean;
@@ -838,6 +861,63 @@ function parseRunGetArguments(
   };
 }
 
+function parseArtifactCommandArguments(
+  args: readonly string[]
+): ArtifactCommandArguments {
+  const [, operation, artifactId, ...options] = args;
+  if (
+    args[0] !== 'artifacts' ||
+    !['inspect', 'export'].includes(String(operation)) ||
+    artifactId === undefined ||
+    !/^artifact_[0-9a-hjkmnp-tv-z]{26}$/.test(artifactId)
+  ) {
+    throw new CliInputError('WOML_CLI_ARGUMENTS_INVALID', artifactsUsage());
+  }
+  let statePath = resolve('.woml/state.sqlite');
+  let json = false;
+  let outputPath: string | undefined;
+  let artifactPolicyPath: string | undefined;
+  const seen = new Set<string>();
+  for (let index = 0; index < options.length; index += 1) {
+    const option = options[index]!;
+    if (seen.has(option)) {
+      throw new CliInputError('WOML_CLI_ARGUMENTS_INVALID', artifactsUsage());
+    }
+    seen.add(option);
+    if (option === '--json') {
+      json = true;
+      continue;
+    }
+    const value = options[++index];
+    if (
+      value === undefined ||
+      value.startsWith('--') ||
+      !['--state', '--output', '--artifact-policy'].includes(option)
+    ) {
+      throw new CliInputError('WOML_CLI_ARGUMENTS_INVALID', artifactsUsage());
+    }
+    if (option === '--state') statePath = resolve(value);
+    if (option === '--output') outputPath = resolve(value);
+    if (option === '--artifact-policy') artifactPolicyPath = resolve(value);
+  }
+  if (
+    (operation === 'inspect' &&
+      (outputPath !== undefined || artifactPolicyPath !== undefined)) ||
+    (operation === 'export' &&
+      (outputPath === undefined || artifactPolicyPath === undefined))
+  ) {
+    throw new CliInputError('WOML_CLI_ARGUMENTS_INVALID', artifactsUsage());
+  }
+  return {
+    operation: operation as 'inspect' | 'export',
+    artifactId,
+    statePath,
+    json,
+    ...(outputPath === undefined ? {} : { outputPath }),
+    ...(artifactPolicyPath === undefined ? {} : { artifactPolicyPath }),
+  };
+}
+
 function runtimeCode(code: string): string {
   if (code === 'WOML_SCRIPT_NON_JSON_RESULT') return 'WOML_NON_JSON_RESULT';
   if (code.startsWith('WOML_SCRIPT_')) return 'WOML_SCRIPT_FAILED';
@@ -863,7 +943,24 @@ function formatRunList(list: RustRunListV1): string {
   return `${lines.join('\n')}\n`;
 }
 
-function formatRunInspection(inspection: RustRunInspectionV2): string {
+function formatArtifactInspection(inspection: RustArtifactInspectionV1): string {
+  return [
+    `Artifact: ${inspection.artifact.id}`,
+    `Name: ${inspection.artifact.name}`,
+    `Status: ${inspection.status}`,
+    `Size: ${inspection.artifact.size} bytes`,
+    `Digest: ${inspection.digestPrefix}…`,
+    `Content type: ${inspection.artifact.contentType}`,
+    `Retention: ${inspection.retentionMs} ms (expires ${inspection.expiresAt})`,
+    `Provenance: ${inspection.provenance.workflowId} / ${inspection.provenance.runId} / ${inspection.provenance.nodeId} / attempt ${inspection.provenance.attempt}`,
+  ].join('\n');
+}
+
+function formatRunInspection(
+  inspection: RustRunInspectionV2,
+  artifacts?: readonly RustArtifactInspectionV1[],
+  artifactsTruncated = false
+): string {
   const lines = [
     `Run: ${inspection.runId}`,
     `Workflow: ${inspection.workflowId}`,
@@ -914,6 +1011,18 @@ function formatRunInspection(inspection: RustRunInspectionV2): string {
     lines.push(
       `Warnings: ${inspection.warnings.map(warning => warning.code).join(', ')}`
     );
+  }
+  if (artifacts !== undefined && artifacts.length > 0) {
+    lines.push('Artifacts:');
+    for (const artifact of artifacts) {
+      lines.push(
+        `  ${artifact.artifact.name}: ${artifact.artifact.size} bytes · ${artifact.digestPrefix}… · ${artifact.status} · expires ${artifact.expiresAt}`
+      );
+      lines.push(
+        `    ${artifact.artifact.id} · ${artifact.provenance.nodeId} attempt ${artifact.provenance.attempt}`
+      );
+    }
+    if (artifactsTruncated) lines.push('  Additional artifacts were omitted from this bounded view.');
   }
   return `${lines.join('\n')}\n`;
 }
@@ -1209,6 +1318,9 @@ function formatError(
 
   if (error instanceof ArtifactPolicyError) {
     return `WOML artifact policy error [${error.code}]: ${error.message}`;
+  }
+  if (error instanceof ArtifactOperationError) {
+    return `WOML artifact error [${error.code}]: ${error.message}`;
   }
 
   if (error instanceof RuntimeControlError) {
@@ -3451,6 +3563,7 @@ async function executeOneShot(
   if (
     args.resumeRunId !== undefined &&
     !hasApproval &&
+    args.runtimeCapabilities?.artifacts === undefined &&
     workflow.schemaVersion !== 6 &&
     workflow.schemaVersion !== 8 &&
     workflow.schemaVersion !== 9 &&
@@ -3481,6 +3594,7 @@ async function executeOneShot(
     return;
   }
   if (
+    args.runtimeCapabilities?.artifacts !== undefined ||
     workflow.schemaVersion === 6 ||
     workflow.schemaVersion === 8 ||
     workflow.schemaVersion === 9 ||
@@ -4501,6 +4615,15 @@ async function activateWorkflows(
         }
       );
       runtimeId = runtime.runtimeId;
+      const artifactAuthority = args.runtimeCapabilities?.artifacts === undefined
+        ? undefined
+        : { artifacts: args.runtimeCapabilities.artifacts };
+      const artifactObservationSecrets = artifactAuthority === undefined
+        ? undefined
+        : await resolvedNamedSecrets(
+            artifactPolicySecretNames(artifactAuthority),
+            store
+          );
       profileSync('runtime', 'runtime.initialize_observability', measurements => {
         if (measurements !== undefined) {
           measurements.counts.workflows = productionSources.length;
@@ -4567,6 +4690,15 @@ async function activateWorkflows(
                 },
               ]
             : []),
+          ...(args.runtimeCapabilities?.artifacts === undefined
+            ? []
+            : [
+                {
+                  name: `artifact-${args.runtimeCapabilities.artifacts.policy.backend.kind}`,
+                  kind: 'store' as const,
+                  status: 'ready' as const,
+                },
+              ]),
         ];
         observability = new RuntimeObservability({
           runtimeInstanceId: runtime.runtimeId,
@@ -4590,6 +4722,17 @@ async function activateWorkflows(
             observeRuntimeWithRust(args.statePath, {
               nativeCorePath: dependencies.nativeCorePath,
             }),
+          ...(artifactAuthority === undefined || artifactObservationSecrets === undefined
+            ? {}
+            : {
+                observeArtifacts: () =>
+                  observeArtifactsWithRust(
+                    args.statePath,
+                    artifactAuthority,
+                    artifactObservationSecrets,
+                    { nativeCorePath: dependencies.nativeCorePath }
+                  ),
+              }),
           storeSize: () => durableStoreSize(args.statePath),
           logFormat: args.logFormat,
           emitLog:
@@ -5722,6 +5865,61 @@ async function runCliUnprofiled(
     });
   }
 
+  if (args[0] === 'artifacts') {
+    try {
+      const parsed = parseArtifactCommandArguments(args);
+      if (parsed.operation === 'inspect') {
+        const inspection = inspectArtifactWithRust(
+          parsed.statePath,
+          parsed.artifactId,
+          { nativeCorePath: dependencies.nativeCorePath }
+        );
+        io.stdout(
+          parsed.json
+            ? `${JSON.stringify(inspection)}\n`
+            : `${formatArtifactInspection(inspection)}\n`
+        );
+        return 0;
+      }
+      const authority = await loadArtifactPolicy(
+        parsed.artifactPolicyPath!,
+        'foreground'
+      );
+      const secrets = await resolvedNamedSecrets(
+        artifactPolicySecretNames(authority),
+        dependencies.createSecretStore()
+      );
+      const result = exportArtifactWithRust(
+        parsed.statePath,
+        parsed.outputPath!,
+        parsed.artifactId,
+        authority,
+        secrets,
+        { nativeCorePath: dependencies.nativeCorePath }
+      );
+      io.stdout(
+        parsed.json
+          ? `${JSON.stringify(result)}\n`
+          : [
+              'WOML artifact exported and verified.',
+              `Artifact: ${result.artifactId}`,
+              `Name: ${result.name}`,
+              `Size: ${result.size} bytes`,
+              `Digest: ${result.digestPrefix}…`,
+              `Audit: ${result.auditId}`,
+            ].join('\n') + '\n'
+      );
+      return 0;
+    } catch (error) {
+      if (error instanceof CliInputError && error.message === artifactsUsage()) {
+        io.stderr(`${artifactsUsage()}\n`);
+        return 2;
+      }
+      io.stderr(`${formatError(error)}\n`);
+      return error instanceof CliInputError ? 2 : 1;
+    }
+  }
+
   if (args[0] === 'backup') {
     try {
       const parsed = parseBackupArguments(args);
@@ -5938,8 +6136,24 @@ async function runCliUnprofiled(
       const result = inspectRunV2WithRust(get.statePath, get.runId, {
         nativeCorePath: dependencies.nativeCorePath,
       });
+      const artifactInspection = inspectRunArtifactsWithRust(
+        get.statePath,
+        get.runId,
+        { nativeCorePath: dependencies.nativeCorePath }
+      );
+      const publicResult = {
+        ...result,
+        profile: 'woml.run-inspection/v7' as const,
+        artifacts: artifactInspection,
+      };
       io.stdout(
-        get.json ? `${JSON.stringify(result)}\n` : formatRunInspection(result)
+        get.json
+          ? `${JSON.stringify(publicResult)}\n`
+          : formatRunInspection(
+              result,
+              artifactInspection.artifacts,
+              artifactInspection.truncated
+            )
       );
       return 0;
     } catch (error) {

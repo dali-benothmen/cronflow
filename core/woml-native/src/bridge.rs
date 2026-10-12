@@ -15,8 +15,9 @@ use serde_json::{Map, Value};
 use woml_engine::model::ValueExpression;
 use woml_engine::{
   create_online_backup, execute_retention, execute_workflow, execute_workflow_durable,
-  execute_workflow_durable_outcome, export_artifact_backup, inspect_backup_store,
-  last_retention_result, maintain_artifacts, plan_retention, prepare_restored_store,
+  execute_workflow_durable_outcome, export_artifact, export_artifact_backup, inspect_artifact,
+  inspect_backup_store, inspect_run_artifacts, last_retention_result, maintain_artifacts,
+  observe_artifacts, plan_retention, prepare_restored_store,
   recent_run_presentations_from_store_v1, record_verified_backup, recover_durable_runs,
   resolve_human_approval_durable, restore_artifact_backup, resume_workflow_durable,
   resume_workflow_durable_any_outcome, resume_workflow_durable_outcome,
@@ -2358,6 +2359,75 @@ pub fn maintain_woml_artifacts(
   .map_err(|failure| napi::Error::from_reason(format!("{}: {}", failure.code, failure.message)))?;
   serde_json::to_string(&result).map_err(|error| {
     napi::Error::from_reason(format!("Could not encode artifact maintenance: {error}"))
+  })
+}
+
+#[napi]
+pub fn inspect_woml_artifact(
+  event_store_path: String,
+  artifact_id: String,
+) -> napi::Result<String> {
+  let result =
+    inspect_artifact(PathBuf::from(event_store_path), &artifact_id).map_err(|failure| {
+      napi::Error::from_reason(format!("{}: {}", failure.code, failure.message))
+    })?;
+  serde_json::to_string(&result).map_err(|error| {
+    napi::Error::from_reason(format!("Could not encode artifact inspection: {error}"))
+  })
+}
+
+#[napi]
+pub fn inspect_woml_run_artifacts(
+  event_store_path: String,
+  run_id: String,
+) -> napi::Result<String> {
+  let result =
+    inspect_run_artifacts(PathBuf::from(event_store_path), &run_id).map_err(|failure| {
+      napi::Error::from_reason(format!("{}: {}", failure.code, failure.message))
+    })?;
+  serde_json::to_string(&result).map_err(|error| {
+    napi::Error::from_reason(format!("Could not encode run artifact inspection: {error}"))
+  })
+}
+
+#[napi]
+pub fn export_woml_artifact(
+  event_store_path: String,
+  destination_path: String,
+  artifact_id: String,
+  policy_json: String,
+  mode_json: String,
+  resolved_secrets_json: String,
+) -> napi::Result<String> {
+  let (policy, mode, secrets) =
+    decode_artifact_maintenance_authority(&policy_json, &mode_json, &resolved_secrets_json)?;
+  let result = export_artifact(
+    PathBuf::from(event_store_path),
+    PathBuf::from(destination_path),
+    &artifact_id,
+    policy,
+    mode,
+    &secrets,
+  )
+  .map_err(|failure| napi::Error::from_reason(format!("{}: {}", failure.code, failure.message)))?;
+  serde_json::to_string(&result)
+    .map_err(|error| napi::Error::from_reason(format!("Could not encode artifact export: {error}")))
+}
+
+#[napi]
+pub fn observe_woml_artifacts(
+  event_store_path: String,
+  policy_json: String,
+  mode_json: String,
+  resolved_secrets_json: String,
+) -> napi::Result<String> {
+  let (policy, mode, secrets) =
+    decode_artifact_maintenance_authority(&policy_json, &mode_json, &resolved_secrets_json)?;
+  let result = observe_artifacts(PathBuf::from(event_store_path), policy, mode, &secrets).map_err(
+    |failure| napi::Error::from_reason(format!("{}: {}", failure.code, failure.message)),
+  )?;
+  serde_json::to_string(&result).map_err(|error| {
+    napi::Error::from_reason(format!("Could not encode artifact observation: {error}"))
   })
 }
 

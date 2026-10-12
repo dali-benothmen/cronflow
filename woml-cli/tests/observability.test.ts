@@ -27,6 +27,7 @@ async function validators() {
     stream: ajv.compile(await schema('runtime-operations-stream.v1.schema.json')),
     log: ajv.compile(await schema('runtime-log-record.v1.schema.json')),
     metric: ajv.compile(await schema('runtime-metrics.v1.schema.json')),
+    metricV2: ajv.compile(await schema('runtime-metrics.v2.schema.json')),
     health: ajv.compile(await schema('runtime-health.v1.schema.json')),
   };
 }
@@ -59,6 +60,7 @@ function fixture(options: {
   logs?: string[];
   runs?: RustRunListV1;
   now?: () => number;
+  artifacts?: boolean;
 } = {}) {
   return new RuntimeObservability({
     runtimeInstanceId: 'runtime_observability',
@@ -72,6 +74,23 @@ function fixture(options: {
     ],
     listRuns: () => options.runs ?? runs,
     storeSize: async () => 4096,
+    ...(options.artifacts !== true
+      ? {}
+      : {
+          observeArtifacts: () => ({
+            profile: 'woml.artifact-observation/v1' as const,
+            backend: 'local' as const,
+            backendHealthy: true,
+            transfers: 4,
+            transferredBytes: 8192,
+            transferDurationMs: 120,
+            failedTransfers: 1,
+            corruptArtifacts: 0,
+            orphanBlobs: 0,
+            liveArtifacts: 2,
+            liveBytes: 4096,
+          }),
+        }),
     logFormat: 'json',
     emitLog: text => options.logs?.push(text),
     now: options.now,
@@ -217,6 +236,29 @@ describe('Frozen observability artifacts', () => {
     });
     expect(await observed.prometheusMetrics()).toContain(
       'woml_for_each_iterations_completed_total 19'
+    );
+  });
+
+  test('adds only versioned body-free artifact metrics when the capability is active', async () => {
+    const validate = await validators();
+    const observed = fixture({ artifacts: true });
+    const metrics = await observed.metrics();
+    const artifactMetrics = metrics.filter(
+      metric => (metric as { profile?: string }).profile === 'woml.runtime-metrics/v2'
+    );
+    expect(artifactMetrics).toHaveLength(9);
+    for (const metric of artifactMetrics) {
+      expect(validate.metricV2(metric), validate.metricV2.errors?.join('\n')).toBe(true);
+      const encoded = JSON.stringify(metric);
+      for (const forbidden of [
+        'artifactId', 'runId', 'artifactName', 'sha256', 'path', 'url', 'credential',
+        'body',
+      ]) {
+        expect(encoded).not.toContain(forbidden);
+      }
+    }
+    expect(await observed.prometheusMetrics()).toContain(
+      'woml_artifact_backend_healthy{backend="local"} 1'
     );
   });
 

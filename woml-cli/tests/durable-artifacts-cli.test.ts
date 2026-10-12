@@ -181,7 +181,62 @@ describe('Durable Artifacts local runtime journey', () => {
     const durableHistory = durableEvents.map(({ eventJson }) => eventJson).join('\n');
     expect(durableHistory).not.toContain(join(temporaryDirectory, 'materialized'));
     expect(durableHistory).not.toContain(join(temporaryDirectory, 'artifact-bytes'));
+    const runId = (
+      database.query('SELECT run_id AS runId FROM woml_run_summaries LIMIT 1').get() as {
+        runId: string;
+      }
+    ).runId;
     database.close();
+
+    const inspected = run(
+      'artifacts', 'inspect', result.artifact.id,
+      '--state', state,
+      '--json'
+    );
+    expect(inspected.exitCode, inspected.stderr?.toString() ?? '').toBe(0);
+    expect(JSON.parse(inspected.stdout?.toString() ?? '')).toMatchObject({
+      profile: 'woml.artifact-inspection/v1',
+      artifact: {
+        id: result.artifact.id,
+        name: 'release-report',
+        size: 13,
+      },
+      digestPrefix: result.artifact.sha256.slice(0, 12),
+      provenance: {
+        workflowId: 'artifact-cli',
+        runId,
+        nodeId: 'preserve',
+        attempt: 1,
+      },
+    });
+    const inspectedRun = run('get', runId, '--state', state, '--json');
+    expect(inspectedRun.exitCode, inspectedRun.stderr?.toString() ?? '').toBe(0);
+    expect(JSON.parse(inspectedRun.stdout?.toString() ?? '')).toMatchObject({
+      profile: 'woml.run-inspection/v7',
+      runId,
+      artifacts: {
+        profile: 'woml.artifact-run-inspection/v1',
+        truncated: false,
+        artifacts: [{ artifact: { id: result.artifact.id } }],
+      },
+    });
+    const exportedPath = join(temporaryDirectory, 'operator-export.txt');
+    const exported = run(
+      'artifacts', 'export', result.artifact.id,
+      '--output', exportedPath,
+      '--artifact-policy', policy,
+      '--state', state,
+      '--json'
+    );
+    expect(exported.exitCode, exported.stderr?.toString() ?? '').toBe(0);
+    expect(JSON.parse(exported.stdout?.toString() ?? '')).toMatchObject({
+      profile: 'woml.artifact-export/v1',
+      artifactId: result.artifact.id,
+      size: 13,
+      verified: true,
+    });
+    expect(await Bun.file(exportedPath).text()).toBe('durable bytes');
+    expect(exported.stdout?.toString() ?? '').not.toContain(exportedPath);
 
     const backupDirectory = join(temporaryDirectory, 'backup');
     const backup = run(

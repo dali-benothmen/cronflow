@@ -1,0 +1,202 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://woml.dev/schemas/run-inspection/v7",
+  "title": "WOML Artifact-Aware Safe Run Inspection v7",
+  "description": "Bounded run inspection enriched with immutable artifact metadata and no artifact bodies or backend locations.",
+  "x-status": "durable-artifacts-da9-frozen",
+  "x-forbiddenFields": ["context", "payload", "result", "path", "url", "signedUrl", "credentials", "body", "secret", "stack", "operationKey", "idempotencyKey"],
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["profile", "runId", "workflowId", "status", "businessOutcome", "lifecycleStatus", "hooks", "warnings", "cancellation", "artifacts"],
+  "properties": {
+    "profile": { "const": "woml.run-inspection/v7" },
+    "runId": { "$ref": "#/$defs/runId" },
+    "workflowId": { "$ref": "#/$defs/workflowId" },
+    "status": { "enum": ["not_started", "queued", "running", "waiting", "cancelling", "finalizing", "succeeded", "failed", "cancelled"] },
+    "businessOutcome": { "enum": ["undecided", "succeeded", "failed", "cancelled"] },
+    "lifecycleStatus": { "enum": ["idle", "running", "finalizing", "completed_with_warnings", "completed"] },
+    "hooks": {
+      "type": "array",
+      "maxItems": 1024,
+      "items": { "$ref": "#/$defs/hook" }
+    },
+    "warnings": {
+      "type": "array",
+      "maxItems": 128,
+      "items": { "$ref": "#/$defs/warning" }
+    },
+    "cancellation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["requested"],
+      "properties": {
+        "requested": { "type": "boolean" },
+        "requestId": { "type": "string", "minLength": 1, "maxLength": 320 }
+      }
+    },
+    "policy": { "$ref": "#/$defs/policy" },
+    "forks": { "$ref": "#/$defs/forks" },
+    "reusableDefinitions": { "$ref": "#/$defs/reusableDefinitions" },
+    "forEach": { "$ref": "#/$defs/forEach" },
+    "artifacts": { "$ref": "https://woml.dev/schemas/artifact-run-inspection/v1" }
+  },
+  "$defs": {
+    "runId": { "type": "string", "minLength": 1, "maxLength": 320 },
+    "workflowId": { "type": "string", "minLength": 1, "maxLength": 256 },
+    "publicId": { "type": "string", "pattern": "^[a-z][A-Za-z0-9]*$" },
+    "count": { "type": "integer", "minimum": 0 },
+    "boundedCount": { "type": "integer", "minimum": 0, "maximum": 10000 },
+    "hook": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["hookId", "subjectKind", "subjectId", "status", "failedActions"],
+      "properties": {
+        "hookId": { "type": "string", "minLength": 1, "maxLength": 160 },
+        "subjectKind": { "enum": ["workflow", "step"] },
+        "subjectId": { "type": "string", "minLength": 1, "maxLength": 320 },
+        "status": { "enum": ["requested", "running", "completed", "completed_with_warnings"] },
+        "failedActions": { "type": "integer", "minimum": 0 }
+      }
+    },
+    "warning": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["hookId", "actionId", "code"],
+      "properties": {
+        "hookId": { "type": "string", "minLength": 1, "maxLength": 160 },
+        "actionId": { "type": "string", "minLength": 1, "maxLength": 320 },
+        "stepId": { "type": "string", "minLength": 1, "maxLength": 320 },
+        "provider": { "type": "string", "minLength": 1, "maxLength": 128 },
+        "destination": { "type": "string", "minLength": 1, "maxLength": 320 },
+        "code": { "type": "string", "minLength": 1, "maxLength": 160 }
+      }
+    },
+    "policy": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["queue"],
+      "properties": {
+        "queue": { "type": "string", "minLength": 1, "maxLength": 128 },
+        "waitingFor": { "enum": ["concurrency", "rate_limit"] },
+        "eligibleAt": { "type": "string", "format": "date-time" },
+        "timeoutAt": { "type": "string", "format": "date-time" }
+      }
+    },
+    "forkCounts": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["opened", "active", "waiting", "succeeded", "failed", "cancelled"],
+      "properties": {
+        "opened": { "$ref": "#/$defs/count" },
+        "active": { "$ref": "#/$defs/count" },
+        "waiting": { "$ref": "#/$defs/count" },
+        "succeeded": { "$ref": "#/$defs/count" },
+        "failed": { "$ref": "#/$defs/count" },
+        "cancelled": { "$ref": "#/$defs/count" }
+      }
+    },
+    "forks": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["counts", "items"],
+      "properties": {
+        "counts": { "$ref": "#/$defs/forkCounts" },
+        "items": { "type": "array", "maxItems": 10000, "items": { "$ref": "#/$defs/fork" } }
+      }
+    },
+    "fork": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["forkId", "status", "join", "branches"],
+      "properties": {
+        "forkId": { "$ref": "#/$defs/publicId" },
+        "status": { "enum": ["active", "waiting", "succeeded", "failed", "cancelled"] },
+        "join": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["mode", "branchIds", "status"],
+          "properties": {
+            "mode": { "enum": ["all", "selected", "none"] },
+            "branchIds": { "type": "array", "uniqueItems": true, "items": { "$ref": "#/$defs/publicId" } },
+            "status": { "enum": ["pending", "succeeded", "failed", "cancelled"] }
+          }
+        },
+        "branches": { "$ref": "#/$defs/forkCounts" }
+      }
+    },
+    "reusableCounts": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["pending", "running", "succeeded", "failed", "cancelled", "completedWithWarnings"],
+      "properties": {
+        "pending": { "$ref": "#/$defs/count" },
+        "running": { "$ref": "#/$defs/count" },
+        "succeeded": { "$ref": "#/$defs/count" },
+        "failed": { "$ref": "#/$defs/count" },
+        "cancelled": { "$ref": "#/$defs/count" },
+        "completedWithWarnings": { "$ref": "#/$defs/count" }
+      }
+    },
+    "reusableDefinitions": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["counts", "items"],
+      "properties": {
+        "counts": { "$ref": "#/$defs/reusableCounts" },
+        "items": { "type": "array", "maxItems": 256, "items": { "$ref": "#/$defs/reusableItem" } }
+      }
+    },
+    "reusableItem": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["invocationId", "alias", "definitionDigestPrefix", "kind", "status", "lifecycleStatus"],
+      "properties": {
+        "invocationId": { "type": "string", "minLength": 1, "maxLength": 320 },
+        "alias": { "type": "string", "pattern": "^[a-z][a-z0-9]*(?:-[a-z0-9]+)*$" },
+        "definitionDigestPrefix": { "type": "string", "pattern": "^[a-f0-9]{12}$" },
+        "kind": { "enum": ["step", "notification-provider"] },
+        "status": { "enum": ["pending", "running", "succeeded", "failed", "cancelled"] },
+        "lifecycleStatus": { "enum": ["idle", "running", "completed", "completed_with_warnings"] }
+      }
+    },
+    "forEachCounts": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["opened", "active", "succeeded", "failed", "cancelled"],
+      "properties": {
+        "opened": { "$ref": "#/$defs/boundedCount" },
+        "active": { "$ref": "#/$defs/boundedCount" },
+        "succeeded": { "$ref": "#/$defs/boundedCount" },
+        "failed": { "$ref": "#/$defs/boundedCount" },
+        "cancelled": { "$ref": "#/$defs/boundedCount" }
+      }
+    },
+    "forEach": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["counts", "items"],
+      "properties": {
+        "counts": { "$ref": "#/$defs/forEachCounts" },
+        "items": { "type": "array", "maxItems": 10000, "items": { "$ref": "#/$defs/forEachItem" } }
+      }
+    },
+    "forEachItem": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["forEachId", "status", "total", "succeeded", "failed", "skipped", "active", "pending", "concurrency"],
+      "properties": {
+        "forEachId": { "$ref": "#/$defs/publicId" },
+        "status": { "enum": ["active", "succeeded", "failed", "cancelled"] },
+        "total": { "$ref": "#/$defs/boundedCount" },
+        "succeeded": { "$ref": "#/$defs/boundedCount" },
+        "failed": { "$ref": "#/$defs/boundedCount" },
+        "skipped": { "$ref": "#/$defs/boundedCount" },
+        "active": { "$ref": "#/$defs/boundedCount" },
+        "pending": { "$ref": "#/$defs/boundedCount" },
+        "concurrency": { "type": "integer", "minimum": 1, "maximum": 64 },
+        "failedIndex": { "type": "integer", "minimum": 0, "maximum": 9999 },
+        "failedNodeId": { "type": "string", "minLength": 1, "maxLength": 320 }
+      }
+    }
+  }
+}

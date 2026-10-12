@@ -588,6 +588,62 @@ export interface RustArtifactBackupInventoryV1 {
   readonly verified: true;
 }
 
+export interface RustArtifactInspectionV1 {
+  readonly profile: 'woml.artifact-inspection/v1';
+  readonly artifact: {
+    readonly contract: 'woml.artifact-reference';
+    readonly contractVersion: 1;
+    readonly id: string;
+    readonly name: string;
+    readonly size: number;
+    readonly sha256: string;
+    readonly contentType: string;
+  };
+  readonly digestPrefix: string;
+  readonly status: 'available' | 'quarantined' | 'expired' | 'corrupt' | 'deleted';
+  readonly createdAt: string;
+  readonly expiresAt: string;
+  readonly retentionMs: number;
+  readonly provenance: {
+    readonly workflowId: string;
+    readonly runId: string;
+    readonly nodeId: string;
+    readonly attempt: number;
+  };
+}
+
+export interface RustArtifactRunInspectionV1 {
+  readonly profile: 'woml.artifact-run-inspection/v1';
+  readonly runId: string;
+  readonly artifacts: readonly RustArtifactInspectionV1[];
+  readonly truncated: boolean;
+}
+
+export interface RustArtifactExportV1 {
+  readonly profile: 'woml.artifact-export/v1';
+  readonly auditId: string;
+  readonly artifactId: string;
+  readonly name: string;
+  readonly size: number;
+  readonly digestPrefix: string;
+  readonly exportedAt: string;
+  readonly verified: true;
+}
+
+export interface RustArtifactObservationV1 {
+  readonly profile: 'woml.artifact-observation/v1';
+  readonly backend: 'local' | 's3';
+  readonly backendHealthy: boolean;
+  readonly transfers: number;
+  readonly transferredBytes: number;
+  readonly transferDurationMs: number;
+  readonly failedTransfers: number;
+  readonly corruptArtifacts: number;
+  readonly orphanBlobs: number;
+  readonly liveArtifacts: number;
+  readonly liveBytes: number;
+}
+
 export interface RustLifecycleWarning {
   readonly hookId: string;
   readonly actionId: string;
@@ -752,6 +808,16 @@ export class RetentionOperationError extends Error {
   constructor(code: string, message: string) {
     super(message);
     this.name = 'RetentionOperationError';
+    this.code = code;
+  }
+}
+
+export class ArtifactOperationError extends Error {
+  readonly code: string;
+
+  constructor(code: string, message: string) {
+    super(message);
+    this.name = 'ArtifactOperationError';
     this.code = code;
   }
 }
@@ -988,6 +1054,28 @@ interface NativeCore {
     resolvedSecretsJson: string,
     now: string,
     dryRun: boolean
+  ) => string;
+  readonly inspectWomlArtifact?: (
+    eventStorePath: string,
+    artifactId: string
+  ) => string;
+  readonly inspectWomlRunArtifacts?: (
+    eventStorePath: string,
+    runId: string
+  ) => string;
+  readonly exportWomlArtifact?: (
+    eventStorePath: string,
+    destinationPath: string,
+    artifactId: string,
+    policyJson: string,
+    modeJson: string,
+    resolvedSecretsJson: string
+  ) => string;
+  readonly observeWomlArtifacts?: (
+    eventStorePath: string,
+    policyJson: string,
+    modeJson: string,
+    resolvedSecretsJson: string
   ) => string;
   readonly exportWomlArtifactBackup?: (
     eventStorePath: string,
@@ -3630,6 +3718,209 @@ export function maintainArtifactsWithRust(
     );
   }
   return value as unknown as RustArtifactMaintenanceV1;
+}
+
+function artifactOperationFailure(error: unknown, fallbackCode: string): never {
+  if (error instanceof ArtifactOperationError) throw error;
+  const message = error instanceof Error ? error.message : 'Artifact operation failed.';
+  const code = message.match(/\b(WOML_[A-Z0-9_]+):/)?.[1] ?? fallbackCode;
+  throw new ArtifactOperationError(code, message);
+}
+
+function artifactInspection(value: unknown): RustArtifactInspectionV1 {
+  if (
+    !record(value) ||
+    !exactKeys(value, [
+      'profile', 'artifact', 'digestPrefix', 'status', 'createdAt', 'expiresAt',
+      'retentionMs', 'provenance',
+    ]) ||
+    value.profile !== 'woml.artifact-inspection/v1' ||
+    !record(value.artifact) ||
+    !exactKeys(value.artifact, [
+      'contract', 'contractVersion', 'id', 'name', 'size', 'sha256', 'contentType',
+    ]) ||
+    value.artifact.contract !== 'woml.artifact-reference' ||
+    value.artifact.contractVersion !== 1 ||
+    typeof value.artifact.id !== 'string' ||
+    !/^artifact_[0-9a-hjkmnp-tv-z]{26}$/.test(value.artifact.id) ||
+    typeof value.artifact.name !== 'string' ||
+    !count(value.artifact.size) ||
+    typeof value.artifact.sha256 !== 'string' ||
+    !/^[0-9a-f]{64}$/.test(value.artifact.sha256) ||
+    typeof value.artifact.contentType !== 'string' ||
+    typeof value.digestPrefix !== 'string' ||
+    !/^[0-9a-f]{12}$/.test(value.digestPrefix) ||
+    !['available', 'quarantined', 'expired', 'corrupt', 'deleted'].includes(String(value.status)) ||
+    !dateTime(value.createdAt) ||
+    !dateTime(value.expiresAt) ||
+    !count(value.retentionMs) ||
+    !record(value.provenance) ||
+    !exactKeys(value.provenance, ['workflowId', 'runId', 'nodeId', 'attempt']) ||
+    typeof value.provenance.workflowId !== 'string' ||
+    typeof value.provenance.runId !== 'string' ||
+    typeof value.provenance.nodeId !== 'string' ||
+    !count(value.provenance.attempt)
+  ) {
+    throw new ArtifactOperationError(
+      'WOML_ARTIFACT_INSPECTION_INVALID',
+      'The native core returned invalid Artifact Inspection v1 data.'
+    );
+  }
+  return value as unknown as RustArtifactInspectionV1;
+}
+
+export function inspectArtifactWithRust(
+  eventStorePath: string,
+  artifactId: string,
+  options: Pick<RustExecutorOptions, 'nativeCorePath'> = {}
+): RustArtifactInspectionV1 {
+  const native = loadNativeCore(options.nativeCorePath ?? defaultNativeCorePath());
+  if (typeof native.inspectWomlArtifact !== 'function') {
+    throw new ArtifactOperationError(
+      'WOML_ARTIFACT_INSPECTION_UNAVAILABLE',
+      'The native core does not expose artifact inspection; rebuild the Rust addon.'
+    );
+  }
+  try {
+    return artifactInspection(JSON.parse(native.inspectWomlArtifact(eventStorePath, artifactId)));
+  } catch (error) {
+    artifactOperationFailure(error, 'WOML_ARTIFACT_INSPECTION_FAILED');
+  }
+}
+
+export function inspectRunArtifactsWithRust(
+  eventStorePath: string,
+  runId: string,
+  options: Pick<RustExecutorOptions, 'nativeCorePath'> = {}
+): RustArtifactRunInspectionV1 {
+  const native = loadNativeCore(options.nativeCorePath ?? defaultNativeCorePath());
+  if (typeof native.inspectWomlRunArtifacts !== 'function') {
+    throw new ArtifactOperationError(
+      'WOML_ARTIFACT_INSPECTION_UNAVAILABLE',
+      'The native core does not expose run artifact inspection; rebuild the Rust addon.'
+    );
+  }
+  try {
+    const value: unknown = JSON.parse(native.inspectWomlRunArtifacts(eventStorePath, runId));
+    if (
+      !record(value) ||
+      !exactKeys(value, ['profile', 'runId', 'artifacts', 'truncated']) ||
+      value.profile !== 'woml.artifact-run-inspection/v1' ||
+      value.runId !== runId ||
+      !Array.isArray(value.artifacts) ||
+      value.artifacts.length > 100 ||
+      typeof value.truncated !== 'boolean'
+    ) {
+      throw new ArtifactOperationError(
+        'WOML_ARTIFACT_INSPECTION_INVALID',
+        'The native core returned invalid run artifact inspection data.'
+      );
+    }
+    return {
+      profile: 'woml.artifact-run-inspection/v1',
+      runId,
+      artifacts: value.artifacts.map(artifactInspection),
+      truncated: value.truncated,
+    };
+  } catch (error) {
+    artifactOperationFailure(error, 'WOML_ARTIFACT_INSPECTION_FAILED');
+  }
+}
+
+export function exportArtifactWithRust(
+  eventStorePath: string,
+  destinationPath: string,
+  artifactId: string,
+  authority: ArtifactRuntimeAuthorityV1,
+  resolvedSecrets: Readonly<Record<string, string>>,
+  options: Pick<RustExecutorOptions, 'nativeCorePath'> = {}
+): RustArtifactExportV1 {
+  const native = loadNativeCore(options.nativeCorePath ?? defaultNativeCorePath());
+  if (typeof native.exportWomlArtifact !== 'function') {
+    throw new ArtifactOperationError(
+      'WOML_ARTIFACT_EXPORT_UNAVAILABLE',
+      'The native core does not expose artifact export; rebuild the Rust addon.'
+    );
+  }
+  try {
+    const value: unknown = JSON.parse(native.exportWomlArtifact(
+      eventStorePath,
+      destinationPath,
+      artifactId,
+      JSON.stringify(authority.artifacts.policy),
+      JSON.stringify(authority.artifacts.mode),
+      JSON.stringify(resolvedSecrets)
+    ));
+    if (
+      !record(value) ||
+      !exactKeys(value, [
+        'profile', 'auditId', 'artifactId', 'name', 'size', 'digestPrefix',
+        'exportedAt', 'verified',
+      ]) ||
+      value.profile !== 'woml.artifact-export/v1' ||
+      typeof value.auditId !== 'string' ||
+      value.artifactId !== artifactId ||
+      typeof value.name !== 'string' ||
+      !count(value.size) ||
+      typeof value.digestPrefix !== 'string' ||
+      !/^[0-9a-f]{12}$/.test(value.digestPrefix) ||
+      !dateTime(value.exportedAt) ||
+      value.verified !== true
+    ) {
+      throw new ArtifactOperationError(
+        'WOML_ARTIFACT_EXPORT_INVALID',
+        'The native core returned invalid Artifact Export v1 data.'
+      );
+    }
+    return value as unknown as RustArtifactExportV1;
+  } catch (error) {
+    artifactOperationFailure(error, 'WOML_ARTIFACT_EXPORT_FAILED');
+  }
+}
+
+export function observeArtifactsWithRust(
+  eventStorePath: string,
+  authority: ArtifactRuntimeAuthorityV1,
+  resolvedSecrets: Readonly<Record<string, string>>,
+  options: Pick<RustExecutorOptions, 'nativeCorePath'> = {}
+): RustArtifactObservationV1 {
+  const native = loadNativeCore(options.nativeCorePath ?? defaultNativeCorePath());
+  if (typeof native.observeWomlArtifacts !== 'function') {
+    throw new ArtifactOperationError(
+      'WOML_ARTIFACT_OBSERVATION_UNAVAILABLE',
+      'The native core does not expose artifact observation; rebuild the Rust addon.'
+    );
+  }
+  try {
+    const value: unknown = JSON.parse(native.observeWomlArtifacts(
+      eventStorePath,
+      JSON.stringify(authority.artifacts.policy),
+      JSON.stringify(authority.artifacts.mode),
+      JSON.stringify(resolvedSecrets)
+    ));
+    const numeric = [
+      'transfers', 'transferredBytes', 'transferDurationMs', 'failedTransfers',
+      'corruptArtifacts', 'orphanBlobs', 'liveArtifacts', 'liveBytes',
+    ];
+    if (
+      !record(value) ||
+      !exactKeys(value, [
+        'profile', 'backend', 'backendHealthy', ...numeric,
+      ]) ||
+      value.profile !== 'woml.artifact-observation/v1' ||
+      !['local', 's3'].includes(String(value.backend)) ||
+      typeof value.backendHealthy !== 'boolean' ||
+      numeric.some(field => !count(value[field]))
+    ) {
+      throw new ArtifactOperationError(
+        'WOML_ARTIFACT_OBSERVATION_INVALID',
+        'The native core returned invalid Artifact Observation v1 data.'
+      );
+    }
+    return value as unknown as RustArtifactObservationV1;
+  } catch (error) {
+    artifactOperationFailure(error, 'WOML_ARTIFACT_OBSERVATION_FAILED');
+  }
 }
 
 function artifactBackupInventory(value: unknown): RustArtifactBackupInventoryV1 {

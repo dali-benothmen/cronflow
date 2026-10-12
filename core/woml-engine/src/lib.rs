@@ -42,12 +42,15 @@ pub mod whatsapp;
 pub mod workflow_calls;
 
 pub use artifacts::{
-  export_artifact_backup, maintain_artifacts, restore_artifact_backup, verify_artifact_backup,
-  ArtifactBackendPolicy, ArtifactBackupInventoryV1, ArtifactLimits, ArtifactMaintenanceV1,
-  ArtifactMaterializationPolicy, ArtifactPolicyError, ArtifactPolicyModes, ArtifactPolicyV1,
-  ArtifactReferenceV1, ArtifactRetentionPolicy, ArtifactRuntimeMode, ArtifactSecretScanningPolicy,
-  KnownSecretAction, ManagedArtifactPutHandler, ManagedArtifactStore, ARTIFACTS_CONTRACT,
-  ARTIFACTS_CONTRACT_VERSION, ARTIFACT_POLICY_CONTRACT, ARTIFACT_POLICY_CONTRACT_VERSION,
+  export_artifact, export_artifact_backup, inspect_artifact, inspect_run_artifacts,
+  maintain_artifacts, observe_artifacts, restore_artifact_backup, verify_artifact_backup,
+  ArtifactBackendPolicy, ArtifactBackupInventoryV1, ArtifactExportV1, ArtifactInspectionV1,
+  ArtifactLimits, ArtifactMaintenanceV1, ArtifactMaterializationPolicy, ArtifactObservationV1,
+  ArtifactPolicyError, ArtifactPolicyModes, ArtifactPolicyV1, ArtifactProvenanceV1,
+  ArtifactReferenceV1, ArtifactRetentionPolicy, ArtifactRunInspectionV1, ArtifactRuntimeMode,
+  ArtifactSecretScanningPolicy, KnownSecretAction, ManagedArtifactPutHandler, ManagedArtifactStore,
+  ARTIFACTS_CONTRACT, ARTIFACTS_CONTRACT_VERSION, ARTIFACT_POLICY_CONTRACT,
+  ARTIFACT_POLICY_CONTRACT_VERSION,
 };
 pub use backup::{
   create_online_backup, inspect_backup_store, prepare_restored_store, record_verified_backup,

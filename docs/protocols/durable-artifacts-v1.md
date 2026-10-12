@@ -285,6 +285,27 @@ Capability Call v1 schema.
   values are resolved from the secret authority and never persisted in policy,
   metadata, events, backup manifests, or diagnostics.
 
+## DA9 operator and telemetry contracts
+
+- [Artifact Inspection v1](../schemas/artifact-inspection.v1.schema.json)
+  exposes bounded name, size, digest prefix, state, retention, and provenance.
+  [Artifact Run Inspection v1](../schemas/artifact-run-inspection.v1.schema.json)
+  limits one run view to 100 records and declares truncation explicitly.
+- [Artifact Export v1](../schemas/artifact-export.v1.schema.json) is an
+  authenticated local operator action. Rust verifies the bytes, refuses an
+  existing destination, and records an audit ID. Its response and audit row
+  deliberately omit the destination path.
+- [Artifact Observation v1](../schemas/artifact-observation.v1.schema.json)
+  summarizes transfer count, bytes, duration, failures, corruption, orphans,
+  live usage, and backend health without per-artifact identifiers.
+- [Runtime Metrics v2](../schemas/runtime-metrics.v2.schema.json) is an
+  additive artifact-only metric family emitted alongside frozen Runtime
+  Metrics v1. The only label is `backend=local|s3`.
+
+Operator inspection and export never create public or signed URLs. Artifact
+bodies, body-derived values, full digests, paths, endpoints, object keys, and
+credentials remain forbidden from logs and telemetry.
+
 ## Frozen DA0 decisions
 
 1. `services.artifacts` is separate from mutable `services.storage`.

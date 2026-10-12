@@ -189,6 +189,69 @@ pub struct ArtifactBackupInventoryV1 {
   pub verified: bool,
 }
 
+/// Body-free metadata returned to an authenticated local operator. This is
+/// deliberately richer than Artifact Reference v1 but never contains a
+/// backend location, materialized path, signed URL, credential, or body data.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ArtifactInspectionV1 {
+  pub profile: String,
+  pub artifact: ArtifactReferenceV1,
+  pub digest_prefix: String,
+  pub status: String,
+  pub created_at: String,
+  pub expires_at: String,
+  pub retention_ms: u64,
+  pub provenance: ArtifactProvenanceV1,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ArtifactProvenanceV1 {
+  pub workflow_id: String,
+  pub run_id: String,
+  pub node_id: String,
+  pub attempt: u32,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ArtifactRunInspectionV1 {
+  pub profile: String,
+  pub run_id: String,
+  pub artifacts: Vec<ArtifactInspectionV1>,
+  pub truncated: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ArtifactExportV1 {
+  pub profile: String,
+  pub audit_id: String,
+  pub artifact_id: String,
+  pub name: String,
+  pub size: u64,
+  pub digest_prefix: String,
+  pub exported_at: String,
+  pub verified: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ArtifactObservationV1 {
+  pub profile: String,
+  pub backend: String,
+  pub backend_healthy: bool,
+  pub transfers: u64,
+  pub transferred_bytes: u64,
+  pub transfer_duration_ms: u64,
+  pub failed_transfers: u64,
+  pub corrupt_artifacts: u64,
+  pub orphan_blobs: u64,
+  pub live_artifacts: u64,
+  pub live_bytes: u64,
+}
+
 #[derive(Debug, Error)]
 pub enum ArtifactPolicyError {
   #[error("WOML_ARTIFACT_SERVICE_DISABLED: durable artifacts are disabled by runtime policy. Corrective action: provide a reviewed Artifact Policy v1 document")]
@@ -2274,6 +2337,285 @@ pub fn maintain_artifacts(
   managed.configured()?.maintenance(now, dry_run)
 }
 
+const OPERATOR_ARTIFACT_INSPECTION_LIMIT: usize = 100;
+
+pub fn inspect_artifact(
+  state_path: impl AsRef<Path>,
+  artifact_id: &str,
+) -> Result<ArtifactInspectionV1, CapabilityFailure> {
+  validate_artifact_id(artifact_id)?;
+  DurableEventStore::open(state_path.as_ref()).map_err(|_| backend_unavailable())?;
+  let connection = Connection::open_with_flags(
+    state_path.as_ref(),
+    OpenFlags::SQLITE_OPEN_READ_WRITE | OpenFlags::SQLITE_OPEN_FULL_MUTEX,
+  )
+  .map_err(|_| backend_unavailable())?;
+  initialize_schema(&connection)?;
+  validate_schema(&connection)?;
+  let inspection =
+    artifact_inspection_row(&connection, artifact_id)?.ok_or_else(artifact_not_found)?;
+  record_operator_audit(&connection, "inspect", artifact_id)?;
+  Ok(inspection)
+}
+
+pub fn inspect_run_artifacts(
+  state_path: impl AsRef<Path>,
+  run_id: &str,
+) -> Result<ArtifactRunInspectionV1, CapabilityFailure> {
+  if run_id.is_empty() || run_id.len() > 320 {
+    return Err(artifact_access_denied());
+  }
+  DurableEventStore::open(state_path.as_ref()).map_err(|_| backend_unavailable())?;
+  let connection = Connection::open_with_flags(
+    state_path.as_ref(),
+    OpenFlags::SQLITE_OPEN_READ_WRITE | OpenFlags::SQLITE_OPEN_FULL_MUTEX,
+  )
+  .map_err(|_| backend_unavailable())?;
+  initialize_schema(&connection)?;
+  validate_schema(&connection)?;
+  let mut statement = connection
+    .prepare(
+      "SELECT artifact_id FROM woml_artifact_provenance
+       WHERE run_id = ?1 ORDER BY artifact_id LIMIT ?2",
+    )
+    .map_err(|_| backend_unavailable())?;
+  let artifact_ids = statement
+    .query_map(
+      params![run_id, (OPERATOR_ARTIFACT_INSPECTION_LIMIT + 1) as u64],
+      |row| row.get::<_, String>(0),
+    )
+    .map_err(|_| backend_unavailable())?
+    .collect::<Result<Vec<_>, _>>()
+    .map_err(|_| backend_unavailable())?;
+  let truncated = artifact_ids.len() > OPERATOR_ARTIFACT_INSPECTION_LIMIT;
+  let artifacts = artifact_ids
+    .into_iter()
+    .take(OPERATOR_ARTIFACT_INSPECTION_LIMIT)
+    .map(|artifact_id| {
+      artifact_inspection_row(&connection, &artifact_id)?.ok_or_else(artifact_corrupt)
+    })
+    .collect::<Result<Vec<_>, _>>()?;
+  record_operator_audit(&connection, "inspect_run", run_id)?;
+  Ok(ArtifactRunInspectionV1 {
+    profile: "woml.artifact-run-inspection/v1".to_string(),
+    run_id: run_id.to_string(),
+    artifacts,
+    truncated,
+  })
+}
+
+pub fn export_artifact(
+  state_path: impl AsRef<Path>,
+  destination: impl AsRef<Path>,
+  artifact_id: &str,
+  policy: ArtifactPolicyV1,
+  mode: ArtifactRuntimeMode,
+  resolved_secrets: &BTreeMap<String, String>,
+) -> Result<ArtifactExportV1, CapabilityFailure> {
+  validate_artifact_id(artifact_id)?;
+  let policy = Arc::new(
+    PreparedArtifactPolicy::prepare(policy, mode, resolved_secrets).map_err(|error| {
+      artifact_failure(
+        CapabilityFailureKind::InvalidInput,
+        "WOML_ARTIFACT_POLICY_INVALID",
+        &error.to_string(),
+        false,
+        false,
+      )
+    })?,
+  );
+  let store = ArtifactStore::open_with_startup_cleanup(state_path.as_ref(), policy, false)?;
+  let connection = store.connection()?;
+  let inspection =
+    artifact_inspection_row(&connection, artifact_id)?.ok_or_else(artifact_not_found)?;
+  if inspection.status != "available" {
+    return Err(artifact_access_denied());
+  }
+  let verified = store
+    .backend
+    .verify(&inspection.artifact.sha256, inspection.artifact.size)?;
+  let destination = destination.as_ref();
+  let parent = destination
+    .parent()
+    .ok_or_else(materialization_unavailable)?;
+  let parent = fs::canonicalize(parent).map_err(|_| materialization_unavailable())?;
+  let file_name = destination
+    .file_name()
+    .and_then(|value| value.to_str())
+    .filter(|value| !value.is_empty() && *value != "." && *value != "..")
+    .ok_or_else(materialization_unavailable)?;
+  let final_path = parent.join(file_name);
+  if fs::symlink_metadata(&final_path).is_ok() {
+    return Err(artifact_failure(
+      CapabilityFailureKind::ServiceRejected,
+      "WOML_ARTIFACT_EXPORT_EXISTS",
+      "The export destination already exists; choose a new path.",
+      false,
+      false,
+    ));
+  }
+  stream_materialization(
+    &verified.path,
+    &final_path,
+    &inspection.artifact.sha256,
+    inspection.artifact.size,
+    &CapabilityCancellationToken::default(),
+  )?;
+  harden_file_permissions(&final_path)?;
+  let audit_id = record_operator_audit(&connection, "export", artifact_id)?;
+  Ok(ArtifactExportV1 {
+    profile: "woml.artifact-export/v1".to_string(),
+    audit_id,
+    artifact_id: inspection.artifact.id,
+    name: inspection.artifact.name,
+    size: inspection.artifact.size,
+    digest_prefix: inspection.digest_prefix,
+    exported_at: timestamp(),
+    verified: true,
+  })
+}
+
+pub fn observe_artifacts(
+  state_path: impl AsRef<Path>,
+  policy: ArtifactPolicyV1,
+  mode: ArtifactRuntimeMode,
+  resolved_secrets: &BTreeMap<String, String>,
+) -> Result<ArtifactObservationV1, CapabilityFailure> {
+  let policy = Arc::new(
+    PreparedArtifactPolicy::prepare(policy, mode, resolved_secrets).map_err(|error| {
+      artifact_failure(
+        CapabilityFailureKind::InvalidInput,
+        "WOML_ARTIFACT_POLICY_INVALID",
+        &error.to_string(),
+        false,
+        false,
+      )
+    })?,
+  );
+  let backend_name = match &policy.backend {
+    PreparedArtifactBackend::Local { .. } => "local",
+    PreparedArtifactBackend::S3(_) => "s3",
+  };
+  let store = ArtifactStore::open_with_startup_cleanup(state_path.as_ref(), policy, false)?;
+  let connection = store.connection()?;
+  let (transfers, transferred_bytes, transfer_duration_ms, failed_transfers): (u64, u64, u64, u64) = connection
+    .query_row(
+      "SELECT COUNT(*),
+              COALESCE(SUM(CASE WHEN status = 'succeeded' THEN size ELSE 0 END), 0),
+              COALESCE(CAST(SUM(CASE WHEN settled_at IS NOT NULL
+                THEN (julianday(settled_at) - julianday(started_at)) * 86400000
+                ELSE 0 END) AS INTEGER), 0),
+              COALESCE(SUM(CASE WHEN status IN ('failed','cancelled','interrupted') THEN 1 ELSE 0 END), 0)
+       FROM woml_artifact_transfers",
+      [],
+      |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+    )
+    .map_err(|_| backend_unavailable())?;
+  let (corrupt_artifacts, live_artifacts, live_bytes): (u64, u64, u64) = connection
+    .query_row(
+      "SELECT
+         COALESCE(SUM(CASE WHEN status = 'corrupt' THEN 1 ELSE 0 END), 0),
+         COALESCE(SUM(CASE WHEN status = 'available' THEN 1 ELSE 0 END), 0),
+         COALESCE(SUM(CASE WHEN status = 'available' THEN size ELSE 0 END), 0)
+       FROM woml_artifacts",
+      [],
+      |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+    )
+    .map_err(|_| backend_unavailable())?;
+  let orphan_blobs = connection
+    .query_row(
+      "SELECT COUNT(*) FROM woml_artifact_blobs AS blobs
+       WHERE NOT EXISTS (SELECT 1 FROM woml_artifacts AS artifacts WHERE artifacts.sha256 = blobs.sha256)",
+      [],
+      |row| row.get::<_, u64>(0),
+    )
+    .map_err(|_| backend_unavailable())?;
+  let backend_healthy = store.backend.inventory(1).is_ok();
+  Ok(ArtifactObservationV1 {
+    profile: "woml.artifact-observation/v1".to_string(),
+    backend: backend_name.to_string(),
+    backend_healthy,
+    transfers,
+    transferred_bytes,
+    transfer_duration_ms,
+    failed_transfers,
+    corrupt_artifacts,
+    orphan_blobs,
+    live_artifacts,
+    live_bytes,
+  })
+}
+
+fn artifact_inspection_row(
+  connection: &Connection,
+  artifact_id: &str,
+) -> Result<Option<ArtifactInspectionV1>, CapabilityFailure> {
+  connection
+    .query_row(
+      "SELECT a.artifact_id, a.name, a.size, a.sha256, a.content_type,
+              a.status, a.created_at, retention.expires_at, retention.effective_ms,
+              provenance.workflow_id, provenance.run_id, provenance.node_id,
+              provenance.attempt_number
+       FROM woml_artifacts AS a
+       JOIN woml_artifact_retention AS retention ON retention.artifact_id = a.artifact_id
+       JOIN woml_artifact_provenance AS provenance ON provenance.artifact_id = a.artifact_id
+       WHERE a.artifact_id = ?1",
+      [artifact_id],
+      |row| {
+        let digest: String = row.get(3)?;
+        Ok(ArtifactInspectionV1 {
+          profile: "woml.artifact-inspection/v1".to_string(),
+          artifact: ArtifactReferenceV1 {
+            contract: ARTIFACT_REFERENCE_CONTRACT.to_string(),
+            contract_version: ARTIFACT_REFERENCE_CONTRACT_VERSION,
+            id: row.get(0)?,
+            name: row.get(1)?,
+            size: row.get(2)?,
+            sha256: digest.clone(),
+            content_type: row.get(4)?,
+          },
+          digest_prefix: digest.chars().take(12).collect(),
+          status: row.get(5)?,
+          created_at: row.get(6)?,
+          expires_at: row.get(7)?,
+          retention_ms: row.get(8)?,
+          provenance: ArtifactProvenanceV1 {
+            workflow_id: row.get(9)?,
+            run_id: row.get(10)?,
+            node_id: row.get(11)?,
+            attempt: row.get(12)?,
+          },
+        })
+      },
+    )
+    .optional()
+    .map_err(|_| backend_unavailable())
+}
+
+fn record_operator_audit(
+  connection: &Connection,
+  operation: &str,
+  subject_id: &str,
+) -> Result<String, CapabilityFailure> {
+  let audit_id = format!("audit_{}", uuid::Uuid::new_v4().simple());
+  connection
+    .execute(
+      "INSERT INTO woml_artifact_operator_audit(audit_id, operation, subject_id, occurred_at)
+       VALUES (?1, ?2, ?3, ?4)",
+      params![audit_id, operation, subject_id, timestamp()],
+    )
+    .map_err(|_| backend_unavailable())?;
+  Ok(audit_id)
+}
+
+fn validate_artifact_id(artifact_id: &str) -> Result<(), CapabilityFailure> {
+  let encoded = artifact_id.strip_prefix("artifact_").unwrap_or_default();
+  if encoded.len() != 26 || !encoded.bytes().all(|byte| CROCKFORD.contains(&byte)) {
+    return Err(artifact_access_denied());
+  }
+  Ok(())
+}
+
 pub fn export_artifact_backup(
   state_path: impl AsRef<Path>,
   destination: impl AsRef<Path>,
@@ -3136,6 +3478,12 @@ fn initialize_schema(connection: &Connection) -> Result<(), CapabilityFailure> {
          requested_ms INTEGER NOT NULL,
          effective_ms INTEGER NOT NULL,
          expires_at TEXT NOT NULL
+       );
+       CREATE TABLE IF NOT EXISTS woml_artifact_operator_audit(
+         audit_id TEXT PRIMARY KEY NOT NULL,
+         operation TEXT NOT NULL CHECK(operation IN ('inspect','inspect_run','export')),
+         subject_id TEXT NOT NULL,
+         occurred_at TEXT NOT NULL
        );",
     )
     .map_err(|_| backend_unavailable())?;
@@ -5273,5 +5621,155 @@ mod tests {
       validate_schema(&connection).unwrap_err().kind,
       CapabilityFailureKind::UnsupportedVersion
     );
+  }
+
+  #[tokio::test]
+  async fn operator_inspection_export_and_observation_are_bounded_and_audited() {
+    let temp = TempDir::new().unwrap();
+    fs::write(
+      temp.path().join("plan.bin"),
+      b"reviewed infrastructure plan",
+    )
+    .unwrap();
+    let state = temp.path().join("state.sqlite");
+    let backend = temp.path().join("artifacts-v1");
+    let authored_policy = policy(temp.path(), &backend);
+    let managed = Arc::new(ManagedArtifactStore::default());
+    let handler = ManagedArtifactPutHandler::new(
+      Arc::clone(&managed),
+      authored_policy.clone(),
+      ArtifactRuntimeMode::Foreground,
+      &BTreeMap::new(),
+    )
+    .unwrap();
+    managed
+      .configure_for_state(&state, handler.policy())
+      .unwrap();
+    let created = handler
+      .execute_request_scoped(
+        &call("plan.bin", "terraform-plan"),
+        Some("infrastructure-review".to_string()),
+        CapabilityCancellationToken::default(),
+      )
+      .await
+      .unwrap();
+    let artifact_id = created["data"]["id"].as_str().unwrap();
+
+    let inspection = inspect_artifact(&state, artifact_id).unwrap();
+    assert_eq!(inspection.artifact.name, "terraform-plan");
+    assert_eq!(inspection.digest_prefix.len(), 12);
+    assert_eq!(inspection.provenance.run_id, "run-artifact");
+    assert_eq!(inspection.provenance.node_id, "create");
+    let run = inspect_run_artifacts(&state, "run-artifact").unwrap();
+    assert_eq!(run.artifacts, vec![inspection.clone()]);
+    assert!(!run.truncated);
+
+    let export_path = temp.path().join("reviewed-plan.bin");
+    let exported = export_artifact(
+      &state,
+      &export_path,
+      artifact_id,
+      authored_policy.clone(),
+      ArtifactRuntimeMode::Foreground,
+      &BTreeMap::new(),
+    )
+    .unwrap();
+    assert!(exported.verified);
+    assert_eq!(
+      fs::read(&export_path).unwrap(),
+      b"reviewed infrastructure plan"
+    );
+    assert!(!format!("{inspection:?}{exported:?}").contains(export_path.to_string_lossy().as_ref()));
+
+    let observation = observe_artifacts(
+      &state,
+      authored_policy,
+      ArtifactRuntimeMode::Foreground,
+      &BTreeMap::new(),
+    )
+    .unwrap();
+    assert!(observation.backend_healthy);
+    assert_eq!(observation.backend, "local");
+    assert_eq!(observation.transfers, 1);
+    assert_eq!(observation.transferred_bytes, 28);
+    assert_eq!(observation.failed_transfers, 0);
+    assert_eq!(observation.corrupt_artifacts, 0);
+    assert_eq!(observation.orphan_blobs, 0);
+
+    let connection = Connection::open(&state).unwrap();
+    let audits: u64 = connection
+      .query_row(
+        "SELECT COUNT(*) FROM woml_artifact_operator_audit",
+        [],
+        |row| row.get(0),
+      )
+      .unwrap();
+    assert_eq!(audits, 3);
+  }
+
+  #[tokio::test]
+  async fn streaming_startup_and_metadata_stay_within_publication_budgets() {
+    const FIXTURE_BYTES: usize = 8 * 1024 * 1024;
+    const MINIMUM_BYTES_PER_SECOND: f64 = 1024.0 * 1024.0;
+    const STARTUP_BUDGET: Duration = Duration::from_secs(5);
+    const INSPECTION_BUDGET: Duration = Duration::from_secs(1);
+    assert!(STREAM_BUFFER_BYTES <= 64 * 1024);
+
+    let temp = TempDir::new().unwrap();
+    let source = temp.path().join("large-report.bin");
+    fs::write(&source, vec![0x5a; FIXTURE_BYTES]).unwrap();
+    let state = temp.path().join("state.sqlite");
+    let backend = temp.path().join("artifacts-v1");
+    let mut authored_policy = policy(temp.path(), &backend);
+    authored_policy.limits.max_artifact_bytes = 16 * 1024 * 1024;
+    authored_policy.limits.max_run_bytes = 32 * 1024 * 1024;
+    authored_policy.limits.max_store_bytes = 64 * 1024 * 1024;
+    let managed = Arc::new(ManagedArtifactStore::default());
+    let handler = ManagedArtifactPutHandler::new(
+      Arc::clone(&managed),
+      authored_policy.clone(),
+      ArtifactRuntimeMode::Foreground,
+      &BTreeMap::new(),
+    )
+    .unwrap();
+    managed
+      .configure_for_state(&state, handler.policy())
+      .unwrap();
+    let started = std::time::Instant::now();
+    let created = handler
+      .execute_request_scoped(
+        &call("large-report.bin", "large-report"),
+        Some("performance-workflow".to_string()),
+        CapabilityCancellationToken::default(),
+      )
+      .await
+      .unwrap();
+    let elapsed = started.elapsed();
+    let throughput = FIXTURE_BYTES as f64 / elapsed.as_secs_f64().max(0.001);
+    assert!(throughput >= MINIMUM_BYTES_PER_SECOND, "{throughput} B/s");
+
+    drop(handler);
+    drop(managed);
+    let startup = std::time::Instant::now();
+    let recovered = Arc::new(ManagedArtifactStore::default());
+    let recovered_handler = ManagedArtifactPutHandler::new(
+      Arc::clone(&recovered),
+      authored_policy,
+      ArtifactRuntimeMode::Foreground,
+      &BTreeMap::new(),
+    )
+    .unwrap();
+    recovered
+      .configure_for_state(&state, recovered_handler.policy())
+      .unwrap();
+    assert!(startup.elapsed() <= STARTUP_BUDGET);
+
+    let artifact_id = created["data"]["id"].as_str().unwrap();
+    let inspection = std::time::Instant::now();
+    let artifact = inspect_artifact(&state, artifact_id).unwrap();
+    let run = inspect_run_artifacts(&state, "run-artifact").unwrap();
+    assert!(inspection.elapsed() <= INSPECTION_BUDGET);
+    assert_eq!(artifact.artifact.size, FIXTURE_BYTES as u64);
+    assert_eq!(run.artifacts.len(), 1);
   }
 }

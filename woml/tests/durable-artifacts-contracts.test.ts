@@ -40,6 +40,12 @@ async function contractValidators() {
     'artifact-operation-metadata.v1.schema.json',
     'artifact-operation-settlement.v1.schema.json',
     'artifact-maintenance.v1.schema.json',
+    'artifact-inspection.v1.schema.json',
+    'artifact-run-inspection.v1.schema.json',
+    'run-inspection.v7.schema.json',
+    'artifact-export.v1.schema.json',
+    'artifact-observation.v1.schema.json',
+    'runtime-metrics.v2.schema.json',
   ]) {
     ajv.addSchema(await json(resolve(schemaRoot, name)));
   }
@@ -56,6 +62,12 @@ async function contractValidators() {
     metadata: get('https://woml.dev/schemas/artifact-operation-metadata/v1'),
     settlement: get('https://woml.dev/schemas/artifact-operation-settlement/v1'),
     maintenance: get('https://woml.dev/schemas/artifact-maintenance/v1'),
+    inspection: get('https://woml.dev/schemas/artifact-inspection/v1'),
+    runInspection: get('https://woml.dev/schemas/artifact-run-inspection/v1'),
+    compositeRunInspection: get('https://woml.dev/schemas/run-inspection/v7'),
+    export: get('https://woml.dev/schemas/artifact-export/v1'),
+    observation: get('https://woml.dev/schemas/artifact-observation/v1'),
+    metricV2: get('https://woml.dev/schemas/runtime-metrics/v2'),
     capability: get('https://cronflow.dev/schemas/capability-call/v1'),
     capabilityFailure: get(
       'https://cronflow.dev/schemas/capability-call/v1#/$defs/failure'
@@ -190,6 +202,28 @@ describe('Frozen Durable Artifacts v1 contracts', () => {
       for (const forbidden of ['name', 'path', 'contentType', 'body', 'credential']) {
         expect(encoded).not.toContain(forbidden);
       }
+    }
+  });
+
+  test('freezes bounded operator inspection, audited export, and body-free telemetry', async () => {
+    const validators = await contractValidators();
+    const fixture = (await json(resolve(fixtureRoot, 'operator.v1.json'))) as JsonObject;
+    for (const [name, validator] of [
+      ['inspection', validators.inspection],
+      ['runInspection', validators.runInspection],
+      ['compositeRunInspection', validators.compositeRunInspection],
+      ['export', validators.export],
+      ['observation', validators.observation],
+      ['metric', validators.metricV2],
+    ] as const) {
+      expect(validator(fixture[name]), JSON.stringify(validator.errors)).toBe(true);
+    }
+    const encoded = JSON.stringify(fixture);
+    for (const forbidden of [
+      'signedUrl', 'credentials', 'sourcePath', 'materializedPath', 'body',
+      'secret-value',
+    ]) {
+      expect(encoded).not.toContain(forbidden);
     }
   });
 

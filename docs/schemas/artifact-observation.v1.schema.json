@@ -1,0 +1,26 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://woml.dev/schemas/artifact-observation/v1",
+  "title": "WOML Artifact Observation v1",
+  "x-status": "durable-artifacts-da9-frozen",
+  "x-forbiddenFields": ["path", "url", "signedUrl", "credentials", "body", "secret", "artifactId", "runId"],
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["profile", "backend", "backendHealthy", "transfers", "transferredBytes", "transferDurationMs", "failedTransfers", "corruptArtifacts", "orphanBlobs", "liveArtifacts", "liveBytes"],
+  "properties": {
+    "profile": { "const": "woml.artifact-observation/v1" },
+    "backend": { "enum": ["local", "s3"] },
+    "backendHealthy": { "type": "boolean" },
+    "transfers": { "$ref": "#/$defs/count" },
+    "transferredBytes": { "$ref": "#/$defs/count" },
+    "transferDurationMs": { "$ref": "#/$defs/count" },
+    "failedTransfers": { "$ref": "#/$defs/count" },
+    "corruptArtifacts": { "$ref": "#/$defs/count" },
+    "orphanBlobs": { "$ref": "#/$defs/count" },
+    "liveArtifacts": { "$ref": "#/$defs/count" },
+    "liveBytes": { "$ref": "#/$defs/count" }
+  },
+  "$defs": {
+    "count": { "type": "integer", "minimum": 0, "maximum": 9007199254740991 }
+  }
+}

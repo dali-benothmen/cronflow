@@ -289,6 +289,7 @@ return {
 | `services.http.request()` | Makes a managed HTTP request with status policy, timeout, limits, cancellation, and durable operation history. |
 | `services.db()` | Opens a managed SQLite or PostgreSQL handle for queries, writes, and transactions. |
 | `services.storage` | Stores and retrieves larger checksummed objects outside workflow context. |
+| `services.artifacts` | Preserves immutable files with SHA-256 integrity, provenance, retention, backup, and local or S3-compatible storage. |
 | `services.cache` | Keeps reusable, expiring optimization data that may be safely discarded. |
 | `services.state` | Stores small, versioned workflow-owned values that must survive future runs and restarts. |
 | `services.process.run()` | Runs an operator-approved local tool with literal arguments, Rust-owned containment, bounded output, cancellation, and durable recovery. |
