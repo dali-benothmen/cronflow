@@ -266,7 +266,7 @@ jobs:
         run: bun install --frozen-lockfile
       - name: Build the portable release package
         working-directory: woml-cli
-        run: bun run build:release
+        run: bun run build:native && bun run build:release
       - name: Verify release identity and package contracts
         working-directory: woml-cli
         run: >-
