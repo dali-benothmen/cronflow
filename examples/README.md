@@ -19,6 +19,7 @@ commands work in your own project with copied files.
 | Durable retry attempts | [`retryWorkflow.woml`](retryWorkflow.woml) | `woml run examples/retryWorkflow.woml` |
 | Durable per-item processing | [`forEachWorkflow.woml`](forEachWorkflow.woml) | `woml run examples/forEachWorkflow.woml` |
 | Workflow/step lifecycle hooks | [`lifecycleWorkflow.woml`](lifecycleWorkflow.woml) | `woml run examples/lifecycleWorkflow.woml` |
+| Durable timers and external callbacks | [`durableWaits/`](durableWaits/) | `woml run examples/durableWaits/timer.woml` |
 
 Use `woml test <file>` instead when you intentionally want one manual run that
 prints the result and exits.

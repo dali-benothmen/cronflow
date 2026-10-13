@@ -12,7 +12,7 @@ use thiserror::Error;
 use crate::{DurableEventStore, DurableStateStore, DURABLE_STORE_SCHEMA_VERSION};
 
 const MAINTENANCE_LEASE_SECONDS: i64 = 300;
-const SUPPORTED_BACKUP_STORE_VERSIONS: [u32; 2] = [13, 14];
+const SUPPORTED_BACKUP_STORE_VERSIONS: [u32; 3] = [13, 14, 15];
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]

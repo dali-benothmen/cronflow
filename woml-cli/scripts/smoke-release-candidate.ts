@@ -154,6 +154,18 @@ async function main(): Promise<void> {
 </woml>\n`
     );
     await writeFile(
+      join(consumer, 'durable-wait.woml'),
+      `<woml>
+  <workflow id="release-candidate-wait" name="Release candidate durable wait" version="1.0.0">
+    <triggers><manual id="start" /></triggers>
+    <steps>
+      <wait id="pause" duration="1s" />
+      <step id="done"><script>return { status: context.steps.pause.status };</script></step>
+    </steps>
+  </workflow>
+</woml>\n`
+    );
+    await writeFile(
       join(consumer, 'process-literal.woml'),
       `<woml>
   <workflow id="release-candidate-process" name="Release candidate process" version="1.0.0">
@@ -265,6 +277,11 @@ while (true) {
     if (!command('check', 'for-each.woml').includes('WOML check passed')) {
       throw new Error('The installed compiler did not validate for-each.woml.');
     }
+    if (!command('check', 'durable-wait.woml').includes('WOML check passed')) {
+      throw new Error(
+        'The installed compiler did not validate durable-wait.woml.'
+      );
+    }
     if (
       !command('check', 'process-literal.woml').includes('WOML check passed')
     ) {
@@ -281,6 +298,17 @@ while (true) {
     if (result !== '{"message":"Hello World"}\n') {
       throw new Error(
         `The installed runtime returned an unexpected result: ${result}`
+      );
+    }
+    const waitResult = command(
+      'test',
+      'durable-wait.woml',
+      '--state',
+      join(directory, 'durable-wait-state.sqlite')
+    );
+    if (waitResult !== '{"status":"elapsed"}\n') {
+      throw new Error(
+        `The installed runtime returned an unexpected durable-wait result: ${waitResult}`
       );
     }
     const forEachResult = command(

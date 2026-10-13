@@ -663,6 +663,122 @@ async fn external_signal_http_requires_its_token_and_resumes_the_exact_wait() {
 }
 
 #[actix_web::test]
+async fn external_signal_http_fails_closed_for_malformed_oversized_and_rate_limited_traffic() {
+  let database = TemporaryDatabase::new("external-signal-hardening");
+  let server = WomlWebhookServer::start(WomlWebhookServerConfig {
+    bind_address: "127.0.0.1:0".parse().unwrap(),
+    database_path: database.path().to_path_buf(),
+    registrations: vec![WebhookDefinitionRegistration::new(
+      signal_wait_model(),
+      DURABLE_WAIT_HASH,
+    )],
+    startup_manual_triggers: BTreeMap::new(),
+    execution: RuntimeExecutionOptions::new(placeholder_host(), 2_000)
+      .with_signal_ingress_token(Some(SIGNAL_TOKEN.to_string())),
+    progress_reporter: None,
+  })
+  .await
+  .unwrap();
+  let authorization = format!("Bearer {SIGNAL_TOKEN}");
+  let address = server.local_address();
+
+  let wrong_method = request(
+    address,
+    "GET",
+    "/v1/signals/job.completed",
+    &[("Authorization", &authorization)],
+    b"",
+    None,
+  )
+  .await;
+  assert_eq!(wrong_method.status, 405);
+  assert_eq!(
+    wrong_method.body["error"]["code"],
+    "WOML_SIGNAL_METHOD_NOT_ALLOWED"
+  );
+
+  let malformed = request(
+    address,
+    "POST",
+    "/v1/signals/job.completed",
+    &[
+      ("Authorization", &authorization),
+      ("Content-Type", "application/json"),
+      ("Idempotency-Key", "malformed-dw8"),
+    ],
+    br#"{"runId": "unterminated"#,
+    None,
+  )
+  .await;
+  assert_eq!(malformed.status, 400);
+  assert_eq!(
+    malformed.body["error"]["code"],
+    "WOML_SIGNAL_PAYLOAD_INVALID"
+  );
+
+  let oversized = vec![b'x'; woml_engine::EXTERNAL_SIGNAL_MAX_PAYLOAD_BYTES + 4_097];
+  let too_large = request(
+    address,
+    "POST",
+    "/v1/signals/job.completed",
+    &[
+      ("Authorization", &authorization),
+      ("Content-Type", "application/json"),
+      ("Idempotency-Key", "oversized-dw8"),
+    ],
+    &oversized,
+    None,
+  )
+  .await;
+  assert_eq!(too_large.status, 413);
+  assert_eq!(
+    too_large.body["error"]["code"],
+    "WOML_SIGNAL_PAYLOAD_TOO_LARGE"
+  );
+  server.stop().await;
+
+  let rate_database = TemporaryDatabase::new("external-signal-rate-limit");
+  let rate_server = WomlWebhookServer::start(WomlWebhookServerConfig {
+    bind_address: "127.0.0.1:0".parse().unwrap(),
+    database_path: rate_database.path().to_path_buf(),
+    registrations: vec![WebhookDefinitionRegistration::new(
+      signal_wait_model(),
+      DURABLE_WAIT_HASH,
+    )],
+    startup_manual_triggers: BTreeMap::new(),
+    execution: RuntimeExecutionOptions::new(placeholder_host(), 2_000)
+      .with_signal_ingress_token(Some(SIGNAL_TOKEN.to_string())),
+    progress_reporter: None,
+  })
+  .await
+  .unwrap();
+  for _ in 0..120 {
+    let response = request(
+      rate_server.local_address(),
+      "POST",
+      "/v1/signals/job.completed",
+      &[("Authorization", &authorization)],
+      b"{}",
+      None,
+    )
+    .await;
+    assert_eq!(response.status, 400);
+  }
+  let limited = request(
+    rate_server.local_address(),
+    "POST",
+    "/v1/signals/job.completed",
+    &[("Authorization", &authorization)],
+    b"{}",
+    None,
+  )
+  .await;
+  assert_eq!(limited.status, 429);
+  assert_eq!(limited.body["error"]["code"], "WOML_SIGNAL_RATE_LIMITED");
+  rate_server.stop().await;
+}
+
+#[actix_web::test]
 async fn schema_auth_shape_content_type_method_and_route_rejections_create_no_run() {
   let database = TemporaryDatabase::new("rejections");
   let server = start_server(&database, placeholder_host()).await;

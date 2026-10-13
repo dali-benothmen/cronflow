@@ -210,7 +210,7 @@ fn restore_upgrades_v13_on_the_temporary_copy_and_rejects_future_stores() {
     )
     .unwrap()
     .store_version,
-    14
+    DURABLE_STORE_SCHEMA_VERSION
   );
 
   let future = directory.join("future.sqlite");

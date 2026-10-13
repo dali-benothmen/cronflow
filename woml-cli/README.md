@@ -194,79 +194,84 @@ flowchart TD
 - Local JavaScript/TypeScript modules, reusable WOML steps, and reusable notification providers.
 - Runtime concurrency, rate-limit, queue, and timeout policies.
 - Foreground and background operation, colored inspection, durable logs, cancellation, backup, restore, and retention.
+- Worker-free durable timers and authenticated, idempotent external-signal callbacks.
 
 ## Basic WOML API
 
 ### Document tags
 
-| Tag | Description |
-| --- | --- |
-| `<woml>` | Root of every WOML document. It contains imports, a workflow, or reusable definitions. |
-| `<imports>` | Declares reusable project dependencies before the workflow. |
-| `<module name="..." from="..." />` | Imports a local JavaScript or TypeScript module as `services.<name>`. |
-| `<workflow>` | Defines one executable workflow and its identity, name, description, and version. |
-| `<config>` | Declares workflow concurrency, rate limit, queue, and timeout policies. |
-| `<lifecycle>` | Contains scripts or notifications that observe workflow and step lifecycle events. |
-| `<triggers>` | Contains the trigger definitions that can create workflow runs. |
-| `<steps>` | Contains the workflow's ordered business flow. |
+| Tag                                | Description                                                                            |
+| ---------------------------------- | -------------------------------------------------------------------------------------- |
+| `<woml>`                           | Root of every WOML document. It contains imports, a workflow, or reusable definitions. |
+| `<imports>`                        | Declares reusable project dependencies before the workflow.                            |
+| `<module name="..." from="..." />` | Imports a local JavaScript or TypeScript module as `services.<name>`.                  |
+| `<workflow>`                       | Defines one executable workflow and its identity, name, description, and version.      |
+| `<config>`                         | Declares workflow concurrency, rate limit, queue, and timeout policies.                |
+| `<lifecycle>`                      | Contains scripts or notifications that observe workflow and step lifecycle events.     |
+| `<triggers>`                       | Contains the trigger definitions that can create workflow runs.                        |
+| `<steps>`                          | Contains the workflow's ordered business flow.                                         |
 
 ### Trigger tags
 
-| Tag | Description |
-| --- | --- |
-| `<manual>` | Keeps the workflow active and creates a run whenever the operator presses Enter. |
-| `<webhook>` | Creates a run from a validated HTTP request at a static route. |
-| `<schedule>` | Creates runs from a five-field cron schedule and optional timezone. |
-| `<interval>` | Creates runs repeatedly using a fixed duration such as `30s` or `5m`. |
-| `<event>` | Subscribes to a durable named event emitted internally or through authenticated HTTP. |
-| `<slack>` | Receives supported Slack Socket Mode events. |
-| `<telegram>` | Receives human text messages through Telegram long polling. |
-| `<discord>` | Receives supported Discord mentions and direct messages. |
-| `<whatsapp>` | Receives signed WhatsApp Cloud API message callbacks. |
+| Tag          | Description                                                                           |
+| ------------ | ------------------------------------------------------------------------------------- |
+| `<manual>`   | Keeps the workflow active and creates a run whenever the operator presses Enter.      |
+| `<webhook>`  | Creates a run from a validated HTTP request at a static route.                        |
+| `<schedule>` | Creates runs from a five-field cron schedule and optional timezone.                   |
+| `<interval>` | Creates runs repeatedly using a fixed duration such as `30s` or `5m`.                 |
+| `<event>`    | Subscribes to a durable named event emitted internally or through authenticated HTTP. |
+| `<slack>`    | Receives supported Slack Socket Mode events.                                          |
+| `<telegram>` | Receives human text messages through Telegram long polling.                           |
+| `<discord>`  | Receives supported Discord mentions and direct messages.                              |
+| `<whatsapp>` | Receives signed WhatsApp Cloud API message callbacks.                                 |
 
 ### Steps and control-flow tags
 
-| Tag | Description |
-| --- | --- |
-| `<step>` | Defines one named executable operation; its return value becomes `context.steps.<id>`. |
-| `<script>` | Runs JavaScript with the current `context`, `services`, `secrets`, and `attempt` bindings. |
-| `<parallel>` | Runs its direct child steps concurrently and waits for them to finish. |
-| `<for-each>` | Runs its body once per array item with durable identity, bounded concurrency, and ordered aggregate results. |
-| `<choose>` | Selects the first true `<when>` route or its final `<otherwise>` route. |
-| `<when>` / `<otherwise>` | Define the conditional routes inside `<choose>`. |
-| `<result>` | Publishes one stable result from a for-each iteration or selected choice, switch, or approval route. |
-| `<switch>` | Selects one exact-string `<case>` or its `<default>` route. |
-| `<fork>` | Starts several independent, concurrent multi-step branches and joins the selected branches. |
-| `<branch>` | Defines one sequential route inside a `<fork>` and may contain several flow items. |
-| `<approval>` | Pauses durably until a human approves, rejects, or the configured timeout settles. |
-| `<notify>` | Sends approval or lifecycle notifications through configured providers. |
-| `<when-approved>` / `<when-rejected>` | Define the two continuations of an approval decision. |
+| Tag                                   | Description                                                                                                  |
+| ------------------------------------- | ------------------------------------------------------------------------------------------------------------ |
+| `<step>`                              | Defines one named executable operation; its return value becomes `context.steps.<id>`.                       |
+| `<script>`                            | Runs JavaScript with the current `context`, `services`, `secrets`, and `attempt` bindings.                   |
+| `<parallel>`                          | Runs its direct child steps concurrently and waits for them to finish.                                       |
+| `<for-each>`                          | Runs its body once per array item with durable identity, bounded concurrency, and ordered aggregate results. |
+| `<choose>`                            | Selects the first true `<when>` route or its final `<otherwise>` route.                                      |
+| `<when>` / `<otherwise>`              | Define the conditional routes inside `<choose>`.                                                             |
+| `<result>`                            | Publishes one stable result from a for-each iteration or selected choice, switch, or approval route.         |
+| `<switch>`                            | Selects one exact-string `<case>` or its `<default>` route.                                                  |
+| `<fork>`                              | Starts several independent, concurrent multi-step branches and joins the selected branches.                  |
+| `<branch>`                            | Defines one sequential route inside a `<fork>` and may contain several flow items.                           |
+| `<wait>`                              | Suspends the run durably for a fixed duration without occupying a worker.                                    |
+| `<wait-until>`                        | Suspends until an RFC 3339 instant or exact context reference.                                               |
+| `<wait-for>`                          | Resumes from one authenticated external signal matched by run, wait, and correlation.                        |
+| `<accept>`                            | Declares one accepted signal and optional JSON Schema inside a multi-signal wait.                            |
+| `<approval>`                          | Pauses durably until a human approves, rejects, or the configured timeout settles.                           |
+| `<notify>`                            | Sends approval or lifecycle notifications through configured providers.                                      |
+| `<when-approved>` / `<when-rejected>` | Define the two continuations of an approval decision.                                                        |
 
 ### Lifecycle tags
 
-| Tag | Description |
-| --- | --- |
-| `<on-start>` | Runs when a workflow run begins. |
-| `<on-step-start>` | Runs before matching steps begin; its optional `steps` attribute filters step IDs. |
-| `<on-step-success>` | Runs after matching steps succeed. |
-| `<on-step-failure>` | Runs after matching steps fail. |
-| `<on-step-complete>` | Runs after matching steps reach any terminal outcome. |
-| `<on-success>` | Runs after the workflow succeeds. |
-| `<on-error>` | Runs after the workflow fails. |
-| `<on-cancel>` | Runs after the workflow is cancelled. |
-| `<on-complete>` | Runs last after any workflow outcome. |
+| Tag                  | Description                                                                        |
+| -------------------- | ---------------------------------------------------------------------------------- |
+| `<on-start>`         | Runs when a workflow run begins.                                                   |
+| `<on-step-start>`    | Runs before matching steps begin; its optional `steps` attribute filters step IDs. |
+| `<on-step-success>`  | Runs after matching steps succeed.                                                 |
+| `<on-step-failure>`  | Runs after matching steps fail.                                                    |
+| `<on-step-complete>` | Runs after matching steps reach any terminal outcome.                              |
+| `<on-success>`       | Runs after the workflow succeeds.                                                  |
+| `<on-error>`         | Runs after the workflow fails.                                                     |
+| `<on-cancel>`        | Runs after the workflow is cancelled.                                              |
+| `<on-complete>`      | Runs last after any workflow outcome.                                              |
 
 ## Context
 
 `context` is the read-only data available to an ordinary workflow script. It is derived from durable run events rather than treated as an authoritative mutable object.
 
-| Reference | Description |
-| --- | --- |
-| `context.payload` | The validated input supplied by the trigger or calling workflow. Manual runs currently receive `{}`. |
-| `context.steps.<id>` | The JSON-compatible result returned by a completed step or result-producing control item. |
-| `context.item` | The current item while a script is running inside `<for-each>`; unavailable outside that loop. |
-| `context.iteration.index` | The current `<for-each>` item's stable, zero-based input index. |
-| `context.iteration.total` | The total number of items captured by the current `<for-each>`. |
+| Reference                 | Description                                                                                          |
+| ------------------------- | ---------------------------------------------------------------------------------------------------- |
+| `context.payload`         | The validated input supplied by the trigger or calling workflow. Manual runs currently receive `{}`. |
+| `context.steps.<id>`      | The JSON-compatible result returned by a completed step or result-producing control item.            |
+| `context.item`            | The current item while a script is running inside `<for-each>`; unavailable outside that loop.       |
+| `context.iteration.index` | The current `<for-each>` item's stable, zero-based input index.                                      |
+| `context.iteration.total` | The total number of items captured by the current `<for-each>`.                                      |
 
 Return only data that later steps genuinely need. Step results become durable workflow context, while local variables and mutations to `context` do not persist.
 
@@ -276,7 +281,7 @@ const total = context.steps.calculateTotal.total;
 
 return {
   orderId: order.orderId,
-  total
+  total,
 };
 ```
 
@@ -284,22 +289,22 @@ return {
 
 `services` contains WOML's supervised capabilities and aliases imported through `<module>`. Managed operations cross the Bun-to-Rust boundary for durable outcomes, cancellation, limits, and recovery.
 
-| Service | Description |
-| --- | --- |
-| `services.http.request()` | Makes a managed HTTP request with status policy, timeout, limits, cancellation, and durable operation history. |
-| `services.db()` | Opens a managed SQLite or PostgreSQL handle for queries, writes, and transactions. |
-| `services.storage` | Stores and retrieves larger checksummed objects outside workflow context. |
-| `services.artifacts` | Preserves immutable files with SHA-256 integrity, provenance, retention, backup, and local or S3-compatible storage. |
-| `services.cache` | Keeps reusable, expiring optimization data that may be safely discarded. |
-| `services.state` | Stores small, versioned workflow-owned values that must survive future runs and restarts. |
-| `services.process.run()` | Runs an operator-approved local tool with literal arguments, Rust-owned containment, bounded output, cancellation, and durable recovery. |
-| `services.events.emit()` | Publishes a durable named event to every matching active workflow. |
-| `services.workflows.call()` | Starts one workflow and waits for its final JSON result. |
-| `services.workflows.start()` | Starts one workflow in the background and immediately returns its durable run ID. |
-| `services.telegram.send()` | Sends a supervised Telegram message or reply. |
-| `services.discord.send()` | Sends a supervised Discord message or reply. |
-| `services.whatsapp.send()` | Sends an approved WhatsApp Cloud API template message. |
-| `services.<module>` | Exposes named exports from an imported local JavaScript or TypeScript module. |
+| Service                      | Description                                                                                                                              |
+| ---------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------- |
+| `services.http.request()`    | Makes a managed HTTP request with status policy, timeout, limits, cancellation, and durable operation history.                           |
+| `services.db()`              | Opens a managed SQLite or PostgreSQL handle for queries, writes, and transactions.                                                       |
+| `services.storage`           | Stores and retrieves larger checksummed objects outside workflow context.                                                                |
+| `services.artifacts`         | Preserves immutable files with SHA-256 integrity, provenance, retention, backup, and local or S3-compatible storage.                     |
+| `services.cache`             | Keeps reusable, expiring optimization data that may be safely discarded.                                                                 |
+| `services.state`             | Stores small, versioned workflow-owned values that must survive future runs and restarts.                                                |
+| `services.process.run()`     | Runs an operator-approved local tool with literal arguments, Rust-owned containment, bounded output, cancellation, and durable recovery. |
+| `services.events.emit()`     | Publishes a durable named event to every matching active workflow.                                                                       |
+| `services.workflows.call()`  | Starts one workflow and waits for its final JSON result.                                                                                 |
+| `services.workflows.start()` | Starts one workflow in the background and immediately returns its durable run ID.                                                        |
+| `services.telegram.send()`   | Sends a supervised Telegram message or reply.                                                                                            |
+| `services.discord.send()`    | Sends a supervised Discord message or reply.                                                                                             |
+| `services.whatsapp.send()`   | Sends an approved WhatsApp Cloud API template message.                                                                                   |
+| `services.<module>`          | Exposes named exports from an imported local JavaScript or TypeScript module.                                                            |
 
 For standard Web API compatibility and streaming, scripts may also use Bun's native `fetch()`. Prefer `services.http.request()` when the request needs WOML-managed limits, cancellation, operation identity, and durable supervision.
 
@@ -313,6 +318,7 @@ woml inspect                             # Open the colored runtime inspector
 woml list                                # List workflows and recent runs
 woml get run_...                         # Inspect one run and its history
 woml cancel run_...                      # Cancel a pending or running workflow
+woml signal job.completed --run run_... --wait result --correlation job-42 --id callback-42 --payload result.json
 woml workflow-id --logs                  # Follow logs for a workflow
 woml secrets set API_TOKEN               # Store a secret securely
 woml backup backups/latest               # Back up the durable state store
@@ -347,6 +353,7 @@ For Codex and other Agent Skills-compatible tools, copy the repository's complet
 - [CLI reference](https://github.com/dali-benothmen/woml/blob/master/docs/cli-reference.md)
 - [Services and capabilities](https://github.com/dali-benothmen/woml/blob/master/docs/woml-services.md)
 - [Run local tools safely](https://github.com/dali-benothmen/woml/blob/master/docs/woml-process.md)
+- [Durable waits and external signals](https://github.com/dali-benothmen/woml/blob/master/docs/woml-durable-waits.md)
 - [Modules](https://github.com/dali-benothmen/woml/blob/master/docs/woml-modules.md)
 - [Communication providers](https://github.com/dali-benothmen/woml/blob/master/docs/woml-communication-providers.md)
 - [Production deployment](https://github.com/dali-benothmen/woml/blob/master/docs/woml-production-deployment.md)

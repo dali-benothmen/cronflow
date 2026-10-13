@@ -1,20 +1,23 @@
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Barrier};
+use std::time::Instant;
 
 use chrono::{Duration, TimeZone, Utc};
-use rusqlite::Connection;
+use rusqlite::{params, Connection};
 use serde_json::Map;
 use sha2::{Digest, Sha256};
 use uuid::Uuid;
 use woml_engine::model::ValueExpression;
 use woml_engine::{
-  admit_external_signal_durable, execute_workflow_durable_outcome, resume_due_timer_waits_durable,
-  resume_workflow_durable_outcome, CompiledWait, CompiledWaitSignal, CompiledWorkflowDefinition,
-  DurableDagEngine, DurableEventStore, DurableWaitKind, DurableWaitStatus,
-  ExternalSignalAdmissionRequest, ExternalSignalAdmissionStatus, ExternalSignalResolution,
-  FixedEngineClock, InspectedWaitStatusV1, RunCancellationStatus, RunEventPayload, RunStatus,
-  RuntimeExecutionOptions, ScriptHostProcessOptions, SignalWaitTimeoutSettlement,
-  TimerWaitSettlement, TriggerAdmissionRequest, WaitRegisteredData, WorkflowRuntimeOutcome,
+  admit_external_signal_durable, create_online_backup, execute_retention,
+  execute_workflow_durable_outcome, plan_retention, prepare_restored_store,
+  resume_due_timer_waits_durable, resume_workflow_durable_outcome, CompiledWait,
+  CompiledWaitSignal, CompiledWorkflowDefinition, DurableDagEngine, DurableEventStore,
+  DurableWaitKind, DurableWaitStatus, ExternalSignalAdmissionRequest,
+  ExternalSignalAdmissionStatus, ExternalSignalResolution, FixedEngineClock, InspectedWaitStatusV1,
+  RetentionPolicyV1, RunCancellationStatus, RunEventPayload, RunStatus, RuntimeExecutionOptions,
+  ScriptHostProcessOptions, SignalWaitTimeoutSettlement, TimerWaitSettlement,
+  TriggerAdmissionRequest, WaitRegisteredData, WorkflowRuntimeOutcome,
   DURABLE_STORE_SCHEMA_VERSION,
 };
 
@@ -558,6 +561,53 @@ async fn early_signal_is_consumed_atomically_when_the_wait_registers() {
   assert!(matches!(resumed, WorkflowRuntimeOutcome::Succeeded { .. }));
 }
 
+#[test]
+fn external_signal_admission_stays_within_the_reviewed_p95_budget() {
+  let database = TemporaryDatabase::new("signal-admission-budget");
+  let now = Utc.with_ymd_and_hms(2026, 10, 13, 13, 30, 0).unwrap();
+  let workflow = signal_model("continue");
+  let mut store = DurableEventStore::open(database.path()).unwrap();
+  store
+    .register_definition(&workflow, WAIT_MODEL_HASH)
+    .unwrap();
+  let run_id = store
+    .admit_trigger_occurrence(TriggerAdmissionRequest {
+      workflow_id: workflow.workflow_id.clone(),
+      definition_hash: WAIT_MODEL_HASH.to_string(),
+      trigger_id: "start".to_string(),
+      trigger_handler: "trigger.manual".to_string(),
+      source_identity: "signal-admission-budget".to_string(),
+      payload: Map::new(),
+      received_at: now,
+    })
+    .unwrap()
+    .run_id;
+
+  let mut samples = Vec::new();
+  for index in 0..20 {
+    let started = Instant::now();
+    let outcome = store
+      .admit_external_signal_atomically(
+        signal_request(
+          &run_id,
+          &format!("budget-callback-{index}"),
+          now + Duration::milliseconds(index),
+        ),
+        &[],
+      )
+      .unwrap();
+    assert_eq!(outcome.status, ExternalSignalAdmissionStatus::Accepted);
+    assert_eq!(outcome.resolution, Some(ExternalSignalResolution::Early));
+    samples.push(started.elapsed());
+  }
+  samples.sort();
+  let p95 = samples[18];
+  assert!(
+    p95 < std::time::Duration::from_millis(250),
+    "external signal admission exceeded the reviewed 250 ms p95 CI budget: {p95:?}"
+  );
+}
+
 #[tokio::test]
 async fn signal_timeout_continue_publishes_result_and_fail_decides_run_outcome() {
   let started_at = Utc.with_ymd_and_hms(2026, 10, 13, 14, 0, 0).unwrap();
@@ -728,5 +778,141 @@ async fn concurrent_signal_and_timeout_have_exactly_one_durable_winner() {
       ))
       .count(),
     1
+  );
+}
+
+#[test]
+fn overdue_backlog_is_bounded_oldest_first_and_within_the_reviewed_budget() {
+  let database = TemporaryDatabase::new("backlog");
+  let base = Utc.with_ymd_and_hms(2026, 10, 13, 0, 0, 0).unwrap();
+  let mut store = DurableEventStore::open(database.path()).unwrap();
+  store
+    .register_definition(&wait_model(), WAIT_MODEL_HASH)
+    .unwrap();
+  drop(store);
+  let mut connection = Connection::open(database.path()).unwrap();
+  let transaction = connection.transaction().unwrap();
+  for index in 0..10_000_i64 {
+    let run_id = format!("run_backlog_{index:05}");
+    let registered_at = base + Duration::seconds(index);
+    let deadline = registered_at + Duration::seconds(1);
+    transaction
+      .execute(
+        "INSERT INTO woml_runs(run_id, workflow_id, definition_hash, created_at)
+         VALUES (?1, 'durable-wait-model', ?2, ?3)",
+        params![run_id, WAIT_MODEL_HASH, registered_at.to_rfc3339()],
+      )
+      .unwrap();
+    transaction
+      .execute(
+        "INSERT INTO woml_durable_waits(
+           run_id, wait_id, iteration_identity, node_id, kind, registered_at,
+           deadline, signals_json, correlation_digest, state,
+           resolution_event_id, resolved_at
+         ) VALUES (?1, 'pause', '', 'pause', 'duration', ?2, ?3,
+                   NULL, NULL, 'registered', NULL, NULL)",
+        params![run_id, registered_at.to_rfc3339(), deadline.to_rfc3339()],
+      )
+      .unwrap();
+  }
+  transaction.commit().unwrap();
+  drop(connection);
+
+  let store = DurableEventStore::open(database.path()).unwrap();
+  let mut samples = Vec::new();
+  let mut due = Vec::new();
+  for _ in 0..20 {
+    let scan_started = Instant::now();
+    due = store
+      .due_timer_waits(base + Duration::days(1), 100)
+      .unwrap();
+    samples.push(scan_started.elapsed());
+  }
+  samples.sort();
+  let scan_p95 = samples[18];
+  assert_eq!(due.len(), 100, "the scheduler must honor its bounded batch");
+  assert!(
+    due
+      .windows(2)
+      .all(|pair| pair[0].deadline <= pair[1].deadline),
+    "overdue waits must be selected oldest-deadline first"
+  );
+  assert!(
+    scan_p95 < std::time::Duration::from_secs(5),
+    "a 10,000-wait backlog scan exceeded the reviewed 5 second p95 CI budget: {scan_p95:?}"
+  );
+}
+
+#[tokio::test]
+async fn backup_restore_and_retention_preserve_a_pending_durable_wait() {
+  let database = TemporaryDatabase::new("maintenance");
+  let backup = database.path().with_file_name("wait-backup.sqlite");
+  let restored = database.path().with_file_name("wait-restored.sqlite");
+  let started_at = Utc.with_ymd_and_hms(2026, 6, 1, 8, 0, 0).unwrap();
+  let outcome = execute_workflow_durable_outcome(
+    wait_model(),
+    WAIT_MODEL_HASH.to_string(),
+    Map::new(),
+    unavailable_host_options(started_at),
+    database.path().to_path_buf(),
+  )
+  .await
+  .unwrap();
+  let WorkflowRuntimeOutcome::WaitingTime { run_id, .. } = outcome else {
+    panic!("the maintenance fixture must remain durably waiting");
+  };
+
+  let now = started_at + Duration::days(90);
+  let policy = RetentionPolicyV1 {
+    policy_id: "durable-waits-dw8".to_string(),
+    succeeded_before: now - Duration::days(30),
+    failed_before: now - Duration::days(30),
+    cancelled_before: now - Duration::days(30),
+  };
+  assert_eq!(
+    plan_retention(database.path(), &policy, now)
+      .unwrap()
+      .eligible_runs,
+    0,
+    "retention must never select a pending wait"
+  );
+  assert_eq!(
+    execute_retention(
+      database.path(),
+      &policy,
+      "lease_dw8_wait",
+      "durable_wait_test",
+      false,
+      now,
+    )
+    .unwrap()
+    .result
+    .deleted_runs,
+    0
+  );
+
+  let inventory = create_online_backup(
+    database.path(),
+    &backup,
+    "lease_dw8_backup",
+    "durable_wait_test",
+    "deployment_dw8",
+  )
+  .unwrap();
+  std::fs::copy(&backup, &restored).unwrap();
+  prepare_restored_store(
+    &restored,
+    &inventory.definition_hashes,
+    "backup_dw8_wait",
+    now,
+  )
+  .unwrap();
+  let restored_store = DurableEventStore::open(&restored).unwrap();
+  let inspection = restored_store.inspect_waits_v1(&run_id).unwrap();
+  assert_eq!(inspection.pending_waits, 1);
+  assert_eq!(inspection.waits[0].status, InspectedWaitStatusV1::Pending);
+  assert_eq!(
+    restored_store.projection(&run_id).unwrap().status,
+    RunStatus::Waiting
   );
 }

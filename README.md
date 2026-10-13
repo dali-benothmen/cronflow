@@ -63,16 +63,16 @@ WOML can also orchestrate AI systems themselves. An LLM or tool call can run as 
 
 ## What Can You Build?
 
-| Area | Examples |
-| --- | --- |
-| **Business processes** | Customer onboarding, order fulfillment, invoice processing, compliance review |
-| **AI agents** | Support agents, research agents, content systems, human-supervised autonomous operations |
-| **Data workflows** | Import, validate, transform, classify, iterate over, and store data |
-| **Backend automation** | Webhook processing, scheduled jobs, event-driven services, workflow APIs |
-| **Human operations** | Approval chains, moderation, escalation, incident response |
-| **Communication systems** | Telegram, Discord, Slack, and WhatsApp-driven workflows |
-| **Developer automation** | Deployment checks, backups, reports, repository and filesystem operations |
-| **Automation products** | Domain-specific workflow platforms built on the WOML language and runtime |
+| Area                      | Examples                                                                                 |
+| ------------------------- | ---------------------------------------------------------------------------------------- |
+| **Business processes**    | Customer onboarding, order fulfillment, invoice processing, compliance review            |
+| **AI agents**             | Support agents, research agents, content systems, human-supervised autonomous operations |
+| **Data workflows**        | Import, validate, transform, classify, iterate over, and store data                      |
+| **Backend automation**    | Webhook processing, scheduled jobs, event-driven services, workflow APIs                 |
+| **Human operations**      | Approval chains, moderation, escalation, incident response                               |
+| **Communication systems** | Telegram, Discord, Slack, and WhatsApp-driven workflows                                  |
+| **Developer automation**  | Deployment checks, backups, reports, repository and filesystem operations                |
+| **Automation products**   | Domain-specific workflow platforms built on the WOML language and runtime                |
 
 ## Installation
 
@@ -324,14 +324,15 @@ The exact run ID and timings will differ. Press <kbd>Ctrl</kbd>+<kbd>C</kbd> to 
 
 Every example below is checked against the current WOML compiler.
 
-| Build                                                           | What it demonstrates                                                  | Run                                               |
-| --------------------------------------------------------------- | --------------------------------------------------------------------- | ------------------------------------------------- |
-| [Durable run counter](./examples/durableStateWorkflow.woml)     | State that survives future runs and process restarts                  | `woml run examples/durableStateWorkflow.woml`     |
-| [Personalize a customer list](./examples/forEachWorkflow.woml)  | Durable per-item execution, bounded concurrency, and ordered results   | `woml run examples/forEachWorkflow.woml`          |
-| [Social distribution](./examples/forkDistributionWorkflow.woml) | Several independent multi-step branches with an explicit join         | `woml run examples/forkDistributionWorkflow.woml` |
-| [Telegram approval](./examples/telegramApprovalWorkflow.woml)   | Human approval, interactive notification buttons, and durable waiting | `woml run examples/telegramApprovalWorkflow.woml` |
-| [Workflow composition](./examples/workflowCallManual/)          | One workflow calling another and using its returned result            | `woml run examples/workflowCallManual`            |
-| [Local TypeScript module](./examples/moduleWorkflow.woml)       | Reusable project code exposed through `services.*`                    | `woml run examples/moduleWorkflow.woml`           |
+| Build                                                                | What it demonstrates                                                    | Run                                               |
+| -------------------------------------------------------------------- | ----------------------------------------------------------------------- | ------------------------------------------------- |
+| [Durable run counter](./examples/durableStateWorkflow.woml)          | State that survives future runs and process restarts                    | `woml run examples/durableStateWorkflow.woml`     |
+| [Personalize a customer list](./examples/forEachWorkflow.woml)       | Durable per-item execution, bounded concurrency, and ordered results    | `woml run examples/forEachWorkflow.woml`          |
+| [Social distribution](./examples/forkDistributionWorkflow.woml)      | Several independent multi-step branches with an explicit join           | `woml run examples/forkDistributionWorkflow.woml` |
+| [Telegram approval](./examples/telegramApprovalWorkflow.woml)        | Human approval, interactive notification buttons, and durable waiting   | `woml run examples/telegramApprovalWorkflow.woml` |
+| [Workflow composition](./examples/workflowCallManual/)               | One workflow calling another and using its returned result              | `woml run examples/workflowCallManual`            |
+| [Durable external callback](./examples/durableWaits/ciCallback.woml) | A run that releases its worker and resumes from an idempotent CI signal | `woml run examples/durableWaits/ciCallback.woml`  |
+| [Local TypeScript module](./examples/moduleWorkflow.woml)            | Reusable project code exposed through `services.*`                      | `woml run examples/moduleWorkflow.woml`           |
 
 Provider examples require their documented credentials. Browse the [complete example catalog](./examples/) for webhooks, schedules, intervals, internal events, databases, storage, cache, lifecycle, retries, communication providers, and production deployment.
 
@@ -343,6 +344,7 @@ Provider examples require their documented credentials. Browse the [complete exa
 - **Structured control flow** — sequential steps, durable bounded item loops, parallel groups, choices, switches, and concurrent multi-step forks with explicit joins.
 - **Retries and idempotency** — declare retry behavior with the `retry` attribute while preserving durable attempt and operation identities.
 - **Human-in-the-loop** — pause durably for approval and continue through approved or rejected routes.
+- **Durable waits and signals** — suspend without holding a worker, survive restarts, and resume the same run from timers or authenticated callbacks.
 - **Managed capabilities** — use supervised HTTP, SQLite/PostgreSQL, storage, cache, state, events, workflow calls, and communication services.
 - **Reusable building blocks** — import local JavaScript or TypeScript modules and define reusable WOML steps or notification providers.
 - **Lifecycle and runtime policy** — observe workflow and step events while controlling concurrency, rate limits, queues, and timeouts.

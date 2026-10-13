@@ -1,0 +1,62 @@
+<woml>
+  <workflow
+    id="ci-callback"
+    name="Wait for CI"
+    description="Continue the same run when an external CI system reports its result."
+    version="1.0.0"
+  >
+    <triggers>
+      <manual id="start" />
+    </triggers>
+    <steps>
+      <step id="dispatchBuild" name="Dispatch build">
+        <script>
+          return { buildId: crypto.randomUUID() };
+        </script>
+      </step>
+      <wait-for
+        id="buildResult"
+        name="Wait for CI callback"
+        correlation="{{context.steps.dispatchBuild.buildId}}"
+        timeout="1h"
+        on-timeout="fail"
+      >
+        <accept signal="ci.build.succeeded">
+          <schema>
+            {
+              "type": "object",
+              "required": ["commit", "url"],
+              "properties": {
+                "commit": { "type": "string" },
+                "url": { "type": "string" }
+              },
+              "additionalProperties": false
+            }
+          </schema>
+        </accept>
+        <accept signal="ci.build.failed">
+          <schema>
+            {
+              "type": "object",
+              "required": ["commit", "url"],
+              "properties": {
+                "commit": { "type": "string" },
+                "url": { "type": "string" }
+              },
+              "additionalProperties": false
+            }
+          </schema>
+        </accept>
+      </wait-for>
+      <step id="summary" name="Publish CI result">
+        <script>
+          return {
+            buildId: context.steps.dispatchBuild.buildId,
+            signal: context.steps.buildResult.signal,
+            result: context.steps.buildResult.payload
+          };
+        </script>
+      </step>
+    </steps>
+  </workflow>
+</woml>

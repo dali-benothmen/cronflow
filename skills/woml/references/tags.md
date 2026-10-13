@@ -48,10 +48,10 @@ Optional direct child of `<woml>`. Must contain one or more `<module>` children 
 <module name="calculate-discount" from="./calculate-discount.woml" />
 ```
 
-| Attribute | Required | Meaning |
-| --- | :---: | --- |
-| `name` | Yes | Unique import alias. JS/TS modules become `services.<name>`; reusable WOML definitions become custom tags named from this alias. |
-| `from` | Yes | Static relative path to `.js`, `.ts`, or `.woml`. |
+| Attribute | Required | Meaning                                                                                                                          |
+| --------- | :------: | -------------------------------------------------------------------------------------------------------------------------------- |
+| `name`    |   Yes    | Unique import alias. JS/TS modules become `services.<name>`; reusable WOML definitions become custom tags named from this alias. |
+| `from`    |   Yes    | Static relative path to `.js`, `.ts`, or `.woml`.                                                                                |
 
 The tag is empty. Remote URLs, npm package imports, and dynamic paths are not supported.
 
@@ -63,12 +63,12 @@ The tag is empty. Remote URLs, npm package imports, and dynamic paths are not su
 <workflow id="daily-report" name="Daily Report" description="Build and publish the report." version="1.2.0">
 ```
 
-| Attribute | Required | Meaning |
-| --- | :---: | --- |
-| `id` | Yes | Stable workflow ID. |
-| `name` | No | Terminal/editor display name. |
-| `description` | No | Human-readable purpose. |
-| `version` | No | User-owned workflow version; it does not select WOML grammar. |
+| Attribute     | Required | Meaning                                                       |
+| ------------- | :------: | ------------------------------------------------------------- |
+| `id`          |   Yes    | Stable workflow ID.                                           |
+| `name`        |    No    | Terminal/editor display name.                                 |
+| `description` |    No    | Human-readable purpose.                                       |
+| `version`     |    No    | User-owned workflow version; it does not select WOML grammar. |
 
 Contains optional singleton `<config>`, `<lifecycle>`, and `<triggers>`, plus exactly one `<steps>`. These containers may appear in any order. Prefer config, lifecycle, triggers, steps for readability.
 
@@ -78,12 +78,12 @@ Contains optional singleton `<config>`, `<lifecycle>`, and `<triggers>`, plus ex
 <config concurrency="4" timeout="10m" rate-limit="100/1m" queue="reports" />
 ```
 
-| Attribute | Required | Meaning |
-| --- | :---: | --- |
-| `concurrency` | No | Positive maximum concurrently active runs. |
-| `timeout` | No | Complete-run duration using `ms`, `s`, `m`, `h`, or `d`. |
-| `rate-limit` | No | Positive count and duration, such as `100/1m`. |
-| `queue` | No | Non-empty logical FIFO admission lane name. |
+| Attribute     | Required | Meaning                                                  |
+| ------------- | :------: | -------------------------------------------------------- |
+| `concurrency` |    No    | Positive maximum concurrently active runs.               |
+| `timeout`     |    No    | Complete-run duration using `ms`, `s`, `m`, `h`, or `d`. |
+| `rate-limit`  |    No    | Positive count and duration, such as `100/1m`.           |
+| `queue`       |    No    | Non-empty logical FIFO admission lane name.              |
 
 At least one attribute is required. `<config>` is empty and contains no hooks.
 
@@ -115,13 +115,13 @@ Requires only `id`. The active CLI accepts keyboard input and exposes it as `con
 </webhook>
 ```
 
-| Attribute | Required | Meaning |
-| --- | :---: | --- |
-| `id` | Yes | Trigger ID. |
-| `path` | Yes | Static absolute path; no wildcards, parameters, repeated slashes, or `/_woml`. |
-| `method` | No | Defaults to `POST`; the released runtime executes POST. |
-| `auth` | Yes | `bearer` or `none`. |
-| `secret` | With bearer | Exact `{{secrets.NAME}}`; forbidden with `auth="none"`. |
+| Attribute |  Required   | Meaning                                                                        |
+| --------- | :---------: | ------------------------------------------------------------------------------ |
+| `id`      |     Yes     | Trigger ID.                                                                    |
+| `path`    |     Yes     | Static absolute path; no wildcards, parameters, repeated slashes, or `/_woml`. |
+| `method`  |     No      | Defaults to `POST`; the released runtime executes POST.                        |
+| `auth`    |     Yes     | `bearer` or `none`.                                                            |
+| `secret`  | With bearer | Exact `{{secrets.NAME}}`; forbidden with `auth="none"`.                        |
 
 The optional singleton `<schema>` contains raw JSON Schema Draft 2020-12. Invalid payloads receive HTTP 400 and create no run.
 
@@ -200,12 +200,12 @@ Requires `id` and one or more direct `<step>` children. Optional `name`, `descri
 </for-each>
 ```
 
-| Attribute | Required | Meaning |
-| --- | :---: | --- |
-| `id` | Yes | Stable loop identity and aggregate output key. |
-| `items` | Yes | One exact `context.payload` or visible `context.steps` reference resolving to an array. |
-| `name`, `description` | No | Terminal and inspection metadata. |
-| `concurrency` | No | Active iterations from 1 through 64; defaults to 1. |
+| Attribute             | Required | Meaning                                                                                 |
+| --------------------- | :------: | --------------------------------------------------------------------------------------- |
+| `id`                  |   Yes    | Stable loop identity and aggregate output key.                                          |
+| `items`               |   Yes    | One exact `context.payload` or visible `context.steps` reference resolving to an array. |
+| `name`, `description` |    No    | Terminal and inspection metadata.                                                       |
+| `concurrency`         |    No    | Active iterations from 1 through 64; defaults to 1.                                     |
 
 The body contains one or more supported flow items and an optional final
 `<result>`. Each iteration receives `context.item` and
@@ -266,6 +266,35 @@ supported in the first loop profile.
 ```
 
 `<fork>` requires `id`; optional `join` is omitted/`all`, `none`, or a whitespace-separated set of branch IDs. It contains one or more non-empty `<branch id="...">` children. A branch may contain multiple steps and supported control-flow items. Branches execute independently and cannot read sibling outputs. Only outputs from guaranteed joined branches are visible after the fork. Nested forks are not released.
+
+### `<wait>`, `<wait-until>`, `<wait-for>`, and `<accept>`
+
+```xml
+<wait id="cooldown" duration="10m" />
+<wait-until id="window" at="{{context.steps.plan.opensAt}}" />
+<wait-for
+  id="jobResult"
+  signal="job.completed"
+  correlation="{{context.steps.startJob.jobId}}"
+  timeout="2h"
+  on-timeout="fail"
+>
+  <schema>{ "type": "object", "required": ["status"] }</schema>
+</wait-for>
+```
+
+All three are durable flow items and publish their result at
+`context.steps.<id>`. `<wait>` uses a whole `duration` from 1 second through 365 days. `<wait-until>` uses
+an RFC 3339 literal or exact visible reference. `<wait-for>` requires a
+correlation plus either one `signal` with an optional direct `<schema>`, or 1–16
+`<accept signal>` children with optional schemas. `on-timeout` is `fail` or
+`continue` and requires `timeout`. Never emulate a long wait with
+`setTimeout()` inside `<script>`.
+
+External systems use the authenticated signal HTTP endpoint; local operators
+may use `woml signal`. Reuse one idempotency key only for an identical logical
+delivery. Per-iteration waits inside `<for-each>` and waiting synchronous child
+calls are not released yet.
 
 ### `<approval>`, `<notify>`, `<when-approved>`, and `<when-rejected>`
 
