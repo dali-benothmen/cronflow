@@ -65,7 +65,7 @@ fn store_v14_migrates_transactionally_from_v13() {
     )
     .unwrap();
   assert_eq!(version, DURABLE_STORE_SCHEMA_VERSION.to_string());
-  assert_eq!(DURABLE_STORE_SCHEMA_VERSION, 14);
+  assert_eq!(DURABLE_STORE_SCHEMA_VERSION, 15);
 }
 
 #[test]

@@ -1,0 +1,10 @@
+{
+  "profile": "woml.durable-waits-performance-budgets/v1",
+  "signalAdmissionP95Ms": 250,
+  "pendingWaitScanCount": 100,
+  "pendingWaitPopulation": 10000,
+  "pendingWaitScanP95Ms": 5000,
+  "maximumSignalPayloadBytes": 1048576,
+  "maximumSignalPayloadDepth": 32,
+  "maximumEarlySignalsPerRun": 64
+}

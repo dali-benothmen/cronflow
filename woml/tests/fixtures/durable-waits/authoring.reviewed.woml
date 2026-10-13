@@ -1,0 +1,56 @@
+<woml>
+  <workflow id="durable-waits-reviewed" name="Durable waits reviewed contract" version="1.0.0">
+    <triggers>
+      <manual id="start" />
+    </triggers>
+    <steps>
+      <step id="startScan" name="Start security scan">
+        <script>
+          return { scanId: context.payload.scanId, windowStart: context.payload.windowStart };
+        </script>
+      </step>
+      <wait id="observeCanary" name="Observe canary" duration="10m" />
+      <wait-until id="maintenanceWindow" name="Wait for maintenance" at="{{context.steps.startScan.windowStart}}" />
+      <wait-for
+        id="securityScan"
+        name="Wait for security scan"
+        signal="security.scan.completed"
+        correlation="{{context.steps.startScan.scanId}}"
+        timeout="2h"
+        on-timeout="fail"
+      >
+        <schema>
+          {
+            "type": "object",
+            "required": ["status", "reportId"],
+            "properties": {
+              "status": { "enum": ["passed", "failed"] },
+              "reportId": { "type": "string" }
+            },
+            "additionalProperties": false
+          }
+        </schema>
+      </wait-for>
+      <wait-for
+        id="buildResult"
+        name="Wait for CI"
+        correlation="{{context.steps.startScan.scanId}}"
+        timeout="1h"
+        on-timeout="continue"
+      >
+        <accept signal="ci.build.succeeded">
+          <schema>{ "type": "object", "required": ["commit"] }</schema>
+        </accept>
+        <accept signal="ci.build.failed" />
+      </wait-for>
+      <step id="summary" name="Build summary">
+        <script>
+          return {
+            scan: context.steps.securityScan,
+            build: context.steps.buildResult
+          };
+        </script>
+      </step>
+    </steps>
+  </workflow>
+</woml>

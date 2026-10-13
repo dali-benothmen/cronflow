@@ -172,7 +172,7 @@ woml stop
 # or: woml stop --state ./data/state.sqlite
 ```
 
-Rust owns a renewable Store v14 lease for the state boundary. A second process
+Rust owns a renewable Store v15 lease for the state boundary. A second process
 cannot activate the same deployment while that lease is live. After a crash,
 a replacement waits for lease expiry, audits the store, recovers durable work
 behind a closed admission gate, and only then reports ready.

@@ -259,6 +259,7 @@ pub struct RuntimeExecutionOptions {
   pub workflow_call_progress_reporter: Option<WorkflowCallProgressReporter>,
   pub runtime_policy_progress_reporter: Option<RuntimePolicyProgressReporter>,
   pub resolved_secrets: Arc<BTreeMap<String, String>>,
+  pub(crate) signal_ingress_token: Option<String>,
   pub capability_registry: Arc<CapabilityRegistry>,
   pub runtime_modules: Arc<Vec<RuntimeModuleArtifact>>,
   shared_script_hosts: Option<Arc<SharedScriptHostPool>>,
@@ -450,6 +451,7 @@ impl RuntimeExecutionOptions {
       workflow_call_progress_reporter: None,
       runtime_policy_progress_reporter: None,
       resolved_secrets: Arc::new(BTreeMap::new()),
+      signal_ingress_token: None,
       capability_registry,
       runtime_modules: Arc::new(Vec::new()),
       shared_script_hosts: None,
@@ -493,6 +495,11 @@ impl RuntimeExecutionOptions {
 
   pub fn with_resolved_secrets(mut self, secrets: BTreeMap<String, String>) -> Self {
     self.resolved_secrets = Arc::new(secrets);
+    self
+  }
+
+  pub fn with_signal_ingress_token(mut self, token: Option<String>) -> Self {
+    self.signal_ingress_token = token.filter(|token| !token.is_empty());
     self
   }
 
@@ -902,6 +909,26 @@ pub enum WorkflowRuntimeOutcome {
     run_id: String,
     approval: WaitingWorkflowApproval,
   },
+  #[serde(rename = "waiting_time")]
+  WaitingTime {
+    contract: &'static str,
+    version: u32,
+    #[serde(rename = "workflowId")]
+    workflow_id: String,
+    #[serde(rename = "runId")]
+    run_id: String,
+    wait: WaitingWorkflowTimer,
+  },
+  #[serde(rename = "waiting_signal")]
+  WaitingSignal {
+    contract: &'static str,
+    version: u32,
+    #[serde(rename = "workflowId")]
+    workflow_id: String,
+    #[serde(rename = "runId")]
+    run_id: String,
+    wait: WaitingWorkflowSignal,
+  },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -918,6 +945,27 @@ pub struct WaitingWorkflowApproval {
   pub on_timeout: ApprovalTimeoutPolicy,
   pub token: String,
   pub credential_expires_at: chrono::DateTime<chrono::Utc>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WaitingWorkflowTimer {
+  pub wait_id: String,
+  pub node_id: String,
+  pub kind: crate::DurableWaitKind,
+  pub registered_at: chrono::DateTime<chrono::Utc>,
+  pub deadline: chrono::DateTime<chrono::Utc>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WaitingWorkflowSignal {
+  pub wait_id: String,
+  pub node_id: String,
+  pub registered_at: chrono::DateTime<chrono::Utc>,
+  pub signals: Vec<String>,
+  #[serde(skip_serializing_if = "Option::is_none")]
+  pub deadline: Option<chrono::DateTime<chrono::Utc>>,
 }
 
 impl WorkflowRuntimeOutcome {
@@ -1579,9 +1627,9 @@ pub async fn execute_workflow_durable(
   options: RuntimeExecutionOptions,
   database_path: PathBuf,
 ) -> Result<WorkflowExecutionResult, RuntimeExecutionError> {
-  if workflow_has_approval(&workflow) {
+  if workflow_has_approval(&workflow) || workflow_has_durable_wait(&workflow) {
     return Err(RuntimeExecutionError::InvalidConfiguration(
-      "durable approval workflows require execute_workflow_durable_outcome".to_string(),
+      "durably waiting workflows require execute_workflow_durable_outcome".to_string(),
     ));
   }
   succeeded_execution(
@@ -1597,9 +1645,9 @@ pub async fn execute_workflow_durable_outcome(
   options: RuntimeExecutionOptions,
   database_path: PathBuf,
 ) -> Result<WorkflowRuntimeOutcome, RuntimeExecutionError> {
-  if !workflow_has_approval(&workflow) {
+  if !workflow_has_approval(&workflow) && !workflow_has_durable_wait(&workflow) {
     return Err(RuntimeExecutionError::InvalidConfiguration(
-      "the approval runtime outcome API requires a model-v4 approval workflow".to_string(),
+      "the runtime outcome API requires an approval or durable-wait workflow".to_string(),
     ));
   }
   execute_workflow_durable_internal(workflow, definition_hash, trigger, options, database_path)
@@ -1751,14 +1799,15 @@ async fn resume_workflow_durable_internal(
   let binding = store.run_binding(run_id)?;
   let workflow = store.definition(&binding.definition_hash)?;
   let has_approval = workflow_has_approval(&workflow);
-  if approval_outcome_api == Some(true) && !has_approval {
+  let has_durable_wait = workflow_has_durable_wait(&workflow);
+  if approval_outcome_api == Some(true) && !has_approval && !has_durable_wait {
     return Err(RuntimeExecutionError::InvalidConfiguration(
-      "the approval runtime outcome API requires a model-v4 approval workflow".to_string(),
+      "the runtime outcome API requires an approval or durable-wait workflow".to_string(),
     ));
   }
-  if approval_outcome_api == Some(false) && has_approval {
+  if approval_outcome_api == Some(false) && (has_approval || has_durable_wait) {
     return Err(RuntimeExecutionError::InvalidConfiguration(
-      "durable approval workflows require resume_workflow_durable_outcome".to_string(),
+      "durably waiting workflows require resume_workflow_durable_outcome".to_string(),
     ));
   }
   if workflow.schema_version >= crate::COMPILED_MODEL_SCHEMA_VERSION_V12 {
@@ -1890,6 +1939,15 @@ fn workflow_has_approval(workflow: &CompiledWorkflowDefinition) -> bool {
       .any(|node| node.handler == "engine.approval-wait")
 }
 
+fn workflow_has_durable_wait(workflow: &CompiledWorkflowDefinition) -> bool {
+  workflow.schema_version >= crate::COMPILED_MODEL_SCHEMA_VERSION_V17
+    && workflow
+      .graph
+      .nodes
+      .iter()
+      .any(|node| node.handler == "engine.durable-wait")
+}
+
 fn resolved_script_secrets(
   workflow: &CompiledWorkflowDefinition,
   node_id: &str,
@@ -1928,6 +1986,12 @@ fn succeeded_execution(
     WorkflowRuntimeOutcome::Waiting { .. } => Err(RuntimeExecutionError::Stalled(
       "workflow is durably waiting for approval; use the runtime outcome API".to_string(),
     )),
+    WorkflowRuntimeOutcome::WaitingTime { .. } => Err(RuntimeExecutionError::Stalled(
+      "workflow is durably waiting for time; use the runtime outcome API".to_string(),
+    )),
+    WorkflowRuntimeOutcome::WaitingSignal { .. } => Err(RuntimeExecutionError::Stalled(
+      "workflow is durably waiting for an external signal; use the runtime outcome API".to_string(),
+    )),
   }
 }
 
@@ -1936,6 +2000,121 @@ pub fn recover_durable_runs(
 ) -> Result<RecoveryReport, RuntimeExecutionError> {
   let mut store = DurableEventStore::open(database_path)?;
   Ok(store.recover_interrupted_runs()?)
+}
+
+/// Atomically resolves every due timer wait in the bounded batch and resumes
+/// only the runs whose wait this caller won. The caller supplies the clock via
+/// RuntimeExecutionOptions, so restart recovery and tests do not depend on an
+/// in-memory timer.
+pub async fn resume_due_timer_waits_durable(
+  database_path: PathBuf,
+  options: RuntimeExecutionOptions,
+  limit: usize,
+) -> Result<Vec<WorkflowRuntimeOutcome>, RuntimeExecutionError> {
+  resume_due_timer_waits_for_workflows_durable(database_path, options, limit, None).await
+}
+
+/// Resumes due timer waits only for workflow IDs owned by the calling runtime.
+/// A shared durable store can serve multiple runtime processes, so the
+/// production scheduler must never claim a wait merely because it can see it.
+pub(crate) async fn resume_due_timer_waits_for_workflows_durable(
+  database_path: PathBuf,
+  options: RuntimeExecutionOptions,
+  limit: usize,
+  workflow_ids: Option<&HashSet<String>>,
+) -> Result<Vec<WorkflowRuntimeOutcome>, RuntimeExecutionError> {
+  let now = options.clock.now();
+  let due = match workflow_ids {
+    Some(workflow_ids) => DurableEventStore::open(database_path.clone())?
+      .due_timer_waits_for_workflows(now, limit, workflow_ids)?,
+    None => DurableEventStore::open(database_path.clone())?.due_timer_waits(now, limit)?,
+  };
+  let mut outcomes = Vec::with_capacity(due.len());
+  for wait in due {
+    let mut store = DurableEventStore::open(database_path.clone())?;
+    let settlement = store.settle_timer_wait(&wait.run_id, &wait.wait_id, now)?;
+    if !matches!(settlement, crate::TimerWaitSettlement::Resolved { .. }) {
+      continue;
+    }
+    outcomes.push(
+      execute_policy_run_durable(database_path.clone(), &wait.run_id, options.clone(), store)
+        .await?,
+    );
+  }
+  Ok(outcomes)
+}
+
+pub struct ExternalSignalRuntimeOutcome {
+  pub admission: crate::ExternalSignalAdmissionOutcome,
+  pub continuation: Option<Result<WorkflowRuntimeOutcome, RuntimeExecutionError>>,
+}
+
+pub async fn admit_external_signal_durable(
+  database_path: PathBuf,
+  request: crate::ExternalSignalAdmissionRequest,
+  options: RuntimeExecutionOptions,
+) -> Result<ExternalSignalRuntimeOutcome, RuntimeExecutionError> {
+  let mut known_secrets = options
+    .resolved_secrets
+    .values()
+    .cloned()
+    .collect::<Vec<_>>();
+  if let Some(token) = options.signal_ingress_token.as_ref() {
+    known_secrets.push(token.clone());
+  }
+  let mut store = DurableEventStore::open(database_path.clone())?;
+  let admission = store.admit_external_signal_atomically(request, &known_secrets)?;
+  let continuation = if admission.resumes_run() {
+    Some(execute_admitted_trigger_run_durable(database_path, &admission.run_id, options).await)
+  } else {
+    None
+  };
+  Ok(ExternalSignalRuntimeOutcome {
+    admission,
+    continuation,
+  })
+}
+
+pub(crate) struct DueSignalWaitResume {
+  pub run_id: String,
+  pub outcome: Result<WorkflowRuntimeOutcome, RuntimeExecutionError>,
+}
+
+pub(crate) async fn resume_due_signal_waits_for_workflows_durable(
+  database_path: PathBuf,
+  options: RuntimeExecutionOptions,
+  limit: usize,
+  workflow_ids: &HashSet<String>,
+) -> Result<Vec<DueSignalWaitResume>, RuntimeExecutionError> {
+  let now = options.clock.now();
+  let due = DurableEventStore::open(database_path.clone())?.due_signal_waits_for_workflows(
+    now,
+    limit,
+    workflow_ids,
+  )?;
+  let mut resumed = Vec::with_capacity(due.len());
+  for wait in due {
+    let mut store = DurableEventStore::open(database_path.clone())?;
+    let settlement = store.settle_signal_wait_timeout(&wait.run_id, &wait.wait_id, now)?;
+    if !matches!(
+      settlement,
+      crate::SignalWaitTimeoutSettlement::Continued { .. }
+        | crate::SignalWaitTimeoutSettlement::Failed { .. }
+    ) {
+      continue;
+    }
+    resumed.push(DueSignalWaitResume {
+      run_id: wait.run_id.clone(),
+      outcome: execute_policy_run_durable(
+        database_path.clone(),
+        &wait.run_id,
+        options.clone(),
+        store,
+      )
+      .await,
+    });
+  }
+  Ok(resumed)
 }
 
 pub fn resolve_human_approval_durable(
@@ -2279,6 +2458,8 @@ fn runtime_outcome_run_id(outcome: &WorkflowRuntimeOutcome) -> &str {
   match outcome {
     WorkflowRuntimeOutcome::Succeeded { execution, .. } => &execution.run_id,
     WorkflowRuntimeOutcome::Waiting { run_id, .. } => run_id,
+    WorkflowRuntimeOutcome::WaitingTime { run_id, .. } => run_id,
+    WorkflowRuntimeOutcome::WaitingSignal { run_id, .. } => run_id,
   }
 }
 
@@ -2397,10 +2578,201 @@ async fn continue_runtime<E: RuntimeDagEngine>(
     Ok(WorkflowRuntimeOutcome::Succeeded { execution, .. }) => Ok(
       WorkflowRuntimeOutcome::succeeded(final_result(engine, run_id, execution.execution_order)?),
     ),
-    Ok(waiting @ WorkflowRuntimeOutcome::Waiting { .. }) => Ok(waiting),
+    Ok(
+      waiting @ (WorkflowRuntimeOutcome::Waiting { .. }
+      | WorkflowRuntimeOutcome::WaitingTime { .. }
+      | WorkflowRuntimeOutcome::WaitingSignal { .. }),
+    ) => Ok(waiting),
     Err(RuntimeExecutionError::RunCancelled(_)) => Err(cancelled_run_error(engine, run_id)?),
     Err(error) => Err(error),
   }
+}
+
+enum DurableWaitNodeProgress {
+  Resolved,
+  Waiting(WorkflowRuntimeOutcome),
+}
+
+async fn register_durable_wait_node<E: RuntimeDagEngine>(
+  engine: &mut E,
+  run_id: &str,
+  node_id: &str,
+  options: &RuntimeExecutionOptions,
+) -> Result<DurableWaitNodeProgress, RuntimeExecutionError> {
+  let descriptor = engine
+    .workflow()
+    .durable_wait(node_id)
+    .cloned()
+    .ok_or_else(|| {
+      RuntimeExecutionError::Stalled(format!(
+        "durable wait node {node_id:?} has no Model v17 descriptor"
+      ))
+    })?;
+  let registered_at = options.clock.now();
+  let (kind, deadline, signals, correlation_digest) = match &descriptor {
+    crate::CompiledWait::Duration { duration_ms, .. } => {
+      let duration = chrono::Duration::milliseconds(i64::try_from(*duration_ms).map_err(|_| {
+        RuntimeExecutionError::Stalled(
+          "durable wait duration exceeds the runtime clock".to_string(),
+        )
+      })?);
+      (
+        crate::DurableWaitKind::Duration,
+        Some(registered_at + duration),
+        None,
+        None,
+      )
+    }
+    crate::CompiledWait::Until { at, .. } => {
+      let value = match at {
+        ValueExpression::Literal { value } => value.clone(),
+        ValueExpression::ContextReference { .. } => {
+          resolve_context_reference(at, &engine.projection(run_id)?.context).map_err(|error| {
+            RuntimeExecutionError::Stalled(format!(
+              "durable wait {node_id:?} cannot resolve context.{}",
+              error.path.join(".")
+            ))
+          })?
+        }
+        _ => {
+          return Err(RuntimeExecutionError::Stalled(format!(
+            "durable wait {node_id:?} has an invalid until expression"
+          )))
+        }
+      };
+      let value = value.as_str().ok_or_else(|| {
+        RuntimeExecutionError::Stalled(format!(
+          "durable wait {node_id:?} resolved at to a non-string value"
+        ))
+      })?;
+      let deadline = chrono::DateTime::parse_from_rfc3339(value)
+        .map_err(|_| {
+          RuntimeExecutionError::Stalled(format!(
+            "durable wait {node_id:?} resolved at to an invalid RFC 3339 instant"
+          ))
+        })?
+        .with_timezone(&chrono::Utc);
+      (crate::DurableWaitKind::Until, Some(deadline), None, None)
+    }
+    crate::CompiledWait::Signal {
+      signals,
+      correlation,
+      timeout_ms,
+      ..
+    } => {
+      let correlation = match correlation {
+        ValueExpression::Literal { value } => value.clone(),
+        ValueExpression::ContextReference { .. } => {
+          resolve_context_reference(correlation, &engine.projection(run_id)?.context).map_err(
+            |error| {
+              RuntimeExecutionError::Stalled(format!(
+                "signal wait {node_id:?} cannot resolve context.{}",
+                error.path.join(".")
+              ))
+            },
+          )?
+        }
+        _ => {
+          return Err(RuntimeExecutionError::Stalled(format!(
+            "signal wait {node_id:?} has an invalid correlation expression"
+          )))
+        }
+      };
+      let correlation = correlation.as_str().ok_or_else(|| {
+        RuntimeExecutionError::Stalled(format!(
+          "signal wait {node_id:?} resolved correlation to a non-string value"
+        ))
+      })?;
+      let deadline = timeout_ms
+        .map(|timeout_ms| {
+          i64::try_from(timeout_ms)
+            .map(chrono::Duration::milliseconds)
+            .map(|duration| registered_at + duration)
+        })
+        .transpose()
+        .map_err(|_| {
+          RuntimeExecutionError::Stalled(
+            "signal wait timeout exceeds the runtime clock".to_string(),
+          )
+        })?;
+      (
+        crate::DurableWaitKind::Signal,
+        deadline,
+        Some(signals.iter().map(|signal| signal.signal.clone()).collect()),
+        Some(format!(
+          "sha256:{}",
+          hex::encode(Sha256::digest(correlation.as_bytes()))
+        )),
+      )
+    }
+  };
+  engine.register_durable_wait(
+    run_id,
+    registered_at,
+    crate::WaitRegisteredData {
+      wait_id: descriptor.wait_id().to_string(),
+      node_id: descriptor.node_id().to_string(),
+      kind,
+      registered_at,
+      deadline,
+      signals,
+      correlation_digest,
+    },
+  )?;
+  let projection = engine.projection(run_id)?;
+  if projection.status == RunStatus::Running
+    && projection.context.steps.contains_key(descriptor.wait_id())
+  {
+    return Ok(DurableWaitNodeProgress::Resolved);
+  }
+  if deadline.is_some_and(|deadline| deadline <= registered_at)
+    && kind != crate::DurableWaitKind::Signal
+    && matches!(
+      engine.settle_timer_wait(run_id, descriptor.wait_id(), registered_at)?,
+      crate::TimerWaitSettlement::Resolved { .. }
+        | crate::TimerWaitSettlement::AlreadyResolved { .. }
+    )
+  {
+    return Ok(DurableWaitNodeProgress::Resolved);
+  }
+  options.suspend_policy_execution_slot().await?;
+  if kind == crate::DurableWaitKind::Signal {
+    return Ok(DurableWaitNodeProgress::Waiting(
+      WorkflowRuntimeOutcome::WaitingSignal {
+        contract: RUNTIME_OUTCOME_CONTRACT,
+        version: RUNTIME_OUTCOME_VERSION,
+        workflow_id: engine.workflow().workflow_id.clone(),
+        run_id: run_id.to_string(),
+        wait: WaitingWorkflowSignal {
+          wait_id: descriptor.wait_id().to_string(),
+          node_id: descriptor.node_id().to_string(),
+          registered_at,
+          signals: match descriptor {
+            crate::CompiledWait::Signal { signals, .. } => {
+              signals.iter().map(|signal| signal.signal.clone()).collect()
+            }
+            _ => Vec::new(),
+          },
+          deadline,
+        },
+      },
+    ));
+  }
+  Ok(DurableWaitNodeProgress::Waiting(
+    WorkflowRuntimeOutcome::WaitingTime {
+      contract: RUNTIME_OUTCOME_CONTRACT,
+      version: RUNTIME_OUTCOME_VERSION,
+      workflow_id: engine.workflow().workflow_id.clone(),
+      run_id: run_id.to_string(),
+      wait: WaitingWorkflowTimer {
+        wait_id: descriptor.wait_id().to_string(),
+        node_id: descriptor.node_id().to_string(),
+        kind,
+        registered_at,
+        deadline: deadline.expect("timer waits have a deadline"),
+      },
+    },
+  ))
 }
 
 fn settle_workflow_timeout_if_due<E: RuntimeDagEngine>(
@@ -4203,6 +4575,7 @@ async fn drive_workflow_lifecycle<E: RuntimeDagEngine>(
       | crate::COMPILED_MODEL_SCHEMA_VERSION_V14
       | crate::COMPILED_MODEL_SCHEMA_VERSION_V15
       | crate::COMPILED_MODEL_SCHEMA_VERSION_V16
+      | crate::COMPILED_MODEL_SCHEMA_VERSION_V17
   ) {
     return Ok(());
   }
@@ -4787,7 +5160,7 @@ async fn continue_runtime_loop<E: RuntimeDagEngine>(
       ));
     };
     options.ensure_policy_execution_slot().await?;
-    if let Some(group) = engine.workflow().parallel_group_for_child(node_id) {
+    if let Some(mut group) = engine.workflow().parallel_group_for_child(node_id) {
       if ready.iter().any(|ready_id| {
         engine
           .workflow()
@@ -4799,19 +5172,64 @@ async fn continue_runtime_loop<E: RuntimeDagEngine>(
           group.parallel_id
         )));
       }
-      if host.is_none() {
-        *host = Some(options.acquire_script_host().await?);
+      let wait_node_ids = group
+        .child_node_ids
+        .iter()
+        .filter(|child_id| {
+          ready.contains(child_id)
+            && engine
+              .workflow()
+              .node(child_id)
+              .is_some_and(|node| node.handler == "engine.durable-wait")
+        })
+        .cloned()
+        .collect::<Vec<_>>();
+      let mut pending_wait = None;
+      for wait_node_id in wait_node_ids {
+        match register_durable_wait_node(engine, run_id, &wait_node_id, options).await? {
+          DurableWaitNodeProgress::Resolved => execution_order.push(wait_node_id),
+          DurableWaitNodeProgress::Waiting(outcome) => pending_wait = Some(outcome),
+        }
       }
-      let completed = execute_parallel_group(
-        engine,
-        run_id,
-        group,
-        options,
-        host.as_ref().expect("script host was initialized"),
-      )
-      .await?;
-      execution_order.extend(completed);
+      group.child_node_ids.retain(|child_id| {
+        ready.contains(child_id)
+          && engine
+            .workflow()
+            .node(child_id)
+            .is_some_and(|node| node.handler == "runtime.script")
+      });
+      if !group.child_node_ids.is_empty() {
+        if host.is_none() {
+          *host = Some(options.acquire_script_host().await?);
+        }
+        let completed = execute_parallel_group(
+          engine,
+          run_id,
+          group,
+          options,
+          host.as_ref().expect("script host was initialized"),
+        )
+        .await?;
+        execution_order.extend(completed);
+      }
+      if let Some(outcome) = pending_wait {
+        return Ok(outcome);
+      }
       continue;
+    }
+    if let Some(wait_node_id) = ready.iter().find(|ready_id| {
+      engine
+        .workflow()
+        .node(ready_id)
+        .is_some_and(|node| node.handler == "engine.durable-wait")
+    }) {
+      match register_durable_wait_node(engine, run_id, wait_node_id, options).await? {
+        DurableWaitNodeProgress::Resolved => {
+          execution_order.push(wait_node_id.clone());
+          continue;
+        }
+        DurableWaitNodeProgress::Waiting(outcome) => return Ok(outcome),
+      }
     }
     if let Some(fork) = ready_fork(engine.workflow(), &current, &ready) {
       if host.is_none() {
@@ -5082,6 +5500,15 @@ async fn continue_runtime_loop<E: RuntimeDagEngine>(
       }
       "engine.approval-wait" => {
         return request_approval_wait(engine, run_id, node_id, options);
+      }
+      "engine.durable-wait" => {
+        match register_durable_wait_node(engine, run_id, node_id, options).await? {
+          DurableWaitNodeProgress::Resolved => {
+            execution_order.push(node_id.clone());
+            continue;
+          }
+          DurableWaitNodeProgress::Waiting(outcome) => return Ok(outcome),
+        }
       }
       "runtime.script" => {
         let source = source.ok_or_else(|| {
@@ -5500,6 +5927,7 @@ async fn execute_fork<E: RuntimeDagEngine>(
   let mut active: Vec<ActiveParallelInvocation<'_>> = Vec::new();
   let mut completion_order = Vec::new();
   let mut cancellation_sent = false;
+  let mut suspended_outcome = None;
 
   loop {
     settle_workflow_timeout_if_due(engine, run_id, options.clock.now(), options)?;
@@ -5691,6 +6119,18 @@ async fn execute_fork<E: RuntimeDagEngine>(
             outcome,
           });
         }
+        "engine.durable-wait" => {
+          match register_durable_wait_node(engine, run_id, node_id, options).await? {
+            DurableWaitNodeProgress::Resolved => {
+              completion_order.push(node_id.clone());
+              pure_node_completed = true;
+              break;
+            }
+            DurableWaitNodeProgress::Waiting(outcome) => {
+              suspended_outcome.get_or_insert(outcome);
+            }
+          }
+        }
         "engine.parallel-start" => {
           let parallel_id = node_id
             .strip_prefix("__woml_parallel__")
@@ -5839,7 +6279,7 @@ async fn execute_fork<E: RuntimeDagEngine>(
     }
 
     if active.is_empty() {
-      if let Some(group) = ready.iter().find_map(|node_id| {
+      if let Some(mut group) = ready.iter().find_map(|node_id| {
         let group = engine.workflow().parallel_group_for_child(node_id)?;
         routes
           .values()
@@ -5851,8 +6291,43 @@ async fn execute_fork<E: RuntimeDagEngine>(
           })
           .then_some(group)
       }) {
-        let completed = execute_parallel_group(engine, run_id, group, options, host).await?;
-        completion_order.extend(completed);
+        let wait_node_ids = group
+          .child_node_ids
+          .iter()
+          .filter(|child_id| {
+            ready.contains(child_id)
+              && engine
+                .workflow()
+                .node(child_id)
+                .is_some_and(|node| node.handler == "engine.durable-wait")
+          })
+          .cloned()
+          .collect::<Vec<_>>();
+        for wait_node_id in wait_node_ids {
+          match register_durable_wait_node(engine, run_id, &wait_node_id, options).await? {
+            DurableWaitNodeProgress::Resolved => completion_order.push(wait_node_id),
+            DurableWaitNodeProgress::Waiting(outcome) => {
+              suspended_outcome.get_or_insert(outcome);
+            }
+          }
+        }
+        group.child_node_ids.retain(|child_id| {
+          ready.contains(child_id)
+            && engine
+              .workflow()
+              .node(child_id)
+              .is_some_and(|node| node.handler == "runtime.script")
+        });
+        if !group.child_node_ids.is_empty() {
+          let completed = execute_parallel_group(engine, run_id, group, options, host).await?;
+          completion_order.extend(completed);
+        }
+        if let Some(outcome) = suspended_outcome.take() {
+          return Ok(ForkRuntimeProgress::Waiting {
+            completed: completion_order,
+            outcome,
+          });
+        }
         continue;
       }
     }
@@ -5969,6 +6444,12 @@ async fn execute_fork<E: RuntimeDagEngine>(
     }
 
     if active.is_empty() {
+      if let Some(outcome) = suspended_outcome.take() {
+        return Ok(ForkRuntimeProgress::Waiting {
+          completed: completion_order,
+          outcome,
+        });
+      }
       let projection = engine.projection(run_id)?;
       if let Some(scheduled_at) = projection
         .pending_retries
@@ -9175,6 +9656,12 @@ fn recorded_execution_order(events: &[RunEvent]) -> Vec<String> {
     .iter()
     .filter_map(|event| match &event.payload {
       RunEventPayload::StepAttemptSucceeded(data) => Some(data.node_id.clone()),
+      RunEventPayload::WaitSatisfied(data) => Some(data.wait_id.clone()),
+      RunEventPayload::WaitTimedOut(data)
+        if data.behavior == crate::DurableWaitTimeoutBehavior::Continue =>
+      {
+        Some(data.wait_id.clone())
+      }
       _ => None,
     })
     .collect()
@@ -9884,7 +10371,8 @@ fn attempt_run_failed_data(
     | crate::RUN_EVENT_SCHEMA_VERSION_V12
     | crate::RUN_EVENT_SCHEMA_VERSION_V13
     | crate::RUN_EVENT_SCHEMA_VERSION_V14
-    | crate::RUN_EVENT_SCHEMA_VERSION_V15 => RunFailedData::V2(RunFailedDataV2::Attempt {
+    | crate::RUN_EVENT_SCHEMA_VERSION_V15
+    | crate::RUN_EVENT_SCHEMA_VERSION_V16 => RunFailedData::V2(RunFailedDataV2::Attempt {
       node_id: failure.node_id.clone(),
       attempt: failure.attempt,
       invocation_id: failure.invocation_id.clone(),
@@ -9984,6 +10472,26 @@ trait RuntimeDagEngine {
   ) -> Result<IssuedApprovalToken, RuntimeExecutionError> {
     Err(RuntimeExecutionError::Stalled(
       "human approval requires the durable runtime".to_string(),
+    ))
+  }
+  fn register_durable_wait(
+    &mut self,
+    _run_id: &str,
+    _occurred_at: chrono::DateTime<chrono::Utc>,
+    _registration: crate::WaitRegisteredData,
+  ) -> Result<(), RuntimeExecutionError> {
+    Err(RuntimeExecutionError::Stalled(
+      "durable waits require the durable runtime".to_string(),
+    ))
+  }
+  fn settle_timer_wait(
+    &mut self,
+    _run_id: &str,
+    _wait_id: &str,
+    _now: chrono::DateTime<chrono::Utc>,
+  ) -> Result<crate::TimerWaitSettlement, RuntimeExecutionError> {
+    Err(RuntimeExecutionError::Stalled(
+      "durable timer waits require the durable runtime".to_string(),
     ))
   }
   fn reissue_waiting_outcome(
@@ -10137,6 +10645,24 @@ impl<E: RuntimeDagEngine> RuntimeDagEngine for SharedForEachEngine<'_, E> {
     self.with_engine(|engine| engine.request_approval(run_id, occurred_at, request))
   }
 
+  fn register_durable_wait(
+    &mut self,
+    run_id: &str,
+    occurred_at: chrono::DateTime<chrono::Utc>,
+    registration: crate::WaitRegisteredData,
+  ) -> Result<(), RuntimeExecutionError> {
+    self.with_engine(|engine| engine.register_durable_wait(run_id, occurred_at, registration))
+  }
+
+  fn settle_timer_wait(
+    &mut self,
+    run_id: &str,
+    wait_id: &str,
+    now: chrono::DateTime<chrono::Utc>,
+  ) -> Result<crate::TimerWaitSettlement, RuntimeExecutionError> {
+    self.with_engine(|engine| engine.settle_timer_wait(run_id, wait_id, now))
+  }
+
   fn reissue_waiting_outcome(
     &mut self,
     run_id: &str,
@@ -10212,6 +10738,7 @@ impl RuntimeDagEngine for InMemoryDagEngine {
         | crate::RUN_EVENT_SCHEMA_VERSION_V13
         | crate::RUN_EVENT_SCHEMA_VERSION_V14
         | crate::RUN_EVENT_SCHEMA_VERSION_V15
+        | crate::RUN_EVENT_SCHEMA_VERSION_V16
     ) {
       crate::durable::expand_model_v11_payload(self.workflow(), run_id, payload)?
     } else {
@@ -10441,44 +10968,104 @@ impl RuntimeDagEngine for DurableDagEngine {
     )?)
   }
 
+  fn register_durable_wait(
+    &mut self,
+    run_id: &str,
+    occurred_at: chrono::DateTime<chrono::Utc>,
+    registration: crate::WaitRegisteredData,
+  ) -> Result<(), RuntimeExecutionError> {
+    DurableDagEngine::register_durable_wait(self, run_id, occurred_at, registration)?;
+    Ok(())
+  }
+
+  fn settle_timer_wait(
+    &mut self,
+    run_id: &str,
+    wait_id: &str,
+    now: chrono::DateTime<chrono::Utc>,
+  ) -> Result<crate::TimerWaitSettlement, RuntimeExecutionError> {
+    Ok(DurableDagEngine::settle_timer_wait(
+      self, run_id, wait_id, now,
+    )?)
+  }
+
   fn reissue_waiting_outcome(
     &mut self,
     run_id: &str,
     now: chrono::DateTime<chrono::Utc>,
   ) -> Result<WorkflowRuntimeOutcome, RuntimeExecutionError> {
     let projection = self.projection(run_id)?;
-    let request = projection
+    if let Some(request) = projection
       .approval_requests
       .values()
       .find(|request| matches!(request.status, ApprovalRequestStatus::Waiting))
       .cloned()
-      .ok_or_else(|| {
-        RuntimeExecutionError::Stalled("waiting run has no unresolved approval request".to_string())
-      })?;
-    let approval = self
-      .workflow()
-      .approval(&request.approval_id)
+    {
+      let approval = self
+        .workflow()
+        .approval(&request.approval_id)
+        .ok_or_else(|| {
+          RuntimeExecutionError::Stalled(
+            "waiting run references an unknown approval definition".to_string(),
+          )
+        })?;
+      let token = DurableDagEngine::reissue_waiting_approval_token(
+        self,
+        run_id,
+        &request.approval_id,
+        &request.request_id,
+        now,
+      )?;
+      return Ok(waiting_outcome(
+        self.workflow().workflow_id.clone(),
+        run_id.to_string(),
+        approval,
+        request.request_id,
+        request.expires_at,
+        request.on_timeout,
+        token,
+      ));
+    }
+    let wait = projection
+      .durable_waits
+      .values()
+      .find(|wait| wait.status == crate::DurableWaitStatus::Registered)
       .ok_or_else(|| {
         RuntimeExecutionError::Stalled(
-          "waiting run references an unknown approval definition".to_string(),
+          "waiting run has no unresolved approval or durable wait".to_string(),
         )
       })?;
-    let token = DurableDagEngine::reissue_waiting_approval_token(
-      self,
-      run_id,
-      &request.approval_id,
-      &request.request_id,
-      now,
-    )?;
-    Ok(waiting_outcome(
-      self.workflow().workflow_id.clone(),
-      run_id.to_string(),
-      approval,
-      request.request_id,
-      request.expires_at,
-      request.on_timeout,
-      token,
-    ))
+    if wait.kind == crate::DurableWaitKind::Signal {
+      return Ok(WorkflowRuntimeOutcome::WaitingSignal {
+        contract: RUNTIME_OUTCOME_CONTRACT,
+        version: RUNTIME_OUTCOME_VERSION,
+        workflow_id: self.workflow().workflow_id.clone(),
+        run_id: run_id.to_string(),
+        wait: WaitingWorkflowSignal {
+          wait_id: wait.wait_id.clone(),
+          node_id: wait.node_id.clone(),
+          registered_at: wait.registered_at,
+          signals: wait.signals.clone(),
+          deadline: wait.deadline,
+        },
+      });
+    }
+    let deadline = wait.deadline.ok_or_else(|| {
+      RuntimeExecutionError::Stalled("durable timer wait has no deadline".to_string())
+    })?;
+    Ok(WorkflowRuntimeOutcome::WaitingTime {
+      contract: RUNTIME_OUTCOME_CONTRACT,
+      version: RUNTIME_OUTCOME_VERSION,
+      workflow_id: self.workflow().workflow_id.clone(),
+      run_id: run_id.to_string(),
+      wait: WaitingWorkflowTimer {
+        wait_id: wait.wait_id.clone(),
+        node_id: wait.node_id.clone(),
+        kind: wait.kind,
+        registered_at: wait.registered_at,
+        deadline,
+      },
+    })
   }
 
   fn append_payloads(

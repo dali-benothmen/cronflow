@@ -1,0 +1,50 @@
+{
+  "profile": "woml.external-signal-admission/v1",
+  "request": {
+    "required": [
+      "signal",
+      "runId",
+      "waitId",
+      "correlation",
+      "idempotencyKey",
+      "payload"
+    ],
+    "signal": "lowercase-segmented-name",
+    "payload": "bounded-canonical-json"
+  },
+  "result": {
+    "profile": "woml.signal-result/v1",
+    "required": ["status", "signalId", "runId", "waitId"],
+    "status": [
+      "accepted",
+      "duplicate",
+      "identity_conflict",
+      "already_resolved",
+      "target_not_found",
+      "rejected"
+    ]
+  },
+  "http": {
+    "profile": "woml.signal-http/v1",
+    "method": "POST",
+    "path": "/v1/signals/:name",
+    "authentication": "dedicated-bearer-token",
+    "idempotencyHeader": "Idempotency-Key",
+    "statusMap": {
+      "accepted": 202,
+      "duplicate": 200,
+      "identity_conflict": 409,
+      "already_resolved": 409,
+      "target_not_found": 404,
+      "payload_invalid": 422,
+      "access_denied": 403,
+      "rate_limited": 429,
+      "store_unavailable": 503
+    }
+  },
+  "cli": {
+    "command": "woml signal <name> --run <run-id> --wait <wait-id> --id <idempotency-key> --correlation <value> --payload <json-file>",
+    "localAuthentication": "owner-control-channel",
+    "printsSecrets": false
+  }
+}

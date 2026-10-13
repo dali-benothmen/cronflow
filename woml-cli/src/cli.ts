@@ -51,6 +51,7 @@ import {
   type WomlDefinitionPackageV9,
   type WomlDefinitionPackageV10,
   type WomlDefinitionPackageV11,
+  type WomlDefinitionPackageV12,
 } from '@woml/compiler';
 import {
   compiledDefinitionHash,
@@ -71,6 +72,7 @@ import {
   cancelRunWithRust,
   inspectRunPresentationWithRust,
   inspectRunV2WithRust,
+  inspectWaitsV1WithRust,
   listRunPresentationsWithRust,
   listRunsWithRust,
   observeRuntimeWithRust,
@@ -80,11 +82,13 @@ import {
   RunManagementError,
   RunInspectionError,
   settleApprovalTimeoutWithRust,
+  settleTimerWaitWithRust,
   inspectStoredRunRequirementsWithRust,
   resumeStoredRunWithRust,
   activateWebhookRuntimeWithRust,
   startWebhookRuntimeWithRust,
   stopWebhookRuntimeWithRust,
+  submitExternalSignalWithRust,
   submitTriggerOccurrenceWithRust,
   submitManualTriggerWithRust,
   TriggerRuntimeError,
@@ -92,6 +96,7 @@ import {
   type PublicRunStatus,
   type RustRunCancellationResultV1,
   type RustRunInspectionV2,
+  type RustWaitInspectionV1,
   type RustRunListV1,
   type ScheduleProgressV1,
   type TriggerProgressV1,
@@ -169,6 +174,7 @@ import {
   readRuntimeDescriptor,
   removeRuntimeDescriptor,
   requestRuntimeOperation,
+  requestRuntimeSignal,
   requestRuntimeStop,
   RuntimeControlError,
   runtimeDescriptorPath,
@@ -255,8 +261,7 @@ const processIo: CliIo = {
 };
 
 const WOML_CLI_VERSION = packageMetadata.version;
-const COMPILED_WORKFLOW_CACHE_COMPILER_IDENTITY =
-  `woml-cli@${WOML_CLI_VERSION}:cache-v1:model-v16:definition-package-v11`;
+const COMPILED_WORKFLOW_CACHE_COMPILER_IDENTITY = `woml-cli@${WOML_CLI_VERSION}:cache-v1:model-v16:definition-package-v11`;
 
 class CliInputError extends Error {
   readonly code: string;
@@ -313,6 +318,10 @@ function emitUsage(): string {
   return 'Usage: woml emit <eventName> --id <publisherEventId> --data @<jsonFile> --server <url> --token-secret <NAME>';
 }
 
+function signalUsage(): string {
+  return 'Usage: woml signal <name> --run <runId> --wait <waitId> --id <idempotencyKey> --correlation <value> --payload <jsonFile> [--state <path>]';
+}
+
 function checkUsage(): string {
   return 'Usage: woml check <workflow.woml|directory>... [--config <path>] [--process-policy <path>] [--artifact-policy <path>] [--json]';
 }
@@ -322,7 +331,7 @@ function typesUsage(): string {
 }
 
 function usage(): string {
-  return `${runUsage()}\n${testUsage()}\n${logFollowUsage}\n${checkUsage()}\n${typesUsage()}\n${inspectUsage}\n${artifactsUsage()}\n${backupUsage}\n${restoreUsage}\n${pruneUsage}\n${listUsage()}\n${getUsage()}\n${cancelUsage()}\n${stopUsage()}\n${emitUsage()}\n${secretsUsage()}\n${providerDoctorUsage()}`;
+  return `${runUsage()}\n${testUsage()}\n${logFollowUsage}\n${checkUsage()}\n${typesUsage()}\n${inspectUsage}\n${artifactsUsage()}\n${backupUsage}\n${restoreUsage}\n${pruneUsage}\n${listUsage()}\n${getUsage()}\n${cancelUsage()}\n${stopUsage()}\n${emitUsage()}\n${signalUsage()}\n${secretsUsage()}\n${providerDoctorUsage()}`;
 }
 
 interface RunArguments {
@@ -674,6 +683,82 @@ interface EmitArguments {
   readonly tokenSecretName: string;
 }
 
+interface SignalArguments {
+  readonly signal: string;
+  readonly runId: string;
+  readonly waitId: string;
+  readonly idempotencyKey: string;
+  readonly correlation: string;
+  readonly payloadPath: string;
+  readonly statePath: string;
+}
+
+const signalNamePattern = /^[a-z][a-z0-9]*(?:[._-][a-z0-9]+)+$/;
+
+function parseSignalArguments(args: readonly string[]): SignalArguments {
+  const [, signal, ...options] = args;
+  if (
+    signal === undefined ||
+    signal.length > 128 ||
+    !signalNamePattern.test(signal) ||
+    options.length < 10 ||
+    options.length > 12 ||
+    options.length % 2 !== 0
+  ) {
+    throw new CliInputError('WOML_CLI_ARGUMENTS_INVALID', signalUsage());
+  }
+  const values = new Map<string, string>();
+  for (let index = 0; index < options.length; index += 2) {
+    const option = options[index]!;
+    const value = options[index + 1];
+    if (
+      value === undefined ||
+      values.has(option) ||
+      ![
+        '--run',
+        '--wait',
+        '--id',
+        '--correlation',
+        '--payload',
+        '--state',
+      ].includes(option)
+    ) {
+      throw new CliInputError('WOML_CLI_ARGUMENTS_INVALID', signalUsage());
+    }
+    values.set(option, value);
+  }
+  const runId = values.get('--run');
+  const waitId = values.get('--wait');
+  const idempotencyKey = values.get('--id');
+  const correlation = values.get('--correlation');
+  const payloadPath = values.get('--payload');
+  if (
+    runId === undefined ||
+    runId.length > 256 ||
+    waitId === undefined ||
+    waitId.length > 128 ||
+    idempotencyKey === undefined ||
+    idempotencyKey.length > 256 ||
+    correlation === undefined ||
+    correlation.length > 256 ||
+    payloadPath === undefined ||
+    [runId, waitId, idempotencyKey, correlation, payloadPath].some(
+      value => value.length === 0
+    )
+  ) {
+    throw new CliInputError('WOML_CLI_ARGUMENTS_INVALID', signalUsage());
+  }
+  return {
+    signal,
+    runId,
+    waitId,
+    idempotencyKey,
+    correlation,
+    payloadPath: resolve(payloadPath),
+    statePath: resolve(values.get('--state') ?? '.woml/state.sqlite'),
+  };
+}
+
 const eventNamePattern = /^[a-z][a-z0-9]*(?:[._-][a-z0-9]+)+$/;
 const eventIdPattern = /^[A-Za-z0-9][A-Za-z0-9._:-]*$/;
 function parseEmitArguments(args: readonly string[]): EmitArguments {
@@ -943,7 +1028,9 @@ function formatRunList(list: RustRunListV1): string {
   return `${lines.join('\n')}\n`;
 }
 
-function formatArtifactInspection(inspection: RustArtifactInspectionV1): string {
+function formatArtifactInspection(
+  inspection: RustArtifactInspectionV1
+): string {
   return [
     `Artifact: ${inspection.artifact.id}`,
     `Name: ${inspection.artifact.name}`,
@@ -959,7 +1046,8 @@ function formatArtifactInspection(inspection: RustArtifactInspectionV1): string 
 function formatRunInspection(
   inspection: RustRunInspectionV2,
   artifacts?: readonly RustArtifactInspectionV1[],
-  artifactsTruncated = false
+  artifactsTruncated = false,
+  waitInspection?: RustWaitInspectionV1
 ): string {
   const lines = [
     `Run: ${inspection.runId}`,
@@ -988,12 +1076,33 @@ function formatRunInspection(
     for (const loop of inspection.forEach.items) {
       const completed = loop.succeeded + loop.failed + loop.skipped;
       const progress = `${completed}/${loop.total} completed, ${loop.active} active, ${loop.pending} pending`;
-      const failure = loop.failedIndex === undefined
-        ? ''
-        : `, failed item ${loop.failedIndex + 1} (index ${loop.failedIndex})${loop.failedNodeId === undefined ? '' : ` at ${loop.failedNodeId}`}`;
+      const failure =
+        loop.failedIndex === undefined
+          ? ''
+          : `, failed item ${loop.failedIndex + 1} (index ${loop.failedIndex})${loop.failedNodeId === undefined ? '' : ` at ${loop.failedNodeId}`}`;
       lines.push(
         `  ${loop.forEachId}: ${loop.status} (${progress}, concurrency ${loop.concurrency}${failure})`
       );
+    }
+  }
+  if (waitInspection !== undefined && waitInspection.waits.length > 0) {
+    lines.push('Durable waits:');
+    for (const wait of waitInspection.waits) {
+      const signals =
+        wait.signals === undefined || wait.signals.length === 0
+          ? ''
+          : ` · accepts ${wait.signals.join(', ')}`;
+      const deadline =
+        wait.deadline === undefined ? '' : ` · deadline ${wait.deadline}`;
+      lines.push(
+        `  ${wait.waitId}: ${wait.status} · ${wait.name}${signals}${deadline}`
+      );
+    }
+    if (waitInspection.pendingWaits > 0) {
+      lines.push(
+        `Pending waits: ${waitInspection.pendingWaits}${waitInspection.oldestPendingWaitAgeMs === undefined ? '' : ` · oldest ${waitInspection.oldestPendingWaitAgeMs} ms`}`
+      );
+      lines.push(`Cancel safely: woml cancel ${inspection.runId}`);
     }
   }
   if (inspection.hooks.length > 0) {
@@ -1022,7 +1131,8 @@ function formatRunInspection(
         `    ${artifact.artifact.id} · ${artifact.provenance.nodeId} attempt ${artifact.provenance.attempt}`
       );
     }
-    if (artifactsTruncated) lines.push('  Additional artifacts were omitted from this bounded view.');
+    if (artifactsTruncated)
+      lines.push('  Additional artifacts were omitted from this bounded view.');
   }
   return `${lines.join('\n')}\n`;
 }
@@ -1497,14 +1607,18 @@ async function readWorkflowUnprofiled(filePath: string): Promise<string> {
 }
 
 async function readWorkflow(filePath: string): Promise<string> {
-  return await profileAsync('compiler', 'compiler.read_source', async measurements => {
-    const source = await readWorkflowUnprofiled(filePath);
-    if (measurements !== undefined) {
-      measurements.counts.files = 1;
-      measurements.bytes.source = Buffer.byteLength(source);
+  return await profileAsync(
+    'compiler',
+    'compiler.read_source',
+    async measurements => {
+      const source = await readWorkflowUnprofiled(filePath);
+      if (measurements !== undefined) {
+        measurements.counts.files = 1;
+        measurements.bytes.source = Buffer.byteLength(source);
+      }
+      return source;
     }
-    return source;
-  });
+  );
 }
 
 interface CompiledWorkflowSource {
@@ -1572,15 +1686,19 @@ export async function assertStableSourceSnapshot(
     readonly sourceSnapshot: readonly SourceSnapshotEntry[];
   }[]
 ): Promise<void> {
-  await profileAsync('compiler', 'compiler.verify_source_snapshot', async measurements => {
-    await assertStableSourceSnapshotUnprofiled(sources);
-    if (measurements !== undefined) {
-      measurements.counts.sources = sources.reduce(
-        (total, source) => total + source.sourceSnapshot.length,
-        0
-      );
+  await profileAsync(
+    'compiler',
+    'compiler.verify_source_snapshot',
+    async measurements => {
+      await assertStableSourceSnapshotUnprofiled(sources);
+      if (measurements !== undefined) {
+        measurements.counts.sources = sources.reduce(
+          (total, source) => total + source.sourceSnapshot.length,
+          0
+        );
+      }
     }
-  });
+  );
 }
 
 async function assertStableWorkflowInputSetUnprofiled(
@@ -1592,7 +1710,9 @@ async function assertStableWorkflowInputSetUnprofiled(
     for (const path of await workflowFilePaths(inputPath))
       current.add(resolve(path));
   }
-  const expected = [...new Set(expectedPaths.map(path => resolve(path)))].sort();
+  const expected = [
+    ...new Set(expectedPaths.map(path => resolve(path))),
+  ].sort();
   const observed = [...current].sort();
   if (
     expected.length !== observed.length ||
@@ -1609,13 +1729,17 @@ async function assertStableWorkflowInputSet(
   inputPaths: readonly string[],
   expectedPaths: readonly string[]
 ): Promise<void> {
-  await profileAsync('compiler', 'compiler.verify_input_set', async measurements => {
-    await assertStableWorkflowInputSetUnprofiled(inputPaths, expectedPaths);
-    if (measurements !== undefined) {
-      measurements.counts.inputs = inputPaths.length;
-      measurements.counts.files = expectedPaths.length;
+  await profileAsync(
+    'compiler',
+    'compiler.verify_input_set',
+    async measurements => {
+      await assertStableWorkflowInputSetUnprofiled(inputPaths, expectedPaths);
+      if (measurements !== undefined) {
+        measurements.counts.inputs = inputPaths.length;
+        measurements.counts.files = expectedPaths.length;
+      }
     }
-  });
+  );
 }
 
 function promoteForLifecycleAuthority(
@@ -1627,7 +1751,8 @@ function promoteForLifecycleAuthority(
     workflow.schemaVersion === 13 ||
     workflow.schemaVersion === 14 ||
     workflow.schemaVersion === 15 ||
-    workflow.schemaVersion === 16
+    workflow.schemaVersion === 16 ||
+    workflow.schemaVersion === 17
   ) {
     return workflow;
   }
@@ -1689,12 +1814,10 @@ function reusableCommunicationAliasDiagnostics(
             severity: 'warning' as const,
             code: 'WOML_BUILTIN_PROVIDER_SHADOWED',
             phase: 'validation' as const,
-            message:
-              `The imported notification provider <${imported.name}> shadows WOML's built-in ${imported.name === 'telegram' ? 'Telegram' : 'Discord'} notification tag in this workflow.`,
+            message: `The imported notification provider <${imported.name}> shadows WOML's built-in ${imported.name === 'telegram' ? 'Telegram' : 'Discord'} notification tag in this workflow.`,
             file: document.file,
             location: imported.element.openTagSpan,
-            hint:
-              `WOML preserves this local provider. Rename the import only when you want the built-in <${imported.name} ${imported.name === 'telegram' ? 'chats' : 'channels'}="..."> contract.`,
+            hint: `WOML preserves this local provider. Rename the import only when you want the built-in <${imported.name} ${imported.name === 'telegram' ? 'chats' : 'channels'}="..."> contract.`,
           },
         ]
       : []
@@ -1709,6 +1832,7 @@ function runtimeModulesFromPackage(
     | WomlDefinitionPackageV9
     | WomlDefinitionPackageV10
     | WomlDefinitionPackageV11
+    | WomlDefinitionPackageV12
 ): readonly RustRuntimeModuleArtifact[] {
   const modules = definitionPackage.modules.map(module => {
     const bundle = definitionPackage.artifacts.find(
@@ -1734,10 +1858,14 @@ function runtimeModulesFromPackage(
   if (
     definitionPackage.schemaVersion !== 9 &&
     definitionPackage.schemaVersion !== 10 &&
-    definitionPackage.schemaVersion !== 11
-  ) return modules;
+    definitionPackage.schemaVersion !== 11 &&
+    definitionPackage.schemaVersion !== 12
+  )
+    return modules;
   const seen = new Set<string>();
-  const reusableArtifacts = (definitionPackage.workflow.model.reusableDefinitions ?? [])
+  const reusableArtifacts = (
+    definitionPackage.workflow.model.reusableDefinitions ?? []
+  )
     .filter(
       definition =>
         !seen.has(definition.scriptArtifactId) &&
@@ -1758,38 +1886,53 @@ function runtimeModulesFromPackage(
         sourceMapDigest: sourceDigest(''),
         exports: [] as readonly string[],
         bundle: artifact.content,
-      sourceMap: '',
+        sourceMap: '',
       };
     });
-  const lifecycleArtifacts = (definitionPackage.workflow.model.reusableDefinitions ?? [])
-    .flatMap(definition => {
-      const ownerId = definition.kind === 'step'
+  const lifecycleArtifacts = (
+    definitionPackage.workflow.model.reusableDefinitions ?? []
+  ).flatMap(definition => {
+    const ownerId =
+      definition.kind === 'step'
         ? definition.invocationId
         : definition.providerId;
-      return [
-        ...((definition.lifecycle?.onSuccess ?? []).map(actionId => ({ actionId, hook: 'on-success' }))),
-        ...((definition.lifecycle?.onError ?? []).map(actionId => ({ actionId, hook: 'on-error' }))),
-        ...((definition.lifecycle?.onComplete ?? []).map(actionId => ({ actionId, hook: 'on-complete' }))),
-      ].map(({ actionId, hook }, indexWithinHook) => {
-        const actionIndex = Number(actionId.slice(actionId.lastIndexOf(':') + 1));
-        const artifact = definitionPackage.artifacts.find(
-          item => item.path === `definitions/${ownerId}.${hook}.${Number.isInteger(actionIndex) ? actionIndex : indexWithinHook}.js`
+    return [
+      ...(definition.lifecycle?.onSuccess ?? []).map(actionId => ({
+        actionId,
+        hook: 'on-success',
+      })),
+      ...(definition.lifecycle?.onError ?? []).map(actionId => ({
+        actionId,
+        hook: 'on-error',
+      })),
+      ...(definition.lifecycle?.onComplete ?? []).map(actionId => ({
+        actionId,
+        hook: 'on-complete',
+      })),
+    ].map(({ actionId, hook }, indexWithinHook) => {
+      const actionIndex = Number(actionId.slice(actionId.lastIndexOf(':') + 1));
+      const artifact = definitionPackage.artifacts.find(
+        item =>
+          item.path ===
+          `definitions/${ownerId}.${hook}.${Number.isInteger(actionIndex) ? actionIndex : indexWithinHook}.js`
+      );
+      if (artifact?.kind !== 'module-bundle') {
+        throw new Error(
+          `Reusable lifecycle artifact "${actionId}" is unavailable.`
         );
-        if (artifact?.kind !== 'module-bundle') {
-          throw new Error(`Reusable lifecycle artifact "${actionId}" is unavailable.`);
-        }
-        return {
-          name: `__woml_lifecycle__${sourceDigest(actionId).slice(7)}`,
-          bundleDigest: artifact.digest,
-          sourceMapDigest: sourceDigest(''),
-          exports: [] as readonly string[],
-          bundle: artifact.content,
-          sourceMap: '',
-        };
-      });
+      }
+      return {
+        name: `__woml_lifecycle__${sourceDigest(actionId).slice(7)}`,
+        bundleDigest: artifact.digest,
+        sourceMapDigest: sourceDigest(''),
+        exports: [] as readonly string[],
+        bundle: artifact.content,
+        sourceMap: '',
+      };
     });
-  return [...modules, ...reusableArtifacts, ...lifecycleArtifacts].sort((left, right) =>
-    left.name.localeCompare(right.name)
+  });
+  return [...modules, ...reusableArtifacts, ...lifecycleArtifacts].sort(
+    (left, right) => left.name.localeCompare(right.name)
   );
 }
 
@@ -1831,11 +1974,15 @@ async function workflowFilePathsUnprofiled(
 async function workflowFilePaths(
   inputPath: string
 ): Promise<readonly string[]> {
-  return await profileAsync('compiler', 'compiler.discover_input', async measurements => {
-    const paths = await workflowFilePathsUnprofiled(inputPath);
-    if (measurements !== undefined) measurements.counts.files = paths.length;
-    return paths;
-  });
+  return await profileAsync(
+    'compiler',
+    'compiler.discover_input',
+    async measurements => {
+      const paths = await workflowFilePathsUnprofiled(inputPath);
+      if (measurements !== undefined) measurements.counts.files = paths.length;
+      return paths;
+    }
+  );
 }
 
 async function compileWorkflowSourcesUnprofiled(
@@ -1846,10 +1993,15 @@ async function compileWorkflowSourcesUnprofiled(
   const compiled: CompiledWorkflowSource[] = [];
   for (const filePath of await workflowFilePaths(inputPath)) {
     const source = await readWorkflow(filePath);
-    const document = profileSync('compiler', 'compiler.parse_markup', measurements => {
-      if (measurements !== undefined) measurements.bytes.source = Buffer.byteLength(source);
-      return parseWoml(source, { file: filePath });
-    });
+    const document = profileSync(
+      'compiler',
+      'compiler.parse_markup',
+      measurements => {
+        if (measurements !== undefined)
+          measurements.bytes.source = Buffer.byteLength(source);
+        return parseWoml(source, { file: filePath });
+      }
+    );
     const projectRoot = moduleProjectRoot(filePath);
     const cacheOptions: CompiledWorkflowCacheOptions = {
       sourcePath: resolve(filePath),
@@ -1873,7 +2025,8 @@ async function compileWorkflowSourcesUnprofiled(
                   compiledDefinitionHash(candidate.workflow) !==
                   candidate.definitionHash
                 ) {
-                  if (measurements !== undefined) measurements.counts.misses = 1;
+                  if (measurements !== undefined)
+                    measurements.counts.misses = 1;
                   return undefined;
                 }
               } catch {
@@ -1919,30 +2072,43 @@ async function compileWorkflowSourcesUnprofiled(
       });
       continue;
     }
-    const reusableGraph = profileSync('compiler', 'compiler.resolve_reusable_graph', measurements => {
-      const graph = resolveWomlReusableDefinitionGraph(document, {
-        sourcePath: filePath,
-        projectRoot,
-      });
-      if (measurements !== undefined) {
-        measurements.counts.definitions = graph.definitions.length;
-        measurements.counts.sources = graph.sources.length;
-      }
-      return graph;
-    });
-    if (reusableGraph.root.kind !== 'workflow') {
-      await profileAsync('compiler', 'compiler.validate_module_entrypoints', async measurements => {
-        await validateReusableModuleEntrypoints(reusableGraph, projectRoot);
-        if (measurements !== undefined) {
-          measurements.counts.sources = reusableGraph.sources.length;
-        }
-      });
-      if (io !== undefined) {
-        await profileAsync('compiler', 'compiler.refresh_reusable_editor_data', async measurements => {
-          const content = generateWomlReusableCustomData(reusableGraph);
-          if (measurements !== undefined) measurements.bytes.output = Buffer.byteLength(content);
-          await refreshReusableEditorData(filePath, content, io);
+    const reusableGraph = profileSync(
+      'compiler',
+      'compiler.resolve_reusable_graph',
+      measurements => {
+        const graph = resolveWomlReusableDefinitionGraph(document, {
+          sourcePath: filePath,
+          projectRoot,
         });
+        if (measurements !== undefined) {
+          measurements.counts.definitions = graph.definitions.length;
+          measurements.counts.sources = graph.sources.length;
+        }
+        return graph;
+      }
+    );
+    if (reusableGraph.root.kind !== 'workflow') {
+      await profileAsync(
+        'compiler',
+        'compiler.validate_module_entrypoints',
+        async measurements => {
+          await validateReusableModuleEntrypoints(reusableGraph, projectRoot);
+          if (measurements !== undefined) {
+            measurements.counts.sources = reusableGraph.sources.length;
+          }
+        }
+      );
+      if (io !== undefined) {
+        await profileAsync(
+          'compiler',
+          'compiler.refresh_reusable_editor_data',
+          async measurements => {
+            const content = generateWomlReusableCustomData(reusableGraph);
+            if (measurements !== undefined)
+              measurements.bytes.output = Buffer.byteLength(content);
+            await refreshReusableEditorData(filePath, content, io);
+          }
+        );
       }
       if (skipReusableDefinitions) continue;
       assertWomlDocumentRunnable(document);
@@ -1953,36 +2119,50 @@ async function compileWorkflowSourcesUnprofiled(
         : generateWomlReusableCustomData(reusableGraph);
     if (reusableGraph.definitions.length > 0) {
       if (io !== undefined) {
-        await profileAsync('compiler', 'compiler.validate_module_entrypoints', async measurements => {
-          await validateReusableModuleEntrypoints(reusableGraph, projectRoot);
-          if (measurements !== undefined) {
-            measurements.counts.sources = reusableGraph.sources.length;
+        await profileAsync(
+          'compiler',
+          'compiler.validate_module_entrypoints',
+          async measurements => {
+            await validateReusableModuleEntrypoints(reusableGraph, projectRoot);
+            if (measurements !== undefined) {
+              measurements.counts.sources = reusableGraph.sources.length;
+            }
           }
-        });
+        );
         profileSync('compiler', 'compiler.validate_reusable_workflow', () =>
           validateResolvedReusableWorkflow(document, reusableGraph)
         );
-        await profileAsync('compiler', 'compiler.refresh_reusable_editor_data', async measurements => {
-          if (measurements !== undefined) {
-            measurements.bytes.output = Buffer.byteLength(reusableEditorData!);
+        await profileAsync(
+          'compiler',
+          'compiler.refresh_reusable_editor_data',
+          async measurements => {
+            if (measurements !== undefined) {
+              measurements.bytes.output = Buffer.byteLength(
+                reusableEditorData!
+              );
+            }
+            await refreshReusableEditorData(filePath, reusableEditorData!, io);
           }
-          await refreshReusableEditorData(filePath, reusableEditorData!, io);
-        });
+        );
       }
     }
     const inspected =
       reusableGraph.definitions.length === 0
-        ? profileSync('compiler', 'compiler.build_definition_package', measurements => {
-            const definitionPackage = buildWomlDefinitionPackage(document, {
-              sourcePath: filePath,
-              projectRoot,
-            });
-            if (measurements !== undefined) {
-              measurements.counts.modules = definitionPackage.modules.length;
-              measurements.counts.sources = definitionPackage.sources.length;
+        ? profileSync(
+            'compiler',
+            'compiler.build_definition_package',
+            measurements => {
+              const definitionPackage = buildWomlDefinitionPackage(document, {
+                sourcePath: filePath,
+                projectRoot,
+              });
+              if (measurements !== undefined) {
+                measurements.counts.modules = definitionPackage.modules.length;
+                measurements.counts.sources = definitionPackage.sources.length;
+              }
+              return definitionPackage;
             }
-            return definitionPackage;
-          })
+          )
         : undefined;
     if (inspected !== undefined && inspected.modules.length > 0) {
       profileSync('compiler', 'compiler.inspect_module_services', () =>
@@ -1994,33 +2174,46 @@ async function compileWorkflowSourcesUnprofiled(
     }
     const reusablePackage =
       reusableGraph.definitions.length > 0
-        ? await profileAsync('compiler', 'compiler.build_reusable_package', async measurements => {
-            const definitionPackage = await buildWomlReusableDefinitionPackage(
-              document,
-              reusableGraph,
-              { sourcePath: filePath, projectRoot }
-            );
-            if (measurements !== undefined) {
-              measurements.counts.sources = definitionPackage.sources.length;
-              measurements.counts.artifacts = definitionPackage.artifacts.length;
+        ? await profileAsync(
+            'compiler',
+            'compiler.build_reusable_package',
+            async measurements => {
+              const definitionPackage =
+                await buildWomlReusableDefinitionPackage(
+                  document,
+                  reusableGraph,
+                  { sourcePath: filePath, projectRoot }
+                );
+              if (measurements !== undefined) {
+                measurements.counts.sources = definitionPackage.sources.length;
+                measurements.counts.artifacts =
+                  definitionPackage.artifacts.length;
+              }
+              return definitionPackage;
             }
-            return definitionPackage;
-          })
+          )
         : undefined;
     const executablePackage =
-      reusablePackage ?? (inspected!.modules.length > 0
-        ? await profileAsync('compiler', 'compiler.build_executable_package', async measurements => {
-            const definitionPackage = await buildWomlExecutableDefinitionPackage(document, {
-              sourcePath: filePath,
-              projectRoot,
-            });
-            if (measurements !== undefined) {
-              measurements.counts.modules = definitionPackage.modules.length;
-              measurements.counts.sources = definitionPackage.sources.length;
-              measurements.counts.artifacts = definitionPackage.artifacts.length;
+      reusablePackage ??
+      (inspected!.modules.length > 0
+        ? await profileAsync(
+            'compiler',
+            'compiler.build_executable_package',
+            async measurements => {
+              const definitionPackage =
+                await buildWomlExecutableDefinitionPackage(document, {
+                  sourcePath: filePath,
+                  projectRoot,
+                });
+              if (measurements !== undefined) {
+                measurements.counts.modules = definitionPackage.modules.length;
+                measurements.counts.sources = definitionPackage.sources.length;
+                measurements.counts.artifacts =
+                  definitionPackage.artifacts.length;
+              }
+              return definitionPackage;
             }
-            return definitionPackage;
-          })
+          )
         : undefined);
     // Definition Package v7 is the frozen Model v12 compilation identity. RP6
     // promotes its exact reviewed artifacts directly at activation time rather
@@ -2029,21 +2222,29 @@ async function compileWorkflowSourcesUnprofiled(
       reusablePackage !== undefined
         ? reusablePackage
         : executablePackage?.schemaVersion === 7
-        ? executablePackage
-        : inspected!.modules.length > 0
-          ? await profileAsync('compiler', 'compiler.build_runtime_package', async measurements => {
-              const definitionPackage = await buildWomlRuntimeDefinitionPackage(document, {
-                sourcePath: filePath,
-                projectRoot,
-              });
-              if (measurements !== undefined) {
-                measurements.counts.modules = definitionPackage.modules.length;
-                measurements.counts.sources = definitionPackage.sources.length;
-                measurements.counts.artifacts = definitionPackage.artifacts.length;
-              }
-              return definitionPackage;
-            })
-          : undefined;
+          ? executablePackage
+          : inspected!.modules.length > 0
+            ? await profileAsync(
+                'compiler',
+                'compiler.build_runtime_package',
+                async measurements => {
+                  const definitionPackage =
+                    await buildWomlRuntimeDefinitionPackage(document, {
+                      sourcePath: filePath,
+                      projectRoot,
+                    });
+                  if (measurements !== undefined) {
+                    measurements.counts.modules =
+                      definitionPackage.modules.length;
+                    measurements.counts.sources =
+                      definitionPackage.sources.length;
+                    measurements.counts.artifacts =
+                      definitionPackage.artifacts.length;
+                  }
+                  return definitionPackage;
+                }
+              )
+            : undefined;
     const packageSources = runtimePackage?.sources ?? inspected!.sources;
     if (
       runtimePackage !== undefined &&
@@ -2055,39 +2256,43 @@ async function compileWorkflowSourcesUnprofiled(
         `workflow or module source changed while "${filePath}" was being compiled; run the command again.`
       );
     }
-    const frontendWorkflow = runtimePackage?.workflow.model ?? profileSync(
-      'compiler',
-      'compiler.lower_model',
-      measurements => {
+    const frontendWorkflow =
+      runtimePackage?.workflow.model ??
+      profileSync('compiler', 'compiler.lower_model', measurements => {
         const lowered = compileWoml(document);
         if (measurements !== undefined) {
           measurements.counts.nodes = lowered.graph.nodes.length;
           measurements.counts.edges = lowered.graph.edges.length;
         }
         return lowered;
-      }
-    );
+      });
     const workflow = profileSync('compiler', 'compiler.promote_model', () =>
       promoteForLifecycleAuthority(frontendWorkflow)
     );
     const definitionHash = compiledDefinitionHash(workflow);
-    const runtimeModules = runtimePackage === undefined
-      ? []
-      : profileSync('compiler', 'compiler.materialize_runtime_modules', measurements => {
-          const modules = runtimeModulesFromPackage(runtimePackage);
-          if (measurements !== undefined) {
-            measurements.counts.modules = modules.length;
-            measurements.bytes.bundles = modules.reduce(
-              (total, module) => total + Buffer.byteLength(module.bundle),
-              0
-            );
-            measurements.bytes.source_maps = modules.reduce(
-              (total, module) => total + Buffer.byteLength(module.sourceMap),
-              0
-            );
-          }
-          return modules;
-        });
+    const runtimeModules =
+      runtimePackage === undefined
+        ? []
+        : profileSync(
+            'compiler',
+            'compiler.materialize_runtime_modules',
+            measurements => {
+              const modules = runtimeModulesFromPackage(runtimePackage);
+              if (measurements !== undefined) {
+                measurements.counts.modules = modules.length;
+                measurements.bytes.bundles = modules.reduce(
+                  (total, module) => total + Buffer.byteLength(module.bundle),
+                  0
+                );
+                measurements.bytes.source_maps = modules.reduce(
+                  (total, module) =>
+                    total + Buffer.byteLength(module.sourceMap),
+                  0
+                );
+              }
+              return modules;
+            }
+          );
     const compiledSource: CompiledWorkflowSource = {
       filePath,
       activationInputPaths: [resolve(filePath)],
@@ -2116,9 +2321,7 @@ async function compileWorkflowSourcesUnprofiled(
             runtimeModules: compiledSource.runtimeModules,
             sourceSnapshot: compiledSource.sourceSnapshot,
             migrationDiagnostics: compiledSource.migrationDiagnostics,
-            ...(reusableEditorData === undefined
-              ? {}
-              : { reusableEditorData }),
+            ...(reusableEditorData === undefined ? {} : { reusableEditorData }),
           });
           if (measurements !== undefined) {
             measurements.counts.stored = stored ? 1 : 0;
@@ -2147,25 +2350,29 @@ async function compileWorkflowSources(
   skipReusableDefinitions = false,
   io?: CliIo
 ): Promise<readonly CompiledWorkflowSource[]> {
-  return await profileAsync('compiler', 'compiler.compile_source', async measurements => {
-    const compiled = await compileWorkflowSourcesUnprofiled(
-      inputPath,
-      skipReusableDefinitions,
-      io
-    );
-    if (measurements !== undefined) {
-      measurements.counts.workflows = compiled.length;
-      measurements.counts.nodes = compiled.reduce(
-        (total, source) => total + source.workflow.graph.nodes.length,
-        0
+  return await profileAsync(
+    'compiler',
+    'compiler.compile_source',
+    async measurements => {
+      const compiled = await compileWorkflowSourcesUnprofiled(
+        inputPath,
+        skipReusableDefinitions,
+        io
       );
-      measurements.counts.modules = compiled.reduce(
-        (total, source) => total + source.runtimeModules.length,
-        0
-      );
+      if (measurements !== undefined) {
+        measurements.counts.workflows = compiled.length;
+        measurements.counts.nodes = compiled.reduce(
+          (total, source) => total + source.workflow.graph.nodes.length,
+          0
+        );
+        measurements.counts.modules = compiled.reduce(
+          (total, source) => total + source.runtimeModules.length,
+          0
+        );
+      }
+      return compiled;
     }
-    return compiled;
-  });
+  );
 }
 
 async function compileWorkflowInputsUnprofiled(
@@ -2180,41 +2387,50 @@ async function compileWorkflowInputsUnprofiled(
     readonly files: readonly string[];
     readonly directory: boolean;
   }> = [];
-  await profileAsync('compiler', 'compiler.snapshot_inputs', async measurements => {
-    for (const inputPath of inputPaths) {
-      const resolvedFiles = (await workflowFilePaths(inputPath)).map(path =>
-        resolve(path)
-      );
-      const directory = (await stat(inputPath)).isDirectory();
-      inputSnapshots.push({ inputPath, files: resolvedFiles, directory });
-      for (const filePath of resolvedFiles) {
-        const absolutePath = resolve(filePath);
-        if (seenFiles.has(absolutePath)) continue;
-        seenFiles.add(absolutePath);
-        filePaths.push(absolutePath);
+  await profileAsync(
+    'compiler',
+    'compiler.snapshot_inputs',
+    async measurements => {
+      for (const inputPath of inputPaths) {
+        const resolvedFiles = (await workflowFilePaths(inputPath)).map(path =>
+          resolve(path)
+        );
+        const directory = (await stat(inputPath)).isDirectory();
+        inputSnapshots.push({ inputPath, files: resolvedFiles, directory });
+        for (const filePath of resolvedFiles) {
+          const absolutePath = resolve(filePath);
+          if (seenFiles.has(absolutePath)) continue;
+          seenFiles.add(absolutePath);
+          filePaths.push(absolutePath);
+        }
+      }
+      filePaths.sort((left, right) => left.localeCompare(right));
+      if (measurements !== undefined) {
+        measurements.counts.inputs = inputPaths.length;
+        measurements.counts.files = filePaths.length;
       }
     }
-    filePaths.sort((left, right) => left.localeCompare(right));
-    if (measurements !== undefined) {
-      measurements.counts.inputs = inputPaths.length;
-      measurements.counts.files = filePaths.length;
-    }
-  });
-  await profileAsync('compiler', 'compiler.compile_files', async measurements => {
-    for (const filePath of filePaths) {
-      const explicitFile = inputSnapshots.some(
-        snapshot => !snapshot.directory && snapshot.files.includes(filePath)
-      );
-      for (const source of await compileWorkflowSources(
-        filePath,
-        !explicitFile,
-        io
-      )) {
-        compiled.push(source);
+  );
+  await profileAsync(
+    'compiler',
+    'compiler.compile_files',
+    async measurements => {
+      for (const filePath of filePaths) {
+        const explicitFile = inputSnapshots.some(
+          snapshot => !snapshot.directory && snapshot.files.includes(filePath)
+        );
+        for (const source of await compileWorkflowSources(
+          filePath,
+          !explicitFile,
+          io
+        )) {
+          compiled.push(source);
+        }
       }
+      if (measurements !== undefined)
+        measurements.counts.workflows = compiled.length;
     }
-    if (measurements !== undefined) measurements.counts.workflows = compiled.length;
-  });
+  );
   profileSync('compiler', 'compiler.validate_workflow_set', measurements => {
     if (compiled.length === 0) {
       throw new CliInputError(
@@ -2232,29 +2448,35 @@ async function compileWorkflowInputsUnprofiled(
       }
       workflowIds.add(source.workflow.workflowId);
     }
-    if (measurements !== undefined) measurements.counts.workflows = workflowIds.size;
+    if (measurements !== undefined)
+      measurements.counts.workflows = workflowIds.size;
   });
   await assertStableSourceSnapshot(compiled);
-  await profileAsync('compiler', 'compiler.verify_directory_snapshots', async measurements => {
-    let directories = 0;
-    for (const snapshot of inputSnapshots) {
-      if (!snapshot.directory) continue;
-      directories += 1;
-      const current = (await workflowFilePaths(snapshot.inputPath)).map(path =>
-        resolve(path)
-      );
-      if (
-        current.length !== snapshot.files.length ||
-        current.some((path, index) => path !== snapshot.files[index])
-      ) {
-        throw new CliInputError(
-          'WOML_SOURCE_CHANGED_DURING_ACTIVATION',
-          `workflow directory "${snapshot.inputPath}" changed while the deployment was being compiled; run the command again.`
+  await profileAsync(
+    'compiler',
+    'compiler.verify_directory_snapshots',
+    async measurements => {
+      let directories = 0;
+      for (const snapshot of inputSnapshots) {
+        if (!snapshot.directory) continue;
+        directories += 1;
+        const current = (await workflowFilePaths(snapshot.inputPath)).map(
+          path => resolve(path)
         );
+        if (
+          current.length !== snapshot.files.length ||
+          current.some((path, index) => path !== snapshot.files[index])
+        ) {
+          throw new CliInputError(
+            'WOML_SOURCE_CHANGED_DURING_ACTIVATION',
+            `workflow directory "${snapshot.inputPath}" changed while the deployment was being compiled; run the command again.`
+          );
+        }
       }
+      if (measurements !== undefined)
+        measurements.counts.directories = directories;
     }
-    if (measurements !== undefined) measurements.counts.directories = directories;
-  });
+  );
   const activationInputPaths = profileSync(
     'compiler',
     'compiler.materialize_activation_inputs',
@@ -2275,18 +2497,22 @@ export async function compileWorkflowInputs(
   inputPaths: readonly string[],
   io?: CliIo
 ): Promise<readonly CompiledWorkflowSource[]> {
-  return await profileAsync('compiler', 'compiler.compile_inputs', async measurements => {
-    const compiled = await compileWorkflowInputsUnprofiled(inputPaths, io);
-    if (measurements !== undefined) {
-      measurements.counts.inputs = inputPaths.length;
-      measurements.counts.workflows = compiled.length;
-      measurements.counts.nodes = compiled.reduce(
-        (total, source) => total + source.workflow.graph.nodes.length,
-        0
-      );
+  return await profileAsync(
+    'compiler',
+    'compiler.compile_inputs',
+    async measurements => {
+      const compiled = await compileWorkflowInputsUnprofiled(inputPaths, io);
+      if (measurements !== undefined) {
+        measurements.counts.inputs = inputPaths.length;
+        measurements.counts.workflows = compiled.length;
+        measurements.counts.nodes = compiled.reduce(
+          (total, source) => total + source.workflow.graph.nodes.length,
+          0
+        );
+      }
+      return compiled;
     }
-    return compiled;
-  });
+  );
 }
 
 export function activationIdentity(
@@ -2362,10 +2588,15 @@ async function refreshEditorTypes(
   }[],
   io: CliIo
 ): Promise<void> {
-  await profileAsync('compiler', 'compiler.refresh_editor_types', async measurements => {
-    await refreshEditorTypesUnprofiled(inputPath, modules, io);
-    if (measurements !== undefined) measurements.counts.modules = modules.length;
-  });
+  await profileAsync(
+    'compiler',
+    'compiler.refresh_editor_types',
+    async measurements => {
+      await refreshEditorTypesUnprofiled(inputPath, modules, io);
+      if (measurements !== undefined)
+        measurements.counts.modules = modules.length;
+    }
+  );
 }
 
 async function refreshReusableEditorData(
@@ -2444,6 +2675,14 @@ async function runSingleCheckCommand(
         child => child.kind === 'element' && declaresForEach(child)
       );
     const hasForEach = declaresForEach(document.root);
+    const declaresDurableWait = (element: WomlSourceElement): boolean =>
+      element.name === 'wait' ||
+      element.name === 'wait-until' ||
+      element.name === 'wait-for' ||
+      element.children.some(
+        child => child.kind === 'element' && declaresDurableWait(child)
+      );
+    const hasDurableWait = declaresDurableWait(document.root);
     if (
       reusableGraph.root.kind !== 'workflow' ||
       reusableGraph.definitions.length > 0
@@ -2458,11 +2697,10 @@ async function runSingleCheckCommand(
       const reusablePackage =
         reusableGraph.root.kind === 'workflow' &&
         reusableGraph.definitions.length > 0
-          ? await buildWomlReusableDefinitionPackage(
-              document,
-              reusableGraph,
-              { sourcePath: filePath, projectRoot }
-            )
+          ? await buildWomlReusableDefinitionPackage(document, reusableGraph, {
+              sourcePath: filePath,
+              projectRoot,
+            })
           : undefined;
       if (options[0] === '--json') {
         printMigrationDiagnostics(
@@ -2498,17 +2736,70 @@ async function runSingleCheckCommand(
         reusablePackage?.schemaVersion === 11
           ? `Compiled Model v16 package: ${reusablePackage.rootHash}\nExecution: <for-each>, modules, and reusable steps are runnable together.\n`
           : reusablePackage?.schemaVersion === 10 &&
-          reusablePackage.workflow.model.communication.providers.some(
-            provider => provider.provider === 'discord'
-          )
-          ? `Compiled Model v15 package: ${reusablePackage.rootHash}\nExecution: Discord triggers, notifications, approval buttons, and services.discord.send() are executable through the durable Rust runtime.\n`
-          : reusablePackage?.schemaVersion === 10
-            ? `Compiled Model v15 package: ${reusablePackage.rootHash}\nExecution: custom definitions and Telegram triggers, notifications, and messaging are runnable together.\n`
-            : reusablePackage !== undefined
-              ? `Compiled Model v14 package: ${reusablePackage.rootHash}\nExecution: custom steps and notification providers are runnable.\n`
-              : reusableGraph.root.kind === 'workflow'
-                ? 'Execution: reusable provider source is validated; custom notification providers begin in SCP5.\n'
-                : 'Execution: reusable definitions are imported by workflows and are not independently runnable.\n'
+              reusablePackage.workflow.model.communication.providers.some(
+                provider => provider.provider === 'discord'
+              )
+            ? `Compiled Model v15 package: ${reusablePackage.rootHash}\nExecution: Discord triggers, notifications, approval buttons, and services.discord.send() are executable through the durable Rust runtime.\n`
+            : reusablePackage?.schemaVersion === 10
+              ? `Compiled Model v15 package: ${reusablePackage.rootHash}\nExecution: custom definitions and Telegram triggers, notifications, and messaging are runnable together.\n`
+              : reusablePackage !== undefined
+                ? `Compiled Model v14 package: ${reusablePackage.rootHash}\nExecution: custom steps and notification providers are runnable.\n`
+                : reusableGraph.root.kind === 'workflow'
+                  ? 'Execution: reusable provider source is validated; custom notification providers begin in SCP5.\n'
+                  : 'Execution: reusable definitions are imported by workflows and are not independently runnable.\n'
+      );
+      return 0;
+    }
+    if (hasDurableWait) {
+      const inspectionPackage = buildWomlDefinitionPackage(document, {
+        sourcePath: filePath,
+        projectRoot,
+      });
+      const executablePackage =
+        inspectionPackage.modules.length === 0
+          ? undefined
+          : await buildWomlExecutableDefinitionPackage(document, {
+              sourcePath: filePath,
+              projectRoot,
+            });
+      const compiled =
+        executablePackage?.workflow.model ?? compileWoml(document);
+      if (compiled.schemaVersion !== 17) {
+        throw new CliInputError(
+          'WOML_WAIT_MODEL_INVALID',
+          'Durable waits did not lower to the frozen compiled Model v17 contract.'
+        );
+      }
+      const workflowElement = document.root.children.find(
+        (child): child is WomlSourceElement =>
+          child.kind === 'element' && child.name === 'workflow'
+      );
+      if (executablePackage !== undefined) {
+        await refreshEditorTypes(filePath, executablePackage.modules, io);
+      }
+      if (options[0] === '--json') {
+        io.stdout(
+          `${JSON.stringify(
+            {
+              profile: 'woml.model-validation/v1',
+              valid: true,
+              workflowId: workflowElement?.attributes.id?.value,
+              feature: 'durable-waits',
+              executable: true,
+              modelVersion: compiled.schemaVersion,
+              runtimePhase: 'DW5',
+            },
+            null,
+            2
+          )}\n`
+        );
+        return 0;
+      }
+      io.stdout(
+        `WOML check passed for workflow "${workflowElement?.attributes.id?.value ?? filePath}".\n`
+      );
+      io.stdout(
+        'Compiled Model v17 passed frontend and durable Rust wait validation.\n'
       );
       return 0;
     }
@@ -2583,8 +2874,7 @@ async function runSingleCheckCommand(
               sourcePath: filePath,
               projectRoot,
             })
-          : declaresLifecycle ||
-            declaresRuntimePolicy
+          : declaresLifecycle || declaresRuntimePolicy
             ? executablePackage!
             : await buildWomlRuntimeDefinitionPackage(document, {
                 sourcePath: filePath,
@@ -2665,24 +2955,24 @@ async function runSingleCheckCommand(
       hasWhatsApp
         ? `Execution: WhatsApp triggers, approved-template notifications, lifecycle delivery, approvals, and services.whatsapp.send() are executable through the durable Rust runtime.\nCallback: ${WOML_WHATSAPP_CALLBACK_PATH} (public HTTPS is required by Meta in production).\n`
         : hasDiscord
-        ? 'Execution: Discord triggers, notifications, approval buttons, and services.discord.send() are executable through the durable Rust runtime.\n'
-        : hasTelegram
-          ? 'Execution: Telegram triggers, notifications, and services.telegram.send() are executable through the durable Rust runtime.\n'
-          : hasSwitch
-            ? 'Execution: Model v14 exact-string switch routing and merged results are executable through the durable Rust runtime.\n'
-            : hasFork
-              ? 'Execution: Model v13 all, selected, and non-blocking fork joins are executable through the durable Rust runtime.\n'
-              : hasRuntimePolicy && definitionPackage.modules.length > 0
-                ? 'Execution: Model v12 runtime policies and compiled local modules are executable together.\n'
-                : hasRuntimePolicy
-                  ? 'Execution: Model v12 concurrency, durable FIFO queueing, rolling-window rate limits, and workflow timeouts are executable.\n'
-                  : hasLifecycle
-                    ? 'Execution: workflow and step lifecycle scripts plus informational Slack notifications are executable.\n'
-                    : workflowCallsFrontendOnly
-                      ? 'Execution: Workflow Calls are valid and executable through the durable Rust runtime.\n'
-                      : definitionPackage.modules.length === 0
-                        ? 'Execution: module-free workflow; woml run is available.\n'
-                        : 'Execution: local modules are compiled and ready for woml run.\n'
+          ? 'Execution: Discord triggers, notifications, approval buttons, and services.discord.send() are executable through the durable Rust runtime.\n'
+          : hasTelegram
+            ? 'Execution: Telegram triggers, notifications, and services.telegram.send() are executable through the durable Rust runtime.\n'
+            : hasSwitch
+              ? 'Execution: Model v14 exact-string switch routing and merged results are executable through the durable Rust runtime.\n'
+              : hasFork
+                ? 'Execution: Model v13 all, selected, and non-blocking fork joins are executable through the durable Rust runtime.\n'
+                : hasRuntimePolicy && definitionPackage.modules.length > 0
+                  ? 'Execution: Model v12 runtime policies and compiled local modules are executable together.\n'
+                  : hasRuntimePolicy
+                    ? 'Execution: Model v12 concurrency, durable FIFO queueing, rolling-window rate limits, and workflow timeouts are executable.\n'
+                    : hasLifecycle
+                      ? 'Execution: workflow and step lifecycle scripts plus informational Slack notifications are executable.\n'
+                      : workflowCallsFrontendOnly
+                        ? 'Execution: Workflow Calls are valid and executable through the durable Rust runtime.\n'
+                        : definitionPackage.modules.length === 0
+                          ? 'Execution: module-free workflow; woml run is available.\n'
+                          : 'Execution: local modules are compiled and ready for woml run.\n'
     );
     return 0;
   } catch (error) {
@@ -3050,6 +3340,35 @@ function printWaitingApproval(
   );
 }
 
+async function waitForDurableTimer(
+  io: CliIo,
+  outcome: Extract<RustApprovalRuntimeOutcome, { status: 'waiting_time' }>,
+  statePath: string,
+  nativeCorePath: string | undefined
+): Promise<void> {
+  io.stderr(
+    `\nWOML run ${outcome.runId} is durably waiting until ${outcome.wait.deadline}.\n`
+  );
+  let deadline = outcome.wait.deadline;
+  for (;;) {
+    const remaining = Date.parse(deadline) - Date.now();
+    if (remaining > 0) {
+      await new Promise<void>(resolve =>
+        setTimeout(resolve, Math.min(remaining, 60_000))
+      );
+      continue;
+    }
+    const settlement = settleTimerWaitWithRust(
+      statePath,
+      outcome.runId,
+      outcome.wait.waitId,
+      nativeCorePath === undefined ? {} : { nativeCorePath }
+    );
+    if (settlement.status !== 'not_due') return;
+    deadline = settlement.deadline;
+  }
+}
+
 async function runApprovalWorkflow(
   workflow: ReturnType<typeof compileWoml>,
   args: RunArguments,
@@ -3084,7 +3403,29 @@ async function runApprovalWorkflow(
           runtimeOptions
         );
 
-  while (outcome.status === 'waiting') {
+  while (outcome.status !== 'succeeded') {
+    if (outcome.status === 'waiting_time') {
+      const waiting = outcome;
+      await waitForDurableTimer(
+        io,
+        waiting,
+        args.statePath,
+        dependencies.nativeCorePath
+      );
+      outcome = await resumeApprovalWorkflowWithRust(
+        workflow,
+        args.statePath,
+        waiting.runId,
+        runtimeOptions
+      );
+      continue;
+    }
+    if (outcome.status === 'waiting_signal') {
+      throw new CliInputError(
+        'WOML_SIGNAL_RUNTIME_REQUIRED',
+        `run ${outcome.runId} is waiting for ${outcome.wait.signals.join(', ')}. Keep it active with "woml run" and deliver the callback with "woml signal" or the authenticated HTTP endpoint.`
+      );
+    }
     const waiting = outcome;
     await serveApprovalAndWait({
       outcome: waiting,
@@ -3144,7 +3485,7 @@ function workflowSecretReferences(
       references.push({ kind: 'secretReference', name });
     }
   }
-  if (workflow.schemaVersion === 16) {
+  if (workflow.schemaVersion === 16 || workflow.schemaVersion === 17) {
     for (const descriptor of workflow.graph.forEach) {
       for (const node of descriptor.body.nodes) {
         collectSecretReferences(node.inputs, references);
@@ -3154,15 +3495,18 @@ function workflowSecretReferences(
       }
     }
   }
-  for (const definition of
-    workflow.schemaVersion === 14 ||
-    workflow.schemaVersion === 15 ||
-    workflow.schemaVersion === 16
-      ? (workflow.reusableDefinitions ?? [])
-      : []) {
+  for (const definition of workflow.schemaVersion === 14 ||
+  workflow.schemaVersion === 15 ||
+  workflow.schemaVersion === 16 ||
+  workflow.schemaVersion === 17
+    ? (workflow.reusableDefinitions ?? [])
+    : []) {
     for (const prop of definition.props) {
       if (prop.expression.kind === 'secret') {
-        references.push({ kind: 'secretReference', name: prop.expression.name });
+        references.push({
+          kind: 'secretReference',
+          name: prop.expression.name,
+        });
       }
     }
   }
@@ -3172,6 +3516,12 @@ function workflowSecretReferences(
 function workflowHasApproval(workflow: CompiledWorkflowDefinition): boolean {
   return workflow.graph.nodes.some(
     node => node.handler === 'engine.approval-wait'
+  );
+}
+
+function workflowHasDurableWait(workflow: CompiledWorkflowDefinition): boolean {
+  return workflow.graph.nodes.some(
+    node => node.handler === 'engine.durable-wait'
   );
 }
 
@@ -3255,7 +3605,35 @@ async function runNotificationWorkflow(
             runtimeCapabilities: args.runtimeCapabilities,
           }
         );
-  while (outcome.status === 'waiting') {
+  while (outcome.status !== 'succeeded') {
+    if (outcome.status === 'waiting_time') {
+      const waiting = outcome;
+      await waitForDurableTimer(
+        io,
+        waiting,
+        args.statePath,
+        dependencies.nativeCorePath
+      );
+      outcome = await resumeApprovalWorkflowWithRust(
+        workflow,
+        args.statePath,
+        waiting.runId,
+        {
+          nativeCorePath: dependencies.nativeCorePath,
+          onProgress: runtimeProgress,
+          resolvedSecrets: secrets,
+          runtimeModules,
+          runtimeCapabilities: args.runtimeCapabilities,
+        }
+      );
+      continue;
+    }
+    if (outcome.status === 'waiting_signal') {
+      throw new CliInputError(
+        'WOML_SIGNAL_RUNTIME_REQUIRED',
+        `run ${outcome.runId} is waiting for ${outcome.wait.signals.join(', ')}. Keep it active with "woml run" and deliver the callback with "woml signal" or the authenticated HTTP endpoint.`
+      );
+    }
     const waiting = outcome;
     printNotificationApproval(io, waiting, args.filePath, args.statePath);
     const hasCustomProvider =
@@ -3298,8 +3676,7 @@ async function runNotificationWorkflow(
           waiting.runId,
           {
             notificationHostPath: dependencies.notificationHostPath,
-            customNotificationHostPath:
-              dependencies.customNotificationHostPath,
+            customNotificationHostPath: dependencies.customNotificationHostPath,
             nativeCorePath: dependencies.nativeCorePath,
             approvalBaseUrl,
             resolvedSecrets: secrets,
@@ -3392,7 +3769,28 @@ async function resumeStoredRun(
     runId,
     runtimeOptions
   );
-  while (outcome.status === 'waiting') {
+  while (outcome.status !== 'succeeded') {
+    if (outcome.status === 'waiting_time') {
+      const waiting = outcome;
+      await waitForDurableTimer(
+        io,
+        waiting,
+        args.statePath,
+        dependencies.nativeCorePath
+      );
+      outcome = await resumeStoredRunWithRust(
+        args.statePath,
+        waiting.runId,
+        runtimeOptions
+      );
+      continue;
+    }
+    if (outcome.status === 'waiting_signal') {
+      throw new CliInputError(
+        'WOML_SIGNAL_RUNTIME_REQUIRED',
+        `run ${outcome.runId} is waiting for ${outcome.wait.signals.join(', ')}. Keep it active with "woml run" and deliver the callback with "woml signal" or the authenticated HTTP endpoint.`
+      );
+    }
     const waiting = outcome;
     if (requirements.hasNotifications) {
       printNotificationApproval(io, waiting, args.filePath, args.statePath);
@@ -3430,8 +3828,7 @@ async function resumeStoredRun(
           waiting.runId,
           {
             notificationHostPath: dependencies.notificationHostPath,
-            customNotificationHostPath:
-              dependencies.customNotificationHostPath,
+            customNotificationHostPath: dependencies.customNotificationHostPath,
             nativeCorePath: dependencies.nativeCorePath,
             approvalBaseUrl,
             resolvedSecrets: secrets,
@@ -3525,10 +3922,14 @@ async function executeOneShot(
 ): Promise<void> {
   if (args.runtimeCapabilities !== undefined) {
     if (args.runtimeCapabilities.process !== undefined) {
-      io.stderr(`${processGrantSummary({ process: args.runtimeCapabilities.process })}\n`);
+      io.stderr(
+        `${processGrantSummary({ process: args.runtimeCapabilities.process })}\n`
+      );
     }
     if (args.runtimeCapabilities.artifacts !== undefined) {
-      io.stderr(`${artifactGrantSummary({ artifacts: args.runtimeCapabilities.artifacts })}\n`);
+      io.stderr(
+        `${artifactGrantSummary({ artifacts: args.runtimeCapabilities.artifacts })}\n`
+      );
     }
   }
   if (args.command === 'run') {
@@ -3559,6 +3960,7 @@ async function executeOneShot(
     }
   }
   const hasApproval = workflowHasApproval(workflow);
+  const hasDurableWait = workflowHasDurableWait(workflow);
   const hasNotifications = workflowHasNotifications(workflow);
   if (
     args.resumeRunId !== undefined &&
@@ -3572,7 +3974,8 @@ async function executeOneShot(
     workflow.schemaVersion !== 13 &&
     workflow.schemaVersion !== 14 &&
     workflow.schemaVersion !== 15 &&
-    workflow.schemaVersion !== 16
+    workflow.schemaVersion !== 16 &&
+    workflow.schemaVersion !== 17
   ) {
     throw new CliInputError(
       'WOML_RESUME_REQUIRES_DURABLE_WORKFLOW',
@@ -3589,7 +3992,7 @@ async function executeOneShot(
     );
     return;
   }
-  if (hasApproval) {
+  if (hasApproval || hasDurableWait) {
     await runApprovalWorkflow(workflow, args, io, dependencies, runtimeModules);
     return;
   }
@@ -3603,7 +4006,8 @@ async function executeOneShot(
     workflow.schemaVersion === 13 ||
     workflow.schemaVersion === 14 ||
     workflow.schemaVersion === 15 ||
-    workflow.schemaVersion === 16
+    workflow.schemaVersion === 16 ||
+    workflow.schemaVersion === 17
   ) {
     await mkdir(dirname(args.statePath), { recursive: true });
     const onProgress = durableRetryProgress(io, args);
@@ -3747,20 +4151,26 @@ function literalString(
     : undefined;
 }
 
-function literalNumber(expression: ValueExpression | undefined): number | undefined {
+function literalNumber(
+  expression: ValueExpression | undefined
+): number | undefined {
   return expression?.kind === 'literal' && typeof expression.value === 'number'
     ? expression.value
     : undefined;
 }
 
-function literalStringArray(expression: ValueExpression | undefined): readonly string[] {
+function literalStringArray(
+  expression: ValueExpression | undefined
+): readonly string[] {
   if (expression?.kind !== 'array') return [];
   return expression.items
     .map(item => literalString(item))
     .filter((item): item is string => item !== undefined);
 }
 
-function triggerPresentationType(handler: string): TriggerPresentationV1['type'] | undefined {
+function triggerPresentationType(
+  handler: string
+): TriggerPresentationV1['type'] | undefined {
   if (handler === 'trigger.manual') return 'manual';
   if (handler === 'trigger.webhook') return 'webhook';
   if (handler === 'trigger.slack') return 'slack';
@@ -3773,7 +4183,9 @@ function triggerPresentationType(handler: string): TriggerPresentationV1['type']
   return undefined;
 }
 
-function readableInterval(milliseconds: number | undefined): string | undefined {
+function readableInterval(
+  milliseconds: number | undefined
+): string | undefined {
   if (milliseconds === undefined) return undefined;
   const units = [
     ['d', 86_400_000],
@@ -4015,7 +4427,10 @@ function workflowPresentation(
               url: `http://${host}:${port}${route.path}`,
               example: webhookCurlExample(route, host, port),
               ...(route.authentication === 'none'
-                ? { warning: 'No authentication; this endpoint accepts unauthenticated requests.' }
+                ? {
+                    warning:
+                      'No authentication; this endpoint accepts unauthenticated requests.',
+                  }
                 : {}),
             }),
       });
@@ -4043,7 +4458,9 @@ function workflowPresentation(
       const scope = [
         events.length === 0 ? undefined : events.join(', '),
         channels.length === 0 ? undefined : `channels: ${channels.join(', ')}`,
-      ].filter((value): value is string => value !== undefined).join(' · ');
+      ]
+        .filter((value): value is string => value !== undefined)
+        .join(' · ');
       triggers.push({
         id: trigger.id,
         type,
@@ -4067,7 +4484,9 @@ function workflowPresentation(
       const scope = [
         events.length === 0 ? undefined : events.join(', '),
         channels.length === 0 ? undefined : `channels: ${channels.join(', ')}`,
-      ].filter((value): value is string => value !== undefined).join(' · ');
+      ]
+        .filter((value): value is string => value !== undefined)
+        .join(' · ');
       triggers.push({
         id: trigger.id,
         type,
@@ -4082,7 +4501,8 @@ function workflowPresentation(
         type,
         url: `http://${host}:${port}${WOML_WHATSAPP_CALLBACK_PATH}`,
         ...(events.length === 0 ? {} : { scope: events.join(', ') }),
-        warning: 'Meta requires this callback to be reachable through public HTTPS in production.',
+        warning:
+          'Meta requires this callback to be reachable through public HTTPS in production.',
       });
       continue;
     }
@@ -4096,15 +4516,22 @@ function workflowPresentation(
         ...(literalString(fields?.timezone) === undefined
           ? {}
           : { timezone: literalString(fields?.timezone)! }),
-        ...(scheduleDue.get(dueIdentity(workflow.workflowId, trigger.id)) === undefined
+        ...(scheduleDue.get(dueIdentity(workflow.workflowId, trigger.id)) ===
+        undefined
           ? {}
-          : { nextDueAt: scheduleDue.get(dueIdentity(workflow.workflowId, trigger.id))! }),
+          : {
+              nextDueAt: scheduleDue.get(
+                dueIdentity(workflow.workflowId, trigger.id)
+              )!,
+            }),
       });
       continue;
     }
     if (type === 'interval') {
       const interval = readableInterval(literalNumber(fields?.everyMs));
-      const nextDueAt = intervalDue.get(dueIdentity(workflow.workflowId, trigger.id));
+      const nextDueAt = intervalDue.get(
+        dueIdentity(workflow.workflowId, trigger.id)
+      );
       triggers.push({
         id: trigger.id,
         type,
@@ -4138,10 +4565,13 @@ async function resolvedSecrets(
 ): Promise<Readonly<Record<string, string>>> {
   const references = [...workflowSecretReferences(workflow)];
   await preflightSecretReferences(references, store);
-  return resolvedNamedSecrets([
-    ...references.map(reference => reference.name),
-    ...artifactPolicySecretNames(runtimeCapabilities),
-  ], store);
+  return resolvedNamedSecrets(
+    [
+      ...references.map(reference => reference.name),
+      ...artifactPolicySecretNames(runtimeCapabilities),
+    ],
+    store
+  );
 }
 
 async function resolvedNamedSecrets(
@@ -4256,9 +4686,11 @@ async function durableStoreSize(path: string): Promise<number> {
       const entry = await stat(candidate);
       if (entry.isFile()) total += entry.size;
     } catch (error) {
-      if (
-        !(error instanceof Error && 'code' in error && error.code === 'ENOENT')
-      )
+      if (!(
+        error instanceof Error &&
+        'code' in error &&
+        error.code === 'ENOENT'
+      ))
         throw error;
     }
   }
@@ -4311,10 +4743,14 @@ async function activateWorkflows(
 ): Promise<void> {
   if (args.runtimeCapabilities !== undefined) {
     if (args.runtimeCapabilities.process !== undefined) {
-      io.stderr(`${processGrantSummary({ process: args.runtimeCapabilities.process })}\n`);
+      io.stderr(
+        `${processGrantSummary({ process: args.runtimeCapabilities.process })}\n`
+      );
     }
     if (args.runtimeCapabilities.artifacts !== undefined) {
-      io.stderr(`${artifactGrantSummary({ artifacts: args.runtimeCapabilities.artifacts })}\n`);
+      io.stderr(
+        `${artifactGrantSummary({ artifacts: args.runtimeCapabilities.artifacts })}\n`
+      );
     }
   }
   const activationInputPaths = sources[0]?.activationInputPaths ?? [];
@@ -4427,6 +4863,13 @@ async function activateWorkflows(
     if (productionSources.length > 0) {
       await mkdir(dirname(args.statePath), { recursive: true });
       const store = dependencies.createSecretStore();
+      const hasSignalWait = productionSources.some(source =>
+        'waits' in source.workflow.graph &&
+        source.workflow.graph.waits?.some(wait => wait.kind === 'signal')
+      );
+      const signalIngressToken = hasSignalWait
+        ? await store.get('WOML_SIGNAL_TOKEN')
+        : undefined;
       for (const source of productionSources) {
         if (source.runtimeModules.length > 0) {
           const publicModules = source.runtimeModules.filter(
@@ -4502,8 +4945,8 @@ async function activateWorkflows(
         .telegram.inbound
         ? activationRequirements.providers.telegram.inboundCredentialNames
         : [];
-      const discordGatewayCredentials = activationRequirements.providers
-        .discord.inbound
+      const discordGatewayCredentials = activationRequirements.providers.discord
+        .inbound
         ? activationRequirements.providers.discord.inboundCredentialNames
         : [];
       const uniqueEventRoutes: EventRouteSummary[] = [];
@@ -4531,7 +4974,8 @@ async function activateWorkflows(
         activationRequirements.publicHttp ||
         routes.length > 0 ||
         uniqueEventRoutes.length > 0 ||
-        hasWhatsAppEndpoint;
+        hasWhatsAppEndpoint ||
+        signalIngressToken !== undefined;
       const currentActivationId = activationIdentity(productionSources);
       const currentDeploymentId = deploymentIdentity(args.statePath);
       const runtime = await profileAsync(
@@ -4546,255 +4990,286 @@ async function activateWorkflows(
             registrations,
             args.statePath,
             {
-          nativeCorePath: dependencies.nativeCorePath,
-          host: hasHttpEndpoint ? args.host : '127.0.0.1',
-          port: hasHttpEndpoint ? args.port : 0,
-          deploymentId: currentDeploymentId,
-          activationId: currentActivationId,
-          shutdownTimeoutMs: args.shutdownTimeoutMs,
-          startSuspended: true,
-          runtimeCapabilities: args.runtimeCapabilities,
-          onTriggerProgress: progress => {
-            observe(progress);
-            if (
-              progress.type === 'occurrence_accepted' &&
-              progress.triggerHandler === 'trigger.manual'
-            ) {
-              manualRunIds.add(progress.runId);
-            }
-            foregroundPresentation.trigger(progress);
-            if (
-              progress.type === 'run_terminal' &&
-              manualRunIds.delete(progress.runId)
-            ) {
-              printManualPrompt();
-            }
-          },
-          onScheduleProgress: progress => {
-            observe(progress);
-            if (progress.type === 'next_due') {
-              scheduleDue.set(
-                dueIdentity(progress.workflowId, progress.triggerId),
-                progress.nextScheduledAt
-              );
-            }
-            foregroundPresentation.schedule(progress);
-          },
-          onIntervalProgress: progress => {
-            observe(progress);
-            if (progress.type === 'next_due') {
-              intervalDue.set(
-                dueIdentity(progress.workflowId, progress.triggerId),
-                progress.nextScheduledAt
-              );
-            }
-            foregroundPresentation.interval(progress);
-          },
-          onWorkflowCallProgress: progress => {
-            observe(progress);
-            foregroundPresentation.workflowCall(progress);
-          },
-          onRuntimePolicyProgress: progress => {
-            observe(progress);
-            foregroundPresentation.execution(progress);
-          },
-          onRuntimeLifecycle: progress => {
-            observe(progress);
-            if (
-              progress.lifecycle === 'degraded' ||
-              progress.lifecycle === 'failed'
-            ) {
-              io.stderr(
-                `WOML runtime error [WOML_RUNTIME_OWNERSHIP_LOST]: Runtime ${progress.runtimeInstanceId} lost durable deployment ownership and is shutting down.\n`
-              );
-              resolveRuntimeUnavailable();
-            }
-          },
+              nativeCorePath: dependencies.nativeCorePath,
+              host: hasHttpEndpoint ? args.host : '127.0.0.1',
+              port: hasHttpEndpoint ? args.port : 0,
+              deploymentId: currentDeploymentId,
+              activationId: currentActivationId,
+              shutdownTimeoutMs: args.shutdownTimeoutMs,
+              startSuspended: true,
+              runtimeCapabilities: args.runtimeCapabilities,
+              signalIngressToken,
+              onTriggerProgress: progress => {
+                observe(progress);
+                if (
+                  progress.type === 'occurrence_accepted' &&
+                  progress.triggerHandler === 'trigger.manual'
+                ) {
+                  manualRunIds.add(progress.runId);
+                }
+                foregroundPresentation.trigger(progress);
+                if (
+                  progress.type === 'run_terminal' &&
+                  manualRunIds.delete(progress.runId)
+                ) {
+                  printManualPrompt();
+                }
+              },
+              onScheduleProgress: progress => {
+                observe(progress);
+                if (progress.type === 'next_due') {
+                  scheduleDue.set(
+                    dueIdentity(progress.workflowId, progress.triggerId),
+                    progress.nextScheduledAt
+                  );
+                }
+                foregroundPresentation.schedule(progress);
+              },
+              onIntervalProgress: progress => {
+                observe(progress);
+                if (progress.type === 'next_due') {
+                  intervalDue.set(
+                    dueIdentity(progress.workflowId, progress.triggerId),
+                    progress.nextScheduledAt
+                  );
+                }
+                foregroundPresentation.interval(progress);
+              },
+              onWorkflowCallProgress: progress => {
+                observe(progress);
+                foregroundPresentation.workflowCall(progress);
+              },
+              onRuntimePolicyProgress: progress => {
+                observe(progress);
+                foregroundPresentation.execution(progress);
+              },
+              onRuntimeLifecycle: progress => {
+                observe(progress);
+                if (
+                  progress.lifecycle === 'degraded' ||
+                  progress.lifecycle === 'failed'
+                ) {
+                  io.stderr(
+                    `WOML runtime error [WOML_RUNTIME_OWNERSHIP_LOST]: Runtime ${progress.runtimeInstanceId} lost durable deployment ownership and is shutting down.\n`
+                  );
+                  resolveRuntimeUnavailable();
+                }
+              },
             }
           );
         }
       );
       runtimeId = runtime.runtimeId;
-      const artifactAuthority = args.runtimeCapabilities?.artifacts === undefined
-        ? undefined
-        : { artifacts: args.runtimeCapabilities.artifacts };
-      const artifactObservationSecrets = artifactAuthority === undefined
-        ? undefined
-        : await resolvedNamedSecrets(
-            artifactPolicySecretNames(artifactAuthority),
-            store
-          );
-      profileSync('runtime', 'runtime.initialize_observability', measurements => {
-        if (measurements !== undefined) {
-          measurements.counts.workflows = productionSources.length;
-          measurements.counts.pending_progress = pendingObservabilityProgress.length;
-        }
-        const componentRecords = [
-          {
-            name: 'sqlite',
-            kind: 'store' as const,
-            status: 'ready' as const,
-          },
-          {
-            name: 'rust-trigger-host',
-            kind: 'trigger' as const,
-            status: 'ready' as const,
-          },
-          {
-            name: 'script-host',
-            kind: 'worker' as const,
-            status: 'ready' as const,
-          },
-          ...(slackRegistrations.length === 0
-            ? []
-            : [
-                {
-                  name: 'slack',
-                  kind: 'provider' as const,
-                  status: 'unready' as const,
-                },
-              ]),
-          ...(telegramPollingCredentials.length === 0
-            ? []
-            : [
-                {
-                  name: 'telegram',
-                  kind: 'provider' as const,
-                  status: 'unready' as const,
-                },
-              ]),
-          ...(discordGatewayCredentials.length === 0
-            ? []
-            : [
-                {
-                  name: 'discord',
-                  kind: 'provider' as const,
-                  status: 'unready' as const,
-                },
-              ]),
-          ...(!hasWhatsAppEndpoint
-            ? []
-            : [
-                {
-                  name: 'whatsapp',
-                  kind: 'provider' as const,
-                  status: 'ready' as const,
-                },
-              ]),
-          ...(args.retention?.enabled === true
-            ? [
-                {
-                  name: 'retention',
-                  kind: 'retention' as const,
-                  status: 'ready' as const,
-                },
-              ]
-            : []),
-          ...(args.runtimeCapabilities?.artifacts === undefined
-            ? []
-            : [
-                {
-                  name: `artifact-${args.runtimeCapabilities.artifacts.policy.backend.kind}`,
-                  kind: 'store' as const,
-                  status: 'ready' as const,
-                },
-              ]),
-        ];
-        observability = new RuntimeObservability({
-          runtimeInstanceId: runtime.runtimeId,
-          deploymentId: currentDeploymentId,
-          workflows: productionSources.map(source => ({
-            workflowId: source.workflow.workflowId,
-            definitionHash: source.definitionHash,
-            triggerTypes: source.workflow.triggers
-              .map(trigger => observedTriggerType(trigger.handler))
-              .filter(
-                (type): type is NonNullable<typeof type> => type !== undefined
+      const artifactAuthority =
+        args.runtimeCapabilities?.artifacts === undefined
+          ? undefined
+          : { artifacts: args.runtimeCapabilities.artifacts };
+      const artifactObservationSecrets =
+        artifactAuthority === undefined
+          ? undefined
+          : await resolvedNamedSecrets(
+              artifactPolicySecretNames(artifactAuthority),
+              store
+            );
+      profileSync(
+        'runtime',
+        'runtime.initialize_observability',
+        measurements => {
+          if (measurements !== undefined) {
+            measurements.counts.workflows = productionSources.length;
+            measurements.counts.pending_progress =
+              pendingObservabilityProgress.length;
+          }
+          const componentRecords = [
+            {
+              name: 'sqlite',
+              kind: 'store' as const,
+              status: 'ready' as const,
+            },
+            {
+              name: 'rust-trigger-host',
+              kind: 'trigger' as const,
+              status: 'ready' as const,
+            },
+            {
+              name: 'script-host',
+              kind: 'worker' as const,
+              status: 'ready' as const,
+            },
+            ...(slackRegistrations.length === 0
+              ? []
+              : [
+                  {
+                    name: 'slack',
+                    kind: 'provider' as const,
+                    status: 'unready' as const,
+                  },
+                ]),
+            ...(telegramPollingCredentials.length === 0
+              ? []
+              : [
+                  {
+                    name: 'telegram',
+                    kind: 'provider' as const,
+                    status: 'unready' as const,
+                  },
+                ]),
+            ...(discordGatewayCredentials.length === 0
+              ? []
+              : [
+                  {
+                    name: 'discord',
+                    kind: 'provider' as const,
+                    status: 'unready' as const,
+                  },
+                ]),
+            ...(!hasWhatsAppEndpoint
+              ? []
+              : [
+                  {
+                    name: 'whatsapp',
+                    kind: 'provider' as const,
+                    status: 'ready' as const,
+                  },
+                ]),
+            ...(args.retention?.enabled === true
+              ? [
+                  {
+                    name: 'retention',
+                    kind: 'retention' as const,
+                    status: 'ready' as const,
+                  },
+                ]
+              : []),
+            ...(args.runtimeCapabilities?.artifacts === undefined
+              ? []
+              : [
+                  {
+                    name: `artifact-${args.runtimeCapabilities.artifacts.policy.backend.kind}`,
+                    kind: 'store' as const,
+                    status: 'ready' as const,
+                  },
+                ]),
+          ];
+          observability = new RuntimeObservability({
+            runtimeInstanceId: runtime.runtimeId,
+            deploymentId: currentDeploymentId,
+            workflows: productionSources.map(source => ({
+              workflowId: source.workflow.workflowId,
+              definitionHash: source.definitionHash,
+              triggerTypes: source.workflow.triggers
+                .map(trigger => observedTriggerType(trigger.handler))
+                .filter(
+                  (type): type is NonNullable<typeof type> => type !== undefined
+                ),
+            })),
+            listRuns: () =>
+              listRunsWithRust(
+                args.statePath,
+                { limit: 200 },
+                { nativeCorePath: dependencies.nativeCorePath }
               ),
-          })),
-          listRuns: () =>
-            listRunsWithRust(
-              args.statePath,
-              { limit: 200 },
-              { nativeCorePath: dependencies.nativeCorePath }
-            ),
-          observeDurable: () =>
-            observeRuntimeWithRust(args.statePath, {
-              nativeCorePath: dependencies.nativeCorePath,
-            }),
-          ...(artifactAuthority === undefined || artifactObservationSecrets === undefined
-            ? {}
-            : {
-                observeArtifacts: () =>
-                  observeArtifactsWithRust(
-                    args.statePath,
-                    artifactAuthority,
-                    artifactObservationSecrets,
-                    { nativeCorePath: dependencies.nativeCorePath }
-                  ),
+            observeDurable: () =>
+              observeRuntimeWithRust(args.statePath, {
+                nativeCorePath: dependencies.nativeCorePath,
               }),
-          storeSize: () => durableStoreSize(args.statePath),
-          logFormat: args.logFormat,
-          emitLog:
-            args.verbose ||
-            args.logFormat === 'json' ||
-            process.env.WOML_BACKGROUND_LOG !== undefined
-              ? io.stderr
-              : () => {},
-          components: componentRecords,
-        });
-        observability.setLifecycle('recovering');
-        for (const progress of pendingObservabilityProgress)
-          observability.recordProgress(progress);
-        pendingObservabilityProgress.length = 0;
-      });
+            ...(artifactAuthority === undefined ||
+            artifactObservationSecrets === undefined
+              ? {}
+              : {
+                  observeArtifacts: () =>
+                    observeArtifactsWithRust(
+                      args.statePath,
+                      artifactAuthority,
+                      artifactObservationSecrets,
+                      { nativeCorePath: dependencies.nativeCorePath }
+                    ),
+                }),
+            storeSize: () => durableStoreSize(args.statePath),
+            logFormat: args.logFormat,
+            emitLog:
+              args.verbose ||
+              args.logFormat === 'json' ||
+              process.env.WOML_BACKGROUND_LOG !== undefined
+                ? io.stderr
+                : () => {},
+            components: componentRecords,
+          });
+          observability.setLifecycle('recovering');
+          for (const progress of pendingObservabilityProgress)
+            observability.recordProgress(progress);
+          pendingObservabilityProgress.length = 0;
+        }
+      );
       runtimeControl = await profileAsync(
         'runtime',
         'runtime.start_control',
-        async () => await startRuntimeControl({
-        runtimeInstanceId: runtime.runtimeId,
-        deploymentId: currentDeploymentId,
-        host: args.adminHost,
-        port: args.adminPort,
-        observability,
-        healthEnabled: args.observabilityHealth,
-        metricsEnabled: args.observabilityMetrics,
-        presentations: {
-          run: runId =>
-            inspectRunPresentationWithRust(args.statePath, runId, {
-              nativeCorePath: dependencies.nativeCorePath,
-            }),
-          workflow: (workflowId, limit) =>
-            listRunPresentationsWithRust(
-              args.statePath,
-              workflowId,
-              limit,
-              { nativeCorePath: dependencies.nativeCorePath }
-            ),
-        },
-        operations: {
-          listRuns: () => {
-            listRunsWithRust(
-              args.statePath,
-              { limit: 1 },
-              {
-                nativeCorePath: dependencies.nativeCorePath,
-              }
-            );
-          },
-          getRun: runId => {
-            inspectRunV2WithRust(args.statePath, runId, {
-              nativeCorePath: dependencies.nativeCorePath,
-            });
-          },
-          cancelRun: (runId, commandId) => {
-            const result = cancelRunWithRust(args.statePath, runId, commandId, {
-              nativeCorePath: dependencies.nativeCorePath,
-            });
-            return result.code;
-          },
-        },
-        })
+        async () =>
+          await startRuntimeControl({
+            runtimeInstanceId: runtime.runtimeId,
+            deploymentId: currentDeploymentId,
+            host: args.adminHost,
+            port: args.adminPort,
+            observability,
+            healthEnabled: args.observabilityHealth,
+            metricsEnabled: args.observabilityMetrics,
+            presentations: {
+              run: runId =>
+                inspectRunPresentationWithRust(args.statePath, runId, {
+                  nativeCorePath: dependencies.nativeCorePath,
+                }),
+              workflow: (workflowId, limit) =>
+                listRunPresentationsWithRust(
+                  args.statePath,
+                  workflowId,
+                  limit,
+                  { nativeCorePath: dependencies.nativeCorePath }
+                ),
+            },
+            operations: {
+              listRuns: () => {
+                listRunsWithRust(
+                  args.statePath,
+                  { limit: 1 },
+                  {
+                    nativeCorePath: dependencies.nativeCorePath,
+                  }
+                );
+              },
+              getRun: runId => {
+                inspectRunV2WithRust(args.statePath, runId, {
+                  nativeCorePath: dependencies.nativeCorePath,
+                });
+              },
+              cancelRun: (runId, commandId) => {
+                const result = cancelRunWithRust(
+                  args.statePath,
+                  runId,
+                  commandId,
+                  {
+                    nativeCorePath: dependencies.nativeCorePath,
+                  }
+                );
+                return result.code;
+              },
+              signal: request =>
+                submitExternalSignalWithRust(
+                  runtime.runtimeId,
+                  {
+                    profile: 'woml.external-signal-admission/v1',
+                    signal: request.signal,
+                    runId: request.runId,
+                    waitId: request.waitId,
+                    correlation: request.correlation,
+                    idempotencyKey: request.idempotencyKey,
+                    payload: request.payload as JsonValue,
+                    receivedAt: new Date().toISOString(),
+                    authenticationClass: 'local_control',
+                  },
+                  { nativeCorePath: dependencies.nativeCorePath }
+                ),
+            },
+          })
       );
 
       const communicationProviders = new CommunicationProviderRegistry();
@@ -4847,7 +5322,10 @@ async function activateWorkflows(
               message
             ),
         });
-        communicationProviders.register({ role: 'trigger', adapter: slackHost });
+        communicationProviders.register({
+          role: 'trigger',
+          adapter: slackHost,
+        });
       }
       if (telegramPollingCredentials.length > 0) {
         telegramTransport =
@@ -4979,46 +5457,60 @@ async function activateWorkflows(
           adapter: discordHost,
         });
       }
-      await profileAsync('runtime', 'runtime.start_provider_hosts', async measurements => {
-        const providerCount = communicationProviders.providers('trigger').length;
-        if (measurements !== undefined) measurements.counts.providers = providerCount;
-        if (providerCount > 0) {
-        communicationTriggerHost = new CommunicationTriggerHost(
-          communicationProviders.triggerAdapters()
-        );
-        try {
-          await communicationTriggerHost.start();
-          if (slackRegistrations.length > 0) {
-            observability?.setComponent('slack', 'provider', 'ready');
+      await profileAsync(
+        'runtime',
+        'runtime.start_provider_hosts',
+        async measurements => {
+          const providerCount =
+            communicationProviders.providers('trigger').length;
+          if (measurements !== undefined)
+            measurements.counts.providers = providerCount;
+          if (providerCount > 0) {
+            communicationTriggerHost = new CommunicationTriggerHost(
+              communicationProviders.triggerAdapters()
+            );
+            try {
+              await communicationTriggerHost.start();
+              if (slackRegistrations.length > 0) {
+                observability?.setComponent('slack', 'provider', 'ready');
+              }
+              if (telegramPollingCredentials.length > 0) {
+                observability?.setComponent('telegram', 'provider', 'ready');
+              }
+              if (discordGatewayCredentials.length > 0) {
+                observability?.setComponent('discord', 'provider', 'ready');
+              }
+            } catch (error) {
+              const discordFailure = discordStartupError(error);
+              const telegramFailure = telegramStartupError(error);
+              const slackFailure = slackTriggerStartupError(error);
+              const failure =
+                discordFailure.code !== 'WOML_DISCORD_TRIGGER_UNAVAILABLE'
+                  ? discordFailure
+                  : telegramFailure.code !== 'WOML_TELEGRAM_TRIGGER_UNAVAILABLE'
+                    ? telegramFailure
+                    : slackFailure;
+              throw new CliInputError(failure.code, failure.message);
+            }
           }
-          if (telegramPollingCredentials.length > 0) {
-            observability?.setComponent('telegram', 'provider', 'ready');
-          }
-          if (discordGatewayCredentials.length > 0) {
-            observability?.setComponent('discord', 'provider', 'ready');
-          }
-        } catch (error) {
-          const discordFailure = discordStartupError(error);
-          const telegramFailure = telegramStartupError(error);
-          const slackFailure = slackTriggerStartupError(error);
-          const failure =
-            discordFailure.code !== 'WOML_DISCORD_TRIGGER_UNAVAILABLE'
-              ? discordFailure
-              : telegramFailure.code !== 'WOML_TELEGRAM_TRIGGER_UNAVAILABLE'
-                ? telegramFailure
-                : slackFailure;
-          throw new CliInputError(failure.code, failure.message);
         }
-        }
-      });
+      );
 
       // Provider startup may take long enough for an editor or generator to
       // rewrite a source. Never open admission for a mixed activation.
-      await profileAsync('runtime', 'runtime.final_source_revalidation', async measurements => {
-        if (measurements !== undefined) measurements.counts.inputs = activationInputPaths.length;
-        await assertStableSourceSnapshot(productionSources);
-        await assertStableWorkflowInputSet(args.inputPaths, activationInputPaths);
-      });
+      await profileAsync(
+        'runtime',
+        'runtime.final_source_revalidation',
+        async measurements => {
+          if (measurements !== undefined)
+            measurements.counts.inputs = activationInputPaths.length;
+          await assertStableSourceSnapshot(productionSources);
+          await assertStableWorkflowInputSet(
+            args.inputPaths,
+            activationInputPaths
+          );
+        }
+      );
       await profileAsync('runtime', 'runtime.open_admission', async () => {
         await activateWebhookRuntimeWithRust(runtime.runtimeId, {
           nativeCorePath: dependencies.nativeCorePath,
@@ -5033,56 +5525,76 @@ async function activateWorkflows(
       foregroundPresentation.verbose(
         `Deployment activation ${currentActivationId.slice(7, 19)} is ready with ${productionSources.length} workflow(s).`
       );
-      const automaticArtifactAuthority = args.runtimeCapabilities?.artifacts === undefined
-        ? undefined
-        : { artifacts: args.runtimeCapabilities.artifacts };
-      const automaticArtifactSecrets = automaticArtifactAuthority === undefined
-        ? undefined
-        : await resolvedNamedSecrets(
-            artifactPolicySecretNames(automaticArtifactAuthority),
-            store
-          );
-      automaticRetention = profileSync('runtime', 'runtime.schedule_retention', measurements => {
-        if (measurements !== undefined) {
-          measurements.counts.enabled = args.retention?.enabled === true ? 1 : 0;
+      if (signalIngressToken !== undefined) {
+        const signalBaseUrl = `http://${args.host}:${args.port}`;
+        io.stderr(
+          [
+            '',
+            'Durable signal ingress is enabled.',
+            `Endpoint: POST ${signalBaseUrl}/v1/signals/<signal>`,
+            'Use the stored WOML_SIGNAL_TOKEN without printing it:',
+            `curl -X POST "${signalBaseUrl}/v1/signals/<signal>" -H "Authorization: Bearer \$WOML_SIGNAL_TOKEN" -H "Content-Type: application/json" -d '{"runId":"<run-id>","waitId":"<wait-id>","correlation":"<correlation>","idempotencyKey":"<unique-key>","payload":{}}'`,
+            '',
+          ].join('\n')
+        );
+      }
+      const automaticArtifactAuthority =
+        args.runtimeCapabilities?.artifacts === undefined
+          ? undefined
+          : { artifacts: args.runtimeCapabilities.artifacts };
+      const automaticArtifactSecrets =
+        automaticArtifactAuthority === undefined
+          ? undefined
+          : await resolvedNamedSecrets(
+              artifactPolicySecretNames(automaticArtifactAuthority),
+              store
+            );
+      automaticRetention = profileSync(
+        'runtime',
+        'runtime.schedule_retention',
+        measurements => {
+          if (measurements !== undefined) {
+            measurements.counts.enabled =
+              args.retention?.enabled === true ? 1 : 0;
+          }
+          return startAutomaticRetention({
+            statePath: args.statePath,
+            configuration: args.retention,
+            nativeCorePath: dependencies.nativeCorePath,
+            ownerId: `retention_runtime_${runtime.runtimeId}`,
+            ...(automaticArtifactAuthority === undefined
+              ? {}
+              : { artifactAuthority: automaticArtifactAuthority }),
+            ...(automaticArtifactSecrets === undefined
+              ? {}
+              : { artifactSecrets: automaticArtifactSecrets }),
+            onResult: execution => {
+              observability?.setComponent('retention', 'retention', 'ready');
+              observability?.recordMaintenance('retention', 'completed');
+              observability?.log(
+                'info',
+                'WOML_RETENTION_COMPLETED',
+                `Retention removed ${execution.result.deletedRuns} eligible run${execution.result.deletedRuns === 1 ? '' : 's'} in ${execution.batches} batch${execution.batches === 1 ? '' : 'es'}.`
+              );
+            },
+            onError: error => {
+              const code =
+                error instanceof RetentionOperationError
+                  ? error.code
+                  : 'WOML_RETENTION_FAILED';
+              observability?.setComponent(
+                'retention',
+                'retention',
+                'degraded',
+                code
+              );
+              observability?.recordMaintenance('retention', 'failed', code);
+              observability?.alert(code, formatError(error));
+              foregroundPresentation.warning(code, formatError(error));
+            },
+          });
         }
-        return startAutomaticRetention({
-        statePath: args.statePath,
-        configuration: args.retention,
-        nativeCorePath: dependencies.nativeCorePath,
-        ownerId: `retention_runtime_${runtime.runtimeId}`,
-        ...(automaticArtifactAuthority === undefined
-          ? {}
-          : { artifactAuthority: automaticArtifactAuthority }),
-        ...(automaticArtifactSecrets === undefined
-          ? {}
-          : { artifactSecrets: automaticArtifactSecrets }),
-        onResult: execution => {
-          observability?.setComponent('retention', 'retention', 'ready');
-          observability?.recordMaintenance('retention', 'completed');
-          observability?.log(
-            'info',
-            'WOML_RETENTION_COMPLETED',
-            `Retention removed ${execution.result.deletedRuns} eligible run${execution.result.deletedRuns === 1 ? '' : 's'} in ${execution.batches} batch${execution.batches === 1 ? '' : 'es'}.`
-          );
-        },
-        onError: error => {
-          const code =
-            error instanceof RetentionOperationError
-              ? error.code
-              : 'WOML_RETENTION_FAILED';
-          observability?.setComponent(
-            'retention',
-            'retention',
-            'degraded',
-            code
-          );
-          observability?.recordMaintenance('retention', 'failed', code);
-          observability?.alert(code, formatError(error));
-          foregroundPresentation.warning(code, formatError(error));
-        },
-        });
-      });
+      );
       if (automaticRetention.nextRunAt !== undefined) {
         foregroundPresentation.verbose(
           `Automatic retention is enabled; next maintenance at ${automaticRetention.nextRunAt}.`
@@ -5095,14 +5607,19 @@ async function activateWorkflows(
       foregroundPresentation.verbose(
         `Inspect live runtime with woml inspect --state ${JSON.stringify(args.statePath)}.`
       );
-      await profileAsync('runtime', 'runtime.report_ready', async measurements => {
-        if (measurements !== undefined) measurements.counts.workflows = productionSources.length;
-        await dependencies.onRuntimeReady?.({
-          runtimeInstanceId: runtime.runtimeId,
-          descriptorPath: descriptorPath!,
-          workflowCount: productionSources.length,
-        });
-      });
+      await profileAsync(
+        'runtime',
+        'runtime.report_ready',
+        async measurements => {
+          if (measurements !== undefined)
+            measurements.counts.workflows = productionSources.length;
+          await dependencies.onRuntimeReady?.({
+            runtimeInstanceId: runtime.runtimeId,
+            descriptorPath: descriptorPath!,
+            workflowCount: productionSources.length,
+          });
+        }
+      );
       for (const source of productionSources) {
         foregroundPresentation.startup(
           workflowPresentation(
@@ -5399,6 +5916,71 @@ async function runEmitCommand(
   }
 }
 
+async function runSignalCommand(
+  args: readonly string[],
+  io: CliIo,
+  dependencies: CliDependencies
+): Promise<number> {
+  try {
+    const signal = parseSignalArguments(args);
+    let source: string;
+    try {
+      source = await readFile(signal.payloadPath, 'utf8');
+    } catch {
+      throw new CliInputError(
+        'WOML_SIGNAL_PAYLOAD_NOT_FOUND',
+        'signal payload file does not exist or cannot be read.'
+      );
+    }
+    if (new TextEncoder().encode(source).byteLength > 1_048_576) {
+      throw new CliInputError(
+        'WOML_SIGNAL_PAYLOAD_TOO_LARGE',
+        'signal payload exceeds the 1 MiB limit.'
+      );
+    }
+    let payload: JsonValue;
+    try {
+      payload = JSON.parse(source) as JsonValue;
+    } catch {
+      throw new CliInputError(
+        'WOML_SIGNAL_PAYLOAD_INVALID',
+        'signal payload file must contain valid JSON.'
+      );
+    }
+    const descriptor = await readRuntimeDescriptor(
+      runtimeDescriptorPath(signal.statePath)
+    );
+    const outcome = await requestRuntimeSignal(
+      descriptor,
+      {
+        signal: signal.signal,
+        runId: signal.runId,
+        waitId: signal.waitId,
+        correlation: signal.correlation,
+        idempotencyKey: signal.idempotencyKey,
+        payload,
+      },
+      (dependencies.fetch ?? globalThis.fetch) as typeof globalThis.fetch
+    );
+    io.stdout(`${JSON.stringify(outcome)}\n`);
+    const status =
+      outcome !== null &&
+      typeof outcome === 'object' &&
+      'status' in outcome &&
+      typeof outcome.status === 'string'
+        ? outcome.status
+        : undefined;
+    return status === 'accepted' || status === 'duplicate' ? 0 : 1;
+  } catch (error) {
+    if (error instanceof CliInputError && error.message === signalUsage()) {
+      io.stderr(`${signalUsage()}\n`);
+      return 2;
+    }
+    io.stderr(`${formatError(error)}\n`);
+    return 1;
+  }
+}
+
 async function runSecretsCommand(
   args: readonly string[],
   io: CliIo,
@@ -5676,8 +6258,9 @@ async function runInBackground(
         typeof handoff.pid === 'number'
       ) {
         const visibleWorkflows = workflowIds.slice(0, 5);
-        const logCommands = visibleWorkflows.map((workflowId, index) =>
-          `${index === 0 ? 'Logs       ' : '           '}woml ${workflowId} --logs --state ${JSON.stringify(statePath)}`
+        const logCommands = visibleWorkflows.map(
+          (workflowId, index) =>
+            `${index === 0 ? 'Logs       ' : '           '}woml ${workflowId} --logs --state ${JSON.stringify(statePath)}`
         );
         if (workflowIds.length > visibleWorkflows.length) {
           logCommands.push(
@@ -5754,6 +6337,7 @@ async function runCliUnprofiled(
     'types',
     'secrets',
     'emit',
+    'signal',
     'stop',
     'inspect',
     'backup',
@@ -5807,6 +6391,10 @@ async function runCliUnprofiled(
     return await runSecretsCommand(args, io, dependencies);
   }
 
+  if (args[0] === 'signal') {
+    return await runSignalCommand(args, io, dependencies);
+  }
+
   if (
     args[0] === 'telegram' ||
     args[0] === 'discord' ||
@@ -5822,7 +6410,8 @@ async function runCliUnprofiled(
     try {
       const result = await runProviderDoctor(parsed, {
         secretStore: dependencies.createSecretStore(),
-        fetch: (dependencies.fetch ?? globalThis.fetch) as typeof globalThis.fetch,
+        fetch: (dependencies.fetch ??
+          globalThis.fetch) as typeof globalThis.fetch,
       });
       io.stdout(
         parsed.json
@@ -5911,7 +6500,10 @@ async function runCliUnprofiled(
       );
       return 0;
     } catch (error) {
-      if (error instanceof CliInputError && error.message === artifactsUsage()) {
+      if (
+        error instanceof CliInputError &&
+        error.message === artifactsUsage()
+      ) {
         io.stderr(`${artifactsUsage()}\n`);
         return 2;
       }
@@ -5923,15 +6515,17 @@ async function runCliUnprofiled(
   if (args[0] === 'backup') {
     try {
       const parsed = parseBackupArguments(args);
-      const artifactAuthority = parsed.artifactPolicyPath === undefined
-        ? undefined
-        : await loadArtifactPolicy(parsed.artifactPolicyPath, 'foreground');
-      const artifactSecrets = artifactAuthority === undefined
-        ? undefined
-        : await resolvedNamedSecrets(
-            artifactPolicySecretNames(artifactAuthority),
-            dependencies.createSecretStore()
-          );
+      const artifactAuthority =
+        parsed.artifactPolicyPath === undefined
+          ? undefined
+          : await loadArtifactPolicy(parsed.artifactPolicyPath, 'foreground');
+      const artifactSecrets =
+        artifactAuthority === undefined
+          ? undefined
+          : await resolvedNamedSecrets(
+              artifactPolicySecretNames(artifactAuthority),
+              dependencies.createSecretStore()
+            );
       const manifest = await createProductionBackup(parsed, {
         nativeCorePath: dependencies.nativeCorePath,
         ...(artifactAuthority === undefined ? {} : { artifactAuthority }),
@@ -5972,15 +6566,17 @@ async function runCliUnprofiled(
   if (args[0] === 'restore') {
     try {
       const parsed = parseRestoreArguments(args);
-      const artifactAuthority = parsed.artifactPolicyPath === undefined
-        ? undefined
-        : await loadArtifactPolicy(parsed.artifactPolicyPath, 'foreground');
-      const artifactSecrets = artifactAuthority === undefined
-        ? undefined
-        : await resolvedNamedSecrets(
-            artifactPolicySecretNames(artifactAuthority),
-            dependencies.createSecretStore()
-          );
+      const artifactAuthority =
+        parsed.artifactPolicyPath === undefined
+          ? undefined
+          : await loadArtifactPolicy(parsed.artifactPolicyPath, 'foreground');
+      const artifactSecrets =
+        artifactAuthority === undefined
+          ? undefined
+          : await resolvedNamedSecrets(
+              artifactPolicySecretNames(artifactAuthority),
+              dependencies.createSecretStore()
+            );
       const restored = await restoreProductionBackup(parsed, {
         nativeCorePath: dependencies.nativeCorePath,
         ...(artifactAuthority === undefined ? {} : { artifactAuthority }),
@@ -6016,15 +6612,17 @@ async function runCliUnprofiled(
   if (args[0] === 'prune') {
     try {
       const parsed = parsePruneArguments(args);
-      const artifactAuthority = parsed.artifactPolicyPath === undefined
-        ? undefined
-        : await loadArtifactPolicy(parsed.artifactPolicyPath, 'foreground');
-      const artifactSecrets = artifactAuthority === undefined
-        ? undefined
-        : await resolvedNamedSecrets(
-            artifactPolicySecretNames(artifactAuthority),
-            dependencies.createSecretStore()
-          );
+      const artifactAuthority =
+        parsed.artifactPolicyPath === undefined
+          ? undefined
+          : await loadArtifactPolicy(parsed.artifactPolicyPath, 'foreground');
+      const artifactSecrets =
+        artifactAuthority === undefined
+          ? undefined
+          : await resolvedNamedSecrets(
+              artifactPolicySecretNames(artifactAuthority),
+              dependencies.createSecretStore()
+            );
       const outcome = await runProductionRetention(parsed, {
         nativeCorePath: dependencies.nativeCorePath,
         ...(artifactAuthority === undefined ? {} : { artifactAuthority }),
@@ -6141,10 +6739,20 @@ async function runCliUnprofiled(
         get.runId,
         { nativeCorePath: dependencies.nativeCorePath }
       );
-      const publicResult = {
+      const waitInspection = inspectWaitsV1WithRust(
+        get.statePath,
+        get.runId,
+        { nativeCorePath: dependencies.nativeCorePath }
+      );
+      const publicResult = waitInspection.waits.length === 0 ? {
         ...result,
         profile: 'woml.run-inspection/v7' as const,
         artifacts: artifactInspection,
+      } : {
+        ...result,
+        profile: 'woml.run-inspection/v8' as const,
+        artifacts: artifactInspection,
+        durableWaits: waitInspection,
       };
       io.stdout(
         get.json
@@ -6152,7 +6760,8 @@ async function runCliUnprofiled(
           : formatRunInspection(
               result,
               artifactInspection.artifacts,
-              artifactInspection.truncated
+              artifactInspection.truncated,
+              waitInspection
             )
       );
       return 0;
@@ -6206,10 +6815,15 @@ async function runCliUnprofiled(
 
   let runArguments: RunArguments;
   try {
-    runArguments = profileSync('cli', 'cli.parse_run_arguments', measurements => {
-      if (measurements !== undefined) measurements.counts.arguments = args.length;
-      return parseRunArguments(args);
-    });
+    runArguments = profileSync(
+      'cli',
+      'cli.parse_run_arguments',
+      measurements => {
+        if (measurements !== undefined)
+          measurements.counts.arguments = args.length;
+        return parseRunArguments(args);
+      }
+    );
   } catch (error) {
     const commandUsage = args[0] === 'test' ? testUsage() : runUsage();
     if (error instanceof CliInputError && error.message !== commandUsage) {
@@ -6333,7 +6947,8 @@ export async function runCli(
 ): Promise<number> {
   try {
     return await profileAsync('cli', 'cli.run_command', async measurements => {
-      if (measurements !== undefined) measurements.counts.arguments = args.length;
+      if (measurements !== undefined)
+        measurements.counts.arguments = args.length;
       return await runCliUnprofiled(args, io, dependencies);
     });
   } finally {

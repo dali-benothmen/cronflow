@@ -6,7 +6,7 @@ The skill teaches agents how to:
 
 - choose triggers, steps, durable item iteration, and control flow;
 - write embedded JavaScript with `context`, `attempt`, `services`, and `secrets`;
-- use retries, approvals, lifecycle hooks, modules, and workflow calls correctly;
+- use retries, approvals, durable timers, external signals, lifecycle hooks, modules, and workflow calls correctly;
 - select from every released WOML tag, built-in service, provider surface, and CLI command;
 - protect credentials and avoid invented WOML syntax; and
 - validate generated workflows with the real WOML CLI.

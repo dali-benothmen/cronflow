@@ -1,0 +1,63 @@
+<woml>
+  <workflow
+    id="security-scan-callback"
+    name="Security scan callback"
+    description="Wait for a remote scanner and validate its authenticated callback payload."
+    version="1.0.0"
+  >
+    <triggers>
+      <manual id="start" />
+    </triggers>
+    <steps>
+      <step id="startScan" name="Create scan identity">
+        <script>
+          return { scanId: `scan-${crypto.randomUUID()}` };
+        </script>
+      </step>
+      <wait-for
+        id="securityScan"
+        name="Wait for scanner"
+        signal="security.scan.completed"
+        correlation="{{context.steps.startScan.scanId}}"
+        timeout="2h"
+        on-timeout="fail"
+      >
+        <schema>
+          {
+            "type": "object",
+            "required": ["status", "critical", "reportUrl"],
+            "properties": {
+              "status": { "enum": ["passed", "failed"] },
+              "critical": { "type": "integer", "minimum": 0 },
+              "reportUrl": { "type": "string" }
+            },
+            "additionalProperties": false
+          }
+        </schema>
+      </wait-for>
+      <step id="scanPassed" name="Evaluate scan">
+        <script>
+          return context.steps.securityScan.payload.status === 'passed';
+        </script>
+      </step>
+      <choose id="scanDecision">
+        <when test="{{context.steps.scanPassed}}">
+          <step id="release" name="Release artifact">
+            <script>
+              return { released: true, report: context.steps.securityScan.payload.reportUrl };
+            </script>
+          </step>
+          <result value="{{context.steps.release}}" />
+        </when>
+        <otherwise>
+          <step id="block" name="Block release">
+            <script>
+              return { released: false, critical: context.steps.securityScan.payload.critical };
+            </script>
+          </step>
+          <result value="{{context.steps.block}}" />
+        </otherwise>
+      </choose>
+    </steps>
+  </workflow>
+</woml>

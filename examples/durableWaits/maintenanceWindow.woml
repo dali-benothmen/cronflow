@@ -1,0 +1,33 @@
+<woml>
+  <workflow
+    id="maintenance-window"
+    name="Maintenance window"
+    description="Calculate a deployment window, suspend durably, and resume at that instant."
+    version="1.0.0"
+  >
+    <triggers>
+      <manual id="start" />
+    </triggers>
+    <steps>
+      <step id="planWindow" name="Plan maintenance window">
+        <script>
+          return { opensAt: new Date(Date.now() + 5000).toISOString() };
+        </script>
+      </step>
+      <wait-until
+        id="window"
+        name="Wait for maintenance window"
+        at="{{context.steps.planWindow.opensAt}}"
+      />
+      <step id="beginMaintenance" name="Begin maintenance">
+        <script>
+          return {
+            plannedAt: context.steps.planWindow.opensAt,
+            resumedAt: context.steps.window.resumedAt,
+            ready: true
+          };
+        </script>
+      </step>
+    </steps>
+  </workflow>
+</woml>

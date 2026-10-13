@@ -1,0 +1,75 @@
+{
+  "schemaVersion": 17,
+  "workflowId": "durable-wait-model",
+  "metadata": {
+    "version": "1.0.0"
+  },
+  "triggers": [
+    {
+      "id": "start",
+      "handler": "trigger.manual",
+      "config": {
+        "kind": "object",
+        "fields": {}
+      }
+    }
+  ],
+  "graph": {
+    "entryNodeIds": ["pause"],
+    "nodes": [
+      {
+        "id": "pause",
+        "handler": "engine.durable-wait",
+        "inputs": {
+          "kind": "object",
+          "fields": {}
+        },
+        "metadata": {
+          "name": "Durable pause"
+        }
+      },
+      {
+        "id": "__woml_workflow__settlement",
+        "handler": "engine.workflow-settlement",
+        "inputs": {
+          "kind": "object",
+          "fields": {}
+        }
+      }
+    ],
+    "edges": [
+      {
+        "id": "__woml_workflow__:main:settlement",
+        "from": "pause",
+        "to": "__woml_workflow__settlement",
+        "condition": {
+          "kind": "always"
+        }
+      }
+    ],
+    "forks": [],
+    "choices": [],
+    "contextVisibility": [],
+    "settlement": {
+      "nodeId": "__woml_workflow__settlement",
+      "mainResultNodeId": "pause",
+      "ownedBranchTerminalNodeIds": []
+    },
+    "forEach": [],
+    "waits": [
+      {
+        "waitId": "pause",
+        "nodeId": "pause",
+        "metadata": {
+          "name": "Durable pause"
+        },
+        "kind": "duration",
+        "durationMs": 1000
+      }
+    ]
+  },
+  "runtimePolicy": {
+    "profileVersion": 1,
+    "concurrency": 1
+  }
+}

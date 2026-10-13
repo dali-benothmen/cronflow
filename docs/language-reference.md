@@ -1224,6 +1224,58 @@ The following do not persist:
 `<script>` has no attributes in the fundamental grammar. Timeout and retry are
 step policies and belong on `<step>`.
 
+### 11.3 Durable waits and external signals
+
+Wait elements are flow items, not script operations. Rust persists the waiting
+boundary before releasing execution resources, so the run can survive a
+runtime restart without keeping a JavaScript worker alive.
+
+```xml
+<wait id="cooldown" name="Cooldown" duration="10m" />
+<wait-until id="window" at="{{context.steps.plan.opensAt}}" />
+```
+
+`<wait>` requires a whole `duration` from 1 second through 365 days. `<wait-until>` requires an RFC 3339
+literal or an exact visible context reference that resolves to one. Both are
+empty elements. Their result is published at `context.steps.<id>` after the
+deadline settles.
+
+An external signal wait uses one signal and an optional JSON Schema:
+
+```xml
+<wait-for
+  id="scanResult"
+  signal="security.scan.completed"
+  correlation="{{context.steps.startScan.scanId}}"
+  timeout="2h"
+  on-timeout="fail"
+>
+  <schema>{ "type": "object", "required": ["status"] }</schema>
+</wait-for>
+```
+
+Or it accepts 1 through 16 possible signal names:
+
+```xml
+<wait-for id="buildResult" correlation="{{context.steps.startBuild.id}}" timeout="1h">
+  <accept signal="ci.build.succeeded"><schema>{ "type": "object" }</schema></accept>
+  <accept signal="ci.build.failed"><schema>{ "type": "object" }</schema></accept>
+</wait-for>
+```
+
+The single-signal and multi-signal forms cannot be mixed. `correlation` is
+required and binds the callback to the external operation. `on-timeout` is
+`fail` or `continue`, defaults to `fail`, and requires `timeout`. The first
+valid signal, timeout, or cancellation wins exactly once. A successful signal
+publishes its signal name, correlation, validated JSON payload, and receive
+time at `context.steps.<id>`.
+
+Remote systems call the authenticated HTTP endpoint. Local operators may use
+`woml signal`. Every delivery requires an idempotency key; an exact retry is a
+duplicate and cannot resume the run again. Read
+[Durable Waits and External Signals](woml-durable-waits.md) for the tutorial,
+limits, restart behavior, and current composition boundaries.
+
 ## 12. `<approval>`, `<notify>`, and Decision Arms
 
 `<approval>` is a first-class durable control-flow item. It records that a run
@@ -1727,7 +1779,7 @@ while unjoined work continues, but the workflow-settlement boundary prevents a
 successful run outcome from being published until every owned branch settles.
 Compiled context visibility—not completion timing—determines which step outputs
 each script can see. Event v12 fork-open, branch-settlement, and join-settlement
-facts persist in the existing append-only Store v14. Run Inspection v4 and the
+facts persist in the append-only Store v15. Run Inspection v4 and the
 recovery work profile are rebuilt from those events and never expose payloads,
 context, outputs, or secrets. Control-only and result-producing choices execute
 identically on the main route and inside a branch. A failed or cancelled branch

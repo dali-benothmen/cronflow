@@ -107,7 +107,7 @@ fn store_v12_migrates_transactionally_through_state_v1_to_store_v14() {
     )
     .unwrap();
   assert_eq!(version, DURABLE_STORE_SCHEMA_VERSION.to_string());
-  assert_eq!(DURABLE_STORE_SCHEMA_VERSION, 14);
+  assert_eq!(DURABLE_STORE_SCHEMA_VERSION, 15);
   for object in [
     "woml_state_entries",
     "woml_state_mutations",

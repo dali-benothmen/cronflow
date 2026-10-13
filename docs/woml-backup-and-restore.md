@@ -119,7 +119,7 @@ available for already-admitted runs.
 ## Store upgrades and rollback
 
 Restore accepts Store v13 and v14. A supported older backup is migrated on the
-temporary restore copy, audited as Store v14, and swapped into place only after
+temporary restore copy, audited as Store v15, and swapped into place only after
 success. Unknown future versions are rejected rather than guessed.
 
 Current v13-to-v14 migration is additive and transactional. A future migration

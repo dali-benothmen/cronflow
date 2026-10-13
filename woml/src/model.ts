@@ -1,8 +1,6 @@
 export type JsonPrimitive = null | boolean | number | string;
 export type JsonValue =
-  | JsonPrimitive
-  | readonly JsonValue[]
-  | { readonly [key: string]: JsonValue };
+  JsonPrimitive | readonly JsonValue[] | { readonly [key: string]: JsonValue };
 export type JsonObject = { readonly [key: string]: JsonValue };
 
 export interface LiteralExpression {
@@ -43,9 +41,7 @@ export interface TemplateTextPart {
 export interface TemplateExpression {
   readonly kind: 'template';
   readonly parts: readonly (
-    | TemplateTextPart
-    | ContextReferenceExpression
-    | LifecycleReferenceExpression
+    TemplateTextPart | ContextReferenceExpression | LifecycleReferenceExpression
   )[];
 }
 
@@ -75,9 +71,7 @@ export interface ExponentialBackoffPolicy {
 }
 
 export type BackoffPolicy =
-  | NoBackoffPolicy
-  | FixedBackoffPolicy
-  | ExponentialBackoffPolicy;
+  NoBackoffPolicy | FixedBackoffPolicy | ExponentialBackoffPolicy;
 
 export interface RetryPolicy {
   readonly maxAttempts: number;
@@ -199,8 +193,7 @@ export interface CompiledReusableNotificationProviderV1 {
 }
 
 export type CompiledReusableInvocationV1 =
-  | CompiledReusableStepInvocationV1
-  | CompiledReusableNotificationProviderV1;
+  CompiledReusableStepInvocationV1 | CompiledReusableNotificationProviderV1;
 
 export type LifecycleEventName =
   | 'run_start'
@@ -227,8 +220,7 @@ export interface CompiledLifecycleNotificationActionV1 {
 }
 
 export type CompiledLifecycleActionV1 =
-  | CompiledLifecycleScriptActionV1
-  | CompiledLifecycleNotificationActionV1;
+  CompiledLifecycleScriptActionV1 | CompiledLifecycleNotificationActionV1;
 
 export interface CompiledLifecycleHookV1 {
   readonly hookId: string;
@@ -342,6 +334,46 @@ export interface CompiledForEachV1 {
   readonly result?: ContextReferenceExpression;
 }
 
+export interface CompiledWaitSignalV1 {
+  readonly signal: string;
+  readonly schema?: JsonObject;
+}
+
+export type CompiledWaitV1 =
+  | {
+      readonly waitId: string;
+      readonly nodeId: string;
+      readonly kind: 'duration';
+      readonly durationMs: number;
+      readonly metadata?: Readonly<{
+        readonly name?: string;
+        readonly description?: string;
+      }>;
+    }
+  | {
+      readonly waitId: string;
+      readonly nodeId: string;
+      readonly kind: 'until';
+      readonly at: ValueExpression;
+      readonly metadata?: Readonly<{
+        readonly name?: string;
+        readonly description?: string;
+      }>;
+    }
+  | {
+      readonly waitId: string;
+      readonly nodeId: string;
+      readonly kind: 'signal';
+      readonly signals: readonly CompiledWaitSignalV1[];
+      readonly correlation: ValueExpression;
+      readonly timeoutMs?: number;
+      readonly onTimeout: 'fail' | 'continue';
+      readonly metadata?: Readonly<{
+        readonly name?: string;
+        readonly description?: string;
+      }>;
+    };
+
 export interface CompiledWorkflowGraph {
   readonly entryNodeIds: readonly string[];
   readonly nodes: readonly CompiledWorkflowNode[];
@@ -363,6 +395,11 @@ export interface CompiledWorkflowGraphV16 extends CompiledWorkflowGraphV13 {
   readonly forEach: readonly CompiledForEachV1[];
 }
 
+/** Model v17 adds first-class durable timer and external-signal waits. */
+export interface CompiledWorkflowGraphV17 extends CompiledWorkflowGraphV16 {
+  readonly waits: readonly CompiledWaitV1[];
+}
+
 interface CompiledWorkflowDefinitionBase {
   readonly workflowId: string;
   readonly metadata?: CompiledWorkflowMetadata;
@@ -370,75 +407,65 @@ interface CompiledWorkflowDefinitionBase {
   readonly graph: CompiledWorkflowGraph;
 }
 
-export interface CompiledWorkflowDefinitionV1
-  extends CompiledWorkflowDefinitionBase {
+export interface CompiledWorkflowDefinitionV1 extends CompiledWorkflowDefinitionBase {
   readonly schemaVersion: 1;
 }
 
-export interface CompiledWorkflowDefinitionV2
-  extends CompiledWorkflowDefinitionBase {
+export interface CompiledWorkflowDefinitionV2 extends CompiledWorkflowDefinitionBase {
   readonly schemaVersion: 2;
 }
 
-export interface CompiledWorkflowDefinitionV3
-  extends CompiledWorkflowDefinitionBase {
+export interface CompiledWorkflowDefinitionV3 extends CompiledWorkflowDefinitionBase {
   readonly schemaVersion: 3;
 }
 
-export interface CompiledWorkflowDefinitionV4
-  extends CompiledWorkflowDefinitionBase {
+export interface CompiledWorkflowDefinitionV4 extends CompiledWorkflowDefinitionBase {
   readonly schemaVersion: 4;
 }
 
-export interface CompiledWorkflowDefinitionV5
-  extends CompiledWorkflowDefinitionBase {
+export interface CompiledWorkflowDefinitionV5 extends CompiledWorkflowDefinitionBase {
   readonly schemaVersion: 5;
 }
 
-export interface CompiledWorkflowDefinitionV6
-  extends CompiledWorkflowDefinitionBase {
+export interface CompiledWorkflowDefinitionV6 extends CompiledWorkflowDefinitionBase {
   readonly schemaVersion: 6;
 }
 
-export interface CompiledWorkflowDefinitionV7
-  extends CompiledWorkflowDefinitionBase {
+export interface CompiledWorkflowDefinitionV7 extends CompiledWorkflowDefinitionBase {
   readonly schemaVersion: 7;
 }
 
-export interface CompiledWorkflowDefinitionV8
-  extends CompiledWorkflowDefinitionBase {
+export interface CompiledWorkflowDefinitionV8 extends CompiledWorkflowDefinitionBase {
   readonly schemaVersion: 8;
 }
 
-export interface CompiledWorkflowDefinitionV9
-  extends CompiledWorkflowDefinitionBase {
+export interface CompiledWorkflowDefinitionV9 extends CompiledWorkflowDefinitionBase {
   readonly schemaVersion: 9;
   readonly moduleRuntime: CompiledModuleRuntimeV1;
 }
 
-export interface CompiledWorkflowDefinitionV10
-  extends CompiledWorkflowDefinitionBase {
+export interface CompiledWorkflowDefinitionV10 extends CompiledWorkflowDefinitionBase {
   readonly schemaVersion: 10;
   readonly moduleRuntime?: CompiledModuleRuntimeV1;
 }
 
-export interface CompiledWorkflowDefinitionV11
-  extends CompiledWorkflowDefinitionBase {
+export interface CompiledWorkflowDefinitionV11 extends CompiledWorkflowDefinitionBase {
   readonly schemaVersion: 11;
   readonly moduleRuntime?: CompiledModuleRuntimeV1;
   readonly lifecycle?: CompiledLifecycleDefinitionV1;
 }
 
-export interface CompiledWorkflowDefinitionV12
-  extends CompiledWorkflowDefinitionBase {
+export interface CompiledWorkflowDefinitionV12 extends CompiledWorkflowDefinitionBase {
   readonly schemaVersion: 12;
   readonly moduleRuntime?: CompiledModuleRuntimeV1;
   readonly lifecycle?: CompiledLifecycleDefinitionV1;
   readonly runtimePolicy: CompiledRuntimePolicyV1;
 }
 
-export interface CompiledWorkflowDefinitionV13
-  extends Omit<CompiledWorkflowDefinitionBase, 'graph'> {
+export interface CompiledWorkflowDefinitionV13 extends Omit<
+  CompiledWorkflowDefinitionBase,
+  'graph'
+> {
   readonly schemaVersion: 13;
   readonly graph: CompiledWorkflowGraphV13;
   readonly moduleRuntime?: CompiledModuleRuntimeV1;
@@ -446,8 +473,10 @@ export interface CompiledWorkflowDefinitionV13
   readonly runtimePolicy: CompiledRuntimePolicyV1;
 }
 
-export interface CompiledWorkflowDefinitionV14
-  extends Omit<CompiledWorkflowDefinitionBase, 'graph'> {
+export interface CompiledWorkflowDefinitionV14 extends Omit<
+  CompiledWorkflowDefinitionBase,
+  'graph'
+> {
   readonly schemaVersion: 14;
   readonly graph: CompiledWorkflowGraphV13;
   readonly moduleRuntime?: CompiledModuleRuntimeV1;
@@ -473,8 +502,10 @@ export interface CompiledCommunicationRequirementsV1 {
  * Model v15 adds built-in communication-provider requirements while retaining
  * the complete v14 graph, switch, reusable-definition, and policy contracts.
  */
-export interface CompiledWorkflowDefinitionV15
-  extends Omit<CompiledWorkflowDefinitionV14, 'schemaVersion'> {
+export interface CompiledWorkflowDefinitionV15 extends Omit<
+  CompiledWorkflowDefinitionV14,
+  'schemaVersion'
+> {
   readonly schemaVersion: 15;
   readonly communication: CompiledCommunicationRequirementsV1;
 }
@@ -483,11 +514,21 @@ export interface CompiledWorkflowDefinitionV15
  * Model v16 adds immutable runtime-sized for-each body templates. Communication
  * remains present only when the workflow actually uses a built-in provider.
  */
-export interface CompiledWorkflowDefinitionV16
-  extends Omit<CompiledWorkflowDefinitionV14, 'schemaVersion' | 'graph'> {
+export interface CompiledWorkflowDefinitionV16 extends Omit<
+  CompiledWorkflowDefinitionV14,
+  'schemaVersion' | 'graph'
+> {
   readonly schemaVersion: 16;
   readonly graph: CompiledWorkflowGraphV16;
   readonly communication?: CompiledCommunicationRequirementsV1;
+}
+
+export interface CompiledWorkflowDefinitionV17 extends Omit<
+  CompiledWorkflowDefinitionV16,
+  'schemaVersion' | 'graph'
+> {
+  readonly schemaVersion: 17;
+  readonly graph: CompiledWorkflowGraphV17;
 }
 
 export type CompiledWorkflowDefinition =
@@ -506,7 +547,8 @@ export type CompiledWorkflowDefinition =
   | CompiledWorkflowDefinitionV13
   | CompiledWorkflowDefinitionV14
   | CompiledWorkflowDefinitionV15
-  | CompiledWorkflowDefinitionV16;
+  | CompiledWorkflowDefinitionV16
+  | CompiledWorkflowDefinitionV17;
 
 export interface CompiledGraphIssue {
   readonly code:
@@ -528,7 +570,8 @@ export interface CompiledGraphIssue {
     | 'INVALID_CONTROL_CHOICE'
     | 'INVALID_CONTEXT_VISIBILITY'
     | 'INVALID_WORKFLOW_SETTLEMENT'
-    | 'INVALID_FOR_EACH';
+    | 'INVALID_FOR_EACH'
+    | 'INVALID_DURABLE_WAIT';
   readonly message: string;
 }
 
@@ -662,6 +705,7 @@ export function inspectCompiledWorkflowGraph(
   inspectParallelGroups(graph, issues);
   inspectApprovalGroups(graph, issues);
   inspectForkGraph(graph, issues);
+  inspectDurableWaitGraph(graph, issues);
 
   return issues;
 }
@@ -723,7 +767,8 @@ function validApprovalNotifications(
       return false;
     }
     const { deliveryId, provider, destination, credentials } = item.fields;
-    const providerName = provider?.kind === 'literal' ? provider.value : undefined;
+    const providerName =
+      provider?.kind === 'literal' ? provider.value : undefined;
     const slackDelivery = providerName === 'slack';
     const telegramDelivery = providerName === 'telegram';
     const discordDelivery = providerName === 'discord';
@@ -1058,7 +1103,8 @@ function inspectParallelGroups(
           edge.parallelId === parallelId &&
           edge.branchId === undefined &&
           edge.condition.kind === 'always' &&
-          nodes.get(edge.to)?.handler === 'runtime.script'
+          (nodes.get(edge.to)?.handler === 'runtime.script' ||
+            nodes.get(edge.to)?.handler === 'engine.durable-wait')
       ) &&
       joinEdges.every(
         (edge, index) =>
@@ -1319,6 +1365,84 @@ function emptyEngineNode(
     node.inputs.kind === 'object' &&
     Object.keys(node.inputs.fields).length === 0
   );
+}
+
+function inspectDurableWaitGraph(
+  graph: CompiledWorkflowGraph,
+  issues: CompiledGraphIssue[]
+): void {
+  const waits = (graph as Partial<CompiledWorkflowGraphV17>).waits;
+  const loops = (graph as Partial<CompiledWorkflowGraphV16>).forEach ?? [];
+  const waitNodes = [
+    ...graph.nodes.filter(node => node.handler === 'engine.durable-wait'),
+    ...loops.flatMap(loop =>
+      loop.body.nodes.filter(node => node.handler === 'engine.durable-wait')
+    ),
+  ];
+  if (waits === undefined && waitNodes.length === 0) return;
+  if (waits === undefined || waits.length !== waitNodes.length) {
+    issues.push({
+      code: 'INVALID_DURABLE_WAIT',
+      message:
+        'Model v17 waits must describe every engine.durable-wait node exactly once.',
+    });
+    return;
+  }
+  const nodeById = new Map(waitNodes.map(node => [node.id, node]));
+  const seen = new Set<string>();
+  for (const wait of waits) {
+    const node = nodeById.get(wait.nodeId);
+    const commonValid =
+      wait.waitId === wait.nodeId &&
+      !seen.has(wait.waitId) &&
+      node !== undefined &&
+      node.inputs.kind === 'object' &&
+      Object.keys(node.inputs.fields).length === 0 &&
+      node.timeoutMs === undefined &&
+      node.retryPolicy === undefined &&
+      node.scriptRuntime === undefined;
+    seen.add(wait.waitId);
+    let kindValid = false;
+    if (wait.kind === 'duration') {
+      kindValid =
+        Number.isSafeInteger(wait.durationMs) &&
+        wait.durationMs >= 1_000 &&
+        wait.durationMs <= 31_536_000_000;
+    } else if (wait.kind === 'until') {
+      kindValid =
+        wait.at.kind === 'contextReference' ||
+        (wait.at.kind === 'literal' && typeof wait.at.value === 'string');
+    } else {
+      kindValid =
+        wait.signals.length >= 1 &&
+        wait.signals.length <= 16 &&
+        new Set(wait.signals.map(signal => signal.signal)).size ===
+          wait.signals.length &&
+        wait.signals.every(
+          signal =>
+            signal.signal.length <= 128 &&
+            /^[a-z][a-z0-9]*(?:[._-][a-z0-9]+)+$/.test(signal.signal) &&
+            (signal.schema === undefined ||
+              (typeof signal.schema === 'object' &&
+                signal.schema !== null &&
+                !Array.isArray(signal.schema)))
+        ) &&
+        (wait.correlation.kind === 'contextReference' ||
+          (wait.correlation.kind === 'literal' &&
+            typeof wait.correlation.value === 'string')) &&
+        (wait.timeoutMs === undefined ||
+          (Number.isSafeInteger(wait.timeoutMs) &&
+            wait.timeoutMs >= 1_000 &&
+            wait.timeoutMs <= 31_536_000_000)) &&
+        (wait.onTimeout === 'fail' || wait.onTimeout === 'continue');
+    }
+    if (!commonValid || !kindValid) {
+      issues.push({
+        code: 'INVALID_DURABLE_WAIT',
+        message: `Durable wait "${wait.waitId}" does not match the frozen Model v17 contract.`,
+      });
+    }
+  }
 }
 
 function inspectForkGraph(

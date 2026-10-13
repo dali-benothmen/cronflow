@@ -84,7 +84,7 @@ not split such a group merely to meet a deletion target.
 
 ## Safety and recovery
 
-Retention acquires the Store v14 maintenance lease, so backup, restore,
+Retention acquires the Store v15 maintenance lease, so backup, restore,
 retention, checkpoint, and compaction cannot race each other. Eligibility is
 rechecked inside every immediate deletion transaction. A crash can leave prior
 batches committed, but cannot leave half of the current batch committed; the

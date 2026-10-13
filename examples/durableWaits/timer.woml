@@ -1,0 +1,28 @@
+<woml>
+  <workflow
+    id="durable-timer"
+    name="Durable timer"
+    description="Pause without occupying a worker, then continue the same run."
+    version="1.0.0"
+  >
+    <triggers>
+      <manual id="start" />
+    </triggers>
+    <steps>
+      <step id="started" name="Record start">
+        <script>
+          return { startedAt: new Date().toISOString() };
+        </script>
+      </step>
+      <wait id="cooldown" name="Wait durably" duration="2s" />
+      <step id="finished" name="Finish timer">
+        <script>
+          return {
+            startedAt: context.steps.started.startedAt,
+            resumedAt: context.steps.cooldown.resumedAt
+          };
+        </script>
+      </step>
+    </steps>
+  </workflow>
+</woml>

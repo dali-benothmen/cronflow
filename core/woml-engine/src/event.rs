@@ -7,9 +7,10 @@ use crate::{
   capability::{validate_safe_metadata, CapabilityFailure},
   RUN_EVENT_SCHEMA_VERSION_V1, RUN_EVENT_SCHEMA_VERSION_V10, RUN_EVENT_SCHEMA_VERSION_V11,
   RUN_EVENT_SCHEMA_VERSION_V12, RUN_EVENT_SCHEMA_VERSION_V13, RUN_EVENT_SCHEMA_VERSION_V14,
-  RUN_EVENT_SCHEMA_VERSION_V15, RUN_EVENT_SCHEMA_VERSION_V2, RUN_EVENT_SCHEMA_VERSION_V3,
-  RUN_EVENT_SCHEMA_VERSION_V4, RUN_EVENT_SCHEMA_VERSION_V5, RUN_EVENT_SCHEMA_VERSION_V6,
-  RUN_EVENT_SCHEMA_VERSION_V7, RUN_EVENT_SCHEMA_VERSION_V8, RUN_EVENT_SCHEMA_VERSION_V9,
+  RUN_EVENT_SCHEMA_VERSION_V15, RUN_EVENT_SCHEMA_VERSION_V16, RUN_EVENT_SCHEMA_VERSION_V2,
+  RUN_EVENT_SCHEMA_VERSION_V3, RUN_EVENT_SCHEMA_VERSION_V4, RUN_EVENT_SCHEMA_VERSION_V5,
+  RUN_EVENT_SCHEMA_VERSION_V6, RUN_EVENT_SCHEMA_VERSION_V7, RUN_EVENT_SCHEMA_VERSION_V8,
+  RUN_EVENT_SCHEMA_VERSION_V9,
 };
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -77,10 +78,93 @@ pub enum RunEventPayload {
   ForEachSucceeded(ForEachSettledData),
   ForEachFailed(ForEachSettledData),
   ForEachCancelled(ForEachSettledData),
+  WaitRegistered(WaitRegisteredData),
+  ExternalSignalReceived(ExternalSignalReceivedData),
+  WaitSatisfied(WaitSatisfiedData),
+  WaitTimedOut(WaitTimedOutData),
+  WaitCancelled(WaitCancelledData),
   RunOutcomeDecided(RunOutcomeDecidedData),
   RunFinalized(RunFinalizedData),
   RunSucceeded(RunSucceededData),
   RunFailed(RunFailedData),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DurableWaitKind {
+  Duration,
+  Until,
+  Signal,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct WaitRegisteredData {
+  pub wait_id: String,
+  pub node_id: String,
+  pub kind: DurableWaitKind,
+  pub registered_at: DateTime<Utc>,
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub deadline: Option<DateTime<Utc>>,
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub signals: Option<Vec<String>>,
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub correlation_digest: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ExternalSignalReceivedData {
+  pub signal_id: String,
+  pub wait_id: String,
+  pub signal: String,
+  pub received_at: DateTime<Utc>,
+  pub idempotency_digest: String,
+  pub payload: Value,
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub correlation: Option<String>,
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub authentication_class: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DurableWaitWinner {
+  Timer,
+  Signal,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct WaitSatisfiedData {
+  pub wait_id: String,
+  pub winner: DurableWaitWinner,
+  pub result: Value,
+  pub resolved_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DurableWaitTimeoutBehavior {
+  Fail,
+  Continue,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct WaitTimedOutData {
+  pub wait_id: String,
+  pub deadline: DateTime<Utc>,
+  pub resolved_at: DateTime<Utc>,
+  pub behavior: DurableWaitTimeoutBehavior,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct WaitCancelledData {
+  pub wait_id: String,
+  pub cancelled_at: DateTime<Utc>,
+  pub cancellation_id: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -1160,6 +1244,18 @@ fn valid_capability_name(value: &str) -> bool {
     })
 }
 
+fn valid_signal_name(value: &str) -> bool {
+  !value.is_empty()
+    && value.len() <= 128
+    && value.split('.').all(|segment| {
+      let mut characters = segment.chars();
+      matches!(characters.next(), Some(first) if first.is_ascii_lowercase())
+        && characters.all(|character| {
+          character.is_ascii_lowercase() || character.is_ascii_digit() || character == '-'
+        })
+    })
+}
+
 fn validate_operation_base(
   event_schema_version: u32,
   node_id: &str,
@@ -1353,8 +1449,10 @@ fn validate_for_each_iteration_event(
       "Iteration Event v15 records require an explicit iteration scope.".to_string(),
     )
   })?;
-  if event.event_schema_version != RUN_EVENT_SCHEMA_VERSION_V15
-    || !valid_public_structural_id(for_each_id)
+  if !matches!(
+    event.event_schema_version,
+    RUN_EVENT_SCHEMA_VERSION_V15 | RUN_EVENT_SCHEMA_VERSION_V16
+  ) || !valid_public_structural_id(for_each_id)
     || scope.for_each_id != for_each_id
     || scope.index >= 10_000
   {
@@ -1484,6 +1582,7 @@ impl RunEvent {
         | RUN_EVENT_SCHEMA_VERSION_V13
         | RUN_EVENT_SCHEMA_VERSION_V14
         | RUN_EVENT_SCHEMA_VERSION_V15
+        | RUN_EVENT_SCHEMA_VERSION_V16
     ) {
       return Err(EventValidationError::UnsupportedSchemaVersion(
         self.event_schema_version,
@@ -1505,6 +1604,28 @@ impl RunEvent {
         | RunEventPayload::ForEachFailed(_)
         | RunEventPayload::ForEachCancelled(_)
     );
+    let wait_event = matches!(
+      self.payload,
+      RunEventPayload::WaitRegistered(_)
+        | RunEventPayload::ExternalSignalReceived(_)
+        | RunEventPayload::WaitSatisfied(_)
+        | RunEventPayload::WaitTimedOut(_)
+        | RunEventPayload::WaitCancelled(_)
+    );
+    if self.event_schema_version == RUN_EVENT_SCHEMA_VERSION_V16 && !wait_event {
+      let mut inherited = self.clone();
+      inherited.event_schema_version = RUN_EVENT_SCHEMA_VERSION_V15;
+      return inherited.validate();
+    }
+    if self.event_schema_version == RUN_EVENT_SCHEMA_VERSION_V16 {
+      if self.iteration.as_ref().is_some_and(|scope| {
+        !valid_public_structural_id(&scope.for_each_id) || scope.index >= 10_000
+      }) {
+        return Err(EventValidationError::Invalid(
+          "Event v16 durable-wait iteration scope is invalid.".to_string(),
+        ));
+      }
+    }
     if self.event_schema_version == RUN_EVENT_SCHEMA_VERSION_V15 && !loop_event {
       if let Some(scope) = &self.iteration {
         let scoped_work = matches!(
@@ -1543,7 +1664,11 @@ impl RunEvent {
       inherited.iteration = None;
       return inherited.validate();
     }
-    if self.event_schema_version != RUN_EVENT_SCHEMA_VERSION_V15 && self.iteration.is_some() {
+    if !matches!(
+      self.event_schema_version,
+      RUN_EVENT_SCHEMA_VERSION_V15 | RUN_EVENT_SCHEMA_VERSION_V16
+    ) && self.iteration.is_some()
+    {
       return Err(EventValidationError::Invalid(
         "Iteration scope is available only in Event v15.".to_string(),
       ));
@@ -2298,8 +2423,10 @@ impl RunEvent {
         }
       }
       RunEventPayload::ForEachOpened(data) => {
-        if self.event_schema_version != RUN_EVENT_SCHEMA_VERSION_V15
-          || self.iteration.is_some()
+        if !matches!(
+          self.event_schema_version,
+          RUN_EVENT_SCHEMA_VERSION_V15 | RUN_EVENT_SCHEMA_VERSION_V16
+        ) || self.iteration.is_some()
           || !valid_public_structural_id(&data.for_each_id)
           || data.total > 10_000
           || !(1..=64).contains(&data.concurrency)
@@ -2340,8 +2467,10 @@ impl RunEvent {
       RunEventPayload::ForEachSucceeded(data)
       | RunEventPayload::ForEachFailed(data)
       | RunEventPayload::ForEachCancelled(data) => {
-        if self.event_schema_version != RUN_EVENT_SCHEMA_VERSION_V15
-          || self.iteration.is_some()
+        if !matches!(
+          self.event_schema_version,
+          RUN_EVENT_SCHEMA_VERSION_V15 | RUN_EVENT_SCHEMA_VERSION_V16
+        ) || self.iteration.is_some()
           || !valid_public_structural_id(&data.for_each_id)
           || data.total > 10_000
           || data.succeeded + data.failed + data.skipped != data.total
@@ -2349,6 +2478,102 @@ impl RunEvent {
         {
           return Err(EventValidationError::Invalid(
             "for_each settlement does not match the bounded Event v15 contract.".to_string(),
+          ));
+        }
+      }
+      RunEventPayload::WaitRegistered(data) => {
+        let deadline_valid = match data.kind {
+          DurableWaitKind::Duration => data
+            .deadline
+            .is_some_and(|deadline| deadline >= data.registered_at),
+          // A wait-until target may already be in the past. The runtime still
+          // records registration before atomically satisfying it.
+          DurableWaitKind::Until => data.deadline.is_some(),
+          DurableWaitKind::Signal => data
+            .deadline
+            .is_none_or(|deadline| deadline >= data.registered_at),
+        };
+        let shape_valid = match data.kind {
+          DurableWaitKind::Duration | DurableWaitKind::Until => {
+            data.deadline.is_some() && data.signals.is_none() && data.correlation_digest.is_none()
+          }
+          DurableWaitKind::Signal => {
+            data.signals.as_ref().is_some_and(|signals| {
+              (1..=16).contains(&signals.len())
+                && signals.iter().all(|signal| valid_signal_name(signal))
+                && signals
+                  .iter()
+                  .collect::<std::collections::HashSet<_>>()
+                  .len()
+                  == signals.len()
+            }) && data.correlation_digest.as_deref().is_some_and(valid_sha256)
+          }
+        };
+        if self.event_schema_version != RUN_EVENT_SCHEMA_VERSION_V16
+          || !valid_public_structural_id(&data.wait_id)
+          || data.node_id != data.wait_id
+          || data.registered_at != self.occurred_at
+          || !deadline_valid
+          || !shape_valid
+        {
+          return Err(EventValidationError::Invalid(
+            "wait_registered does not match the frozen Event v16 contract.".to_string(),
+          ));
+        }
+      }
+      RunEventPayload::ExternalSignalReceived(data) => {
+        if self.event_schema_version != RUN_EVENT_SCHEMA_VERSION_V16
+          || !valid_id(&data.signal_id)
+          || !valid_public_structural_id(&data.wait_id)
+          || !valid_signal_name(&data.signal)
+          || data.received_at != self.occurred_at
+          || !valid_sha256(&data.idempotency_digest)
+          || data
+            .correlation
+            .as_ref()
+            .is_some_and(|value| value.is_empty() || value.len() > 256 || value.trim() != value)
+          || data
+            .authentication_class
+            .as_ref()
+            .is_some_and(|value| value.is_empty() || value.len() > 64)
+          || serde_json::to_vec(&data.payload).map_or(true, |payload| payload.len() > 1_048_576)
+        {
+          return Err(EventValidationError::Invalid(
+            "external_signal_received does not match the bounded Event v16 contract.".to_string(),
+          ));
+        }
+      }
+      RunEventPayload::WaitSatisfied(data) => {
+        if self.event_schema_version != RUN_EVENT_SCHEMA_VERSION_V16
+          || !valid_public_structural_id(&data.wait_id)
+          || data.resolved_at != self.occurred_at
+          || !data.result.is_object()
+          || serde_json::to_vec(&data.result).map_or(true, |result| result.len() > 1_048_576)
+        {
+          return Err(EventValidationError::Invalid(
+            "wait_satisfied does not match the frozen Event v16 result contract.".to_string(),
+          ));
+        }
+      }
+      RunEventPayload::WaitTimedOut(data) => {
+        if self.event_schema_version != RUN_EVENT_SCHEMA_VERSION_V16
+          || !valid_public_structural_id(&data.wait_id)
+          || data.resolved_at != self.occurred_at
+          || data.resolved_at < data.deadline
+        {
+          return Err(EventValidationError::Invalid(
+            "wait_timed_out does not match the frozen Event v16 timeout contract.".to_string(),
+          ));
+        }
+      }
+      RunEventPayload::WaitCancelled(data) => {
+        if self.event_schema_version != RUN_EVENT_SCHEMA_VERSION_V16
+          || !valid_public_structural_id(&data.wait_id)
+          || !valid_id(&data.cancellation_id)
+          || data.cancelled_at != self.occurred_at
+        {
+          return Err(EventValidationError::Invalid(
+            "wait_cancelled does not match the frozen Event v16 cancellation contract.".to_string(),
           ));
         }
       }

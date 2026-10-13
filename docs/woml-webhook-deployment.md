@@ -56,7 +56,7 @@ unavailable, webhook admission returns HTTP 503 instead of acknowledging work
 that was not committed.
 
 `services.state` uses the State v1 tables introduced by Store v13 in the
-current Store v14 database. Its
+current Store v15 database. Its
 values survive runs and run-history retention, and cannot be reconstructed from
 events. Back up the complete database coherently. On Unix, State v1 hardens the
 file to `0600`, but operators must still protect the parent directory, snapshots,

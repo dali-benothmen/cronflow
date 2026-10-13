@@ -1,12 +1,12 @@
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::net::{SocketAddr, TcpListener};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use actix_web::http::{header, Method, StatusCode};
 use actix_web::{web, App, HttpRequest, HttpResponse, HttpServer};
-use chrono::{Duration as ChronoDuration, SecondsFormat, Utc};
+use chrono::{DateTime, Duration as ChronoDuration, SecondsFormat, Utc};
 use futures_util::StreamExt;
 use hmac::{Hmac, Mac};
 use jsonschema::error::ValidationErrorKind;
@@ -49,6 +49,8 @@ pub const TRIGGER_PROGRESS_CONTRACT_VERSION: u32 = 1;
 const WORKFLOW_RUNTIME_LEASE_SECONDS: i64 = 10;
 const WORKFLOW_RUNTIME_RENEW_SECONDS: u64 = 2;
 const WORKFLOW_PENDING_SCAN_MILLISECONDS: u64 = 250;
+const DURABLE_WAIT_SCAN_MILLISECONDS: u64 = 250;
+const DURABLE_WAIT_SCAN_LIMIT: usize = 256;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(tag = "type")]
@@ -217,6 +219,7 @@ impl WomlWebhookServer {
     let listener = if state.routes.is_empty()
       && state.event_token_digests.is_empty()
       && state.whatsapp_subscribers.is_empty()
+      && state.signal_token_digest.is_none()
     {
       None
     } else {
@@ -332,6 +335,10 @@ impl WomlWebhookServer {
     tasks.push(actix_web::rt::spawn(async move {
       run_workflow_routing_maintenance(routing_state).await;
     }));
+    let wait_state = state.clone();
+    tasks.push(actix_web::rt::spawn(async move {
+      run_durable_wait_scheduler(wait_state).await;
+    }));
     if let Some(receiver) = pending.external_ingress {
       let external_state = state.clone();
       tasks.push(actix_web::rt::spawn(run_external_ingress(
@@ -440,6 +447,8 @@ struct WebhookRuntimeState {
   whatsapp_subscribers: BTreeMap<String, Vec<WhatsAppSubscriber>>,
   whatsapp_verify_token: Option<String>,
   whatsapp_app_secret: Option<String>,
+  signal_token_digest: Option<[u8; 32]>,
+  signal_rate_window: Mutex<(DateTime<Utc>, u32)>,
   registration_count: usize,
   execution: RuntimeExecutionOptions,
   progress_reporter: Option<TriggerProgressReporter>,
@@ -598,6 +607,103 @@ async fn run_workflow_routing_maintenance(state: web::Data<WebhookRuntimeState>)
   }
 }
 
+async fn run_durable_wait_scheduler(state: web::Data<WebhookRuntimeState>) {
+  let workflow_ids = state
+    .workflow_targets
+    .targets()
+    .into_iter()
+    .map(|target| target.workflow_id)
+    .collect::<HashSet<_>>();
+  loop {
+    let due = DurableEventStore::open_ready(&state.database_path).is_ok_and(|store| {
+      let timer_due = store
+        .due_timer_waits_for_workflows(
+          state.execution.clock.now(),
+          DURABLE_WAIT_SCAN_LIMIT,
+          &workflow_ids,
+        )
+        .is_ok_and(|waits| !waits.is_empty());
+      timer_due
+        || store
+          .due_signal_waits_for_workflows(
+            state.execution.clock.now(),
+            DURABLE_WAIT_SCAN_LIMIT,
+            &workflow_ids,
+          )
+          .is_ok_and(|waits| !waits.is_empty())
+    });
+    if due {
+      let _active = ActiveRunGuard::acquire(&state);
+      if let Ok(outcomes) = crate::runtime::resume_due_timer_waits_for_workflows_durable(
+        state.database_path.clone(),
+        state.execution.clone(),
+        DURABLE_WAIT_SCAN_LIMIT,
+        Some(&workflow_ids),
+      )
+      .await
+      {
+        for outcome in outcomes {
+          let crate::WorkflowRuntimeOutcome::Succeeded { execution, .. } = outcome else {
+            continue;
+          };
+          let workflow_id = DurableEventStore::open_ready(&state.database_path)
+            .and_then(|store| store.run_binding(&execution.run_id))
+            .map(|binding| binding.workflow_id);
+          if let (Some(reporter), Ok(workflow_id)) = (&state.progress_reporter, workflow_id) {
+            reporter(TriggerProgress::RunTerminal {
+              contract: TRIGGER_PROGRESS_CONTRACT,
+              contract_version: TRIGGER_PROGRESS_CONTRACT_VERSION,
+              workflow_id,
+              run_id: execution.run_id,
+              status: "succeeded",
+              failure_code: None,
+              occurred_at: Utc::now(),
+            });
+          }
+        }
+      }
+      if let Ok(resumed) = crate::runtime::resume_due_signal_waits_for_workflows_durable(
+        state.database_path.clone(),
+        state.execution.clone(),
+        DURABLE_WAIT_SCAN_LIMIT,
+        &workflow_ids,
+      )
+      .await
+      {
+        for resumed in resumed {
+          let workflow_id = DurableEventStore::open_ready(&state.database_path)
+            .and_then(|store| store.run_binding(&resumed.run_id))
+            .map(|binding| binding.workflow_id);
+          let Ok(workflow_id) = workflow_id else {
+            continue;
+          };
+          let (status, failure_code) = match resumed.outcome {
+            Ok(crate::WorkflowRuntimeOutcome::Succeeded { .. }) => ("succeeded", None),
+            Ok(crate::WorkflowRuntimeOutcome::Waiting { .. })
+            | Ok(crate::WorkflowRuntimeOutcome::WaitingTime { .. })
+            | Ok(crate::WorkflowRuntimeOutcome::WaitingSignal { .. }) => continue,
+            Err(error) => ("failed", Some(runtime_failure_code(&error))),
+          };
+          state.report(TriggerProgress::RunTerminal {
+            contract: TRIGGER_PROGRESS_CONTRACT,
+            contract_version: TRIGGER_PROGRESS_CONTRACT_VERSION,
+            workflow_id,
+            run_id: resumed.run_id,
+            status,
+            failure_code,
+            occurred_at: Utc::now(),
+          });
+        }
+      }
+      continue;
+    }
+    tokio::time::sleep(std::time::Duration::from_millis(
+      DURABLE_WAIT_SCAN_MILLISECONDS,
+    ))
+    .await;
+  }
+}
+
 #[derive(Clone)]
 struct ScheduleRuntimeRegistration {
   workflow_id: String,
@@ -634,6 +740,28 @@ struct RunProgressIdentity {
   trigger_handler: String,
   occurrence_id: String,
   run_id: String,
+}
+
+struct ActiveRunGuard {
+  active_runs: Arc<AtomicUsize>,
+  active_runs_changed: Arc<Notify>,
+}
+
+impl ActiveRunGuard {
+  fn acquire(state: &WebhookRuntimeState) -> Self {
+    state.active_runs.fetch_add(1, Ordering::AcqRel);
+    Self {
+      active_runs: Arc::clone(&state.active_runs),
+      active_runs_changed: Arc::clone(&state.active_runs_changed),
+    }
+  }
+}
+
+impl Drop for ActiveRunGuard {
+  fn drop(&mut self) {
+    self.active_runs.fetch_sub(1, Ordering::AcqRel);
+    self.active_runs_changed.notify_waiters();
+  }
 }
 
 struct StartupManualTrigger {
@@ -753,6 +881,221 @@ struct WebhookSchemaIssue {
   message: &'static str,
 }
 
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct SignalHttpRequestV1 {
+  run_id: String,
+  wait_id: String,
+  correlation: String,
+  payload: Value,
+}
+
+fn signal_http_response(
+  status: StatusCode,
+  outcome: &crate::ExternalSignalAdmissionOutcome,
+) -> HttpResponse {
+  let mut response = HttpResponse::build(status);
+  response.insert_header((header::CACHE_CONTROL, "no-store"));
+  response.json(outcome)
+}
+
+async fn handle_external_signal(
+  request: HttpRequest,
+  mut body: web::Payload,
+  state: web::Data<WebhookRuntimeState>,
+  signal: String,
+) -> HttpResponse {
+  let Some(expected_digest) = state.signal_token_digest else {
+    return rejected_response(
+      state.get_ref(),
+      None,
+      StatusCode::NOT_FOUND,
+      "WOML_SIGNAL_TARGET_NOT_FOUND",
+      "External signal ingress is disabled.",
+      None,
+    );
+  };
+  if request.method() != Method::POST {
+    return rejected_response(
+      state.get_ref(),
+      None,
+      StatusCode::METHOD_NOT_ALLOWED,
+      "WOML_SIGNAL_METHOD_NOT_ALLOWED",
+      "External signal ingress accepts POST requests only.",
+      None,
+    );
+  }
+  let authorization = request
+    .headers()
+    .get(header::AUTHORIZATION)
+    .and_then(|value| value.to_str().ok())
+    .and_then(|value| value.strip_prefix("Bearer "));
+  let authenticated = authorization.is_some_and(|token| {
+    let provided: [u8; 32] = Sha256::digest(token.as_bytes()).into();
+    bool::from(provided.ct_eq(&expected_digest))
+  });
+  if !authenticated {
+    return rejected_response(
+      state.get_ref(),
+      None,
+      StatusCode::FORBIDDEN,
+      "WOML_SIGNAL_ACCESS_DENIED",
+      "External signal authentication failed.",
+      None,
+    );
+  }
+  {
+    let Ok(mut rate) = state.signal_rate_window.lock() else {
+      return rejected_response(
+        state.get_ref(),
+        None,
+        StatusCode::SERVICE_UNAVAILABLE,
+        "WOML_SIGNAL_UNAVAILABLE",
+        "External signal admission is temporarily unavailable.",
+        None,
+      );
+    };
+    let now = Utc::now();
+    if now - rate.0 >= ChronoDuration::minutes(1) {
+      *rate = (now, 0);
+    }
+    if rate.1 >= 120 {
+      return rejected_response(
+        state.get_ref(),
+        None,
+        StatusCode::TOO_MANY_REQUESTS,
+        "WOML_SIGNAL_RATE_LIMITED",
+        "External signal ingress exceeded 120 requests per minute.",
+        None,
+      );
+    }
+    rate.1 += 1;
+  }
+  if !has_json_content_type(&request) {
+    return rejected_response(
+      state.get_ref(),
+      None,
+      StatusCode::BAD_REQUEST,
+      "WOML_SIGNAL_PAYLOAD_INVALID",
+      "External signal payload must use application/json.",
+      None,
+    );
+  }
+  let Some(idempotency_key) = request
+    .headers()
+    .get("Idempotency-Key")
+    .and_then(|value| value.to_str().ok())
+    .map(str::to_string)
+  else {
+    return rejected_response(
+      state.get_ref(),
+      None,
+      StatusCode::BAD_REQUEST,
+      "WOML_SIGNAL_IDEMPOTENCY_REQUIRED",
+      "External signal ingress requires an Idempotency-Key header.",
+      None,
+    );
+  };
+  let mut bytes = Vec::new();
+  while let Some(chunk) = body.next().await {
+    let Ok(chunk) = chunk else {
+      return rejected_response(
+        state.get_ref(),
+        None,
+        StatusCode::BAD_REQUEST,
+        "WOML_SIGNAL_PAYLOAD_INVALID",
+        "External signal request body is invalid.",
+        None,
+      );
+    };
+    if bytes.len() + chunk.len() > crate::EXTERNAL_SIGNAL_MAX_PAYLOAD_BYTES + 4_096 {
+      return rejected_response(
+        state.get_ref(),
+        None,
+        StatusCode::PAYLOAD_TOO_LARGE,
+        "WOML_SIGNAL_PAYLOAD_TOO_LARGE",
+        "External signal payload exceeds the 1 MiB limit.",
+        None,
+      );
+    }
+    bytes.extend_from_slice(&chunk);
+  }
+  let decoded: SignalHttpRequestV1 = match serde_json::from_slice(&bytes) {
+    Ok(decoded) => decoded,
+    Err(_) => {
+      return rejected_response(
+        state.get_ref(),
+        None,
+        StatusCode::BAD_REQUEST,
+        "WOML_SIGNAL_PAYLOAD_INVALID",
+        "External signal request body does not match Signal HTTP v1.",
+        None,
+      )
+    }
+  };
+  let _active = ActiveRunGuard::acquire(&state);
+  let admitted = crate::admit_external_signal_durable(
+    state.database_path.clone(),
+    crate::ExternalSignalAdmissionRequest {
+      profile: crate::EXTERNAL_SIGNAL_ADMISSION_PROFILE.to_string(),
+      signal,
+      run_id: decoded.run_id,
+      wait_id: decoded.wait_id,
+      correlation: decoded.correlation,
+      idempotency_key,
+      payload: decoded.payload,
+      received_at: Utc::now(),
+      authentication_class: "http_bearer".to_string(),
+    },
+    state.execution.clone(),
+  )
+  .await;
+  let Ok(admitted) = admitted else {
+    return rejected_response(
+      state.get_ref(),
+      None,
+      StatusCode::SERVICE_UNAVAILABLE,
+      "WOML_SIGNAL_STORE_UNAVAILABLE",
+      "The durable signal authority is temporarily unavailable.",
+      None,
+    );
+  };
+  if let Some(continuation) = admitted.continuation {
+    let workflow_id = DurableEventStore::open_ready(&state.database_path)
+      .and_then(|store| store.run_binding(&admitted.admission.run_id))
+      .map(|binding| binding.workflow_id);
+    if let Ok(workflow_id) = workflow_id {
+      let terminal = match continuation {
+        Ok(crate::WorkflowRuntimeOutcome::Succeeded { .. }) => Some(("succeeded", None)),
+        Ok(crate::WorkflowRuntimeOutcome::Waiting { .. })
+        | Ok(crate::WorkflowRuntimeOutcome::WaitingTime { .. })
+        | Ok(crate::WorkflowRuntimeOutcome::WaitingSignal { .. }) => None,
+        Err(error) => Some(("failed", Some(runtime_failure_code(&error)))),
+      };
+      if let Some((status, failure_code)) = terminal {
+        state.report(TriggerProgress::RunTerminal {
+          contract: TRIGGER_PROGRESS_CONTRACT,
+          contract_version: TRIGGER_PROGRESS_CONTRACT_VERSION,
+          workflow_id,
+          run_id: admitted.admission.run_id.clone(),
+          status,
+          failure_code,
+          occurred_at: Utc::now(),
+        });
+      }
+    }
+  }
+  let status = match admitted.admission.status {
+    crate::ExternalSignalAdmissionStatus::Accepted => StatusCode::ACCEPTED,
+    crate::ExternalSignalAdmissionStatus::Duplicate => StatusCode::OK,
+    crate::ExternalSignalAdmissionStatus::IdentityConflict
+    | crate::ExternalSignalAdmissionStatus::AlreadyResolved => StatusCode::CONFLICT,
+    crate::ExternalSignalAdmissionStatus::TargetNotFound => StatusCode::NOT_FOUND,
+    crate::ExternalSignalAdmissionStatus::Rejected => StatusCode::UNPROCESSABLE_ENTITY,
+  };
+  signal_http_response(status, &admitted.admission)
+}
+
 #[derive(Debug, Serialize)]
 #[serde(tag = "status", rename_all_fields = "camelCase")]
 enum EventDeliveryResponse {
@@ -832,9 +1175,10 @@ fn prepare_state(
         | crate::COMPILED_MODEL_SCHEMA_VERSION_V14
         | crate::COMPILED_MODEL_SCHEMA_VERSION_V15
         | crate::COMPILED_MODEL_SCHEMA_VERSION_V16
+        | crate::COMPILED_MODEL_SCHEMA_VERSION_V17
     ) {
       return Err(WebhookRuntimeError::InvalidRegistration(format!(
-        "workflow {:?} must use a supported compiled Model v7 through v16",
+        "workflow {:?} must use a supported compiled Model v7 through v17",
         registration.workflow.workflow_id
       )));
     }
@@ -1041,6 +1385,13 @@ fn prepare_state(
       whatsapp_subscribers,
       whatsapp_verify_token,
       whatsapp_app_secret,
+      signal_token_digest: config
+        .execution
+        .signal_ingress_token
+        .as_deref()
+        .filter(|token| !token.is_empty())
+        .map(|token| Sha256::digest(token.as_bytes()).into()),
+      signal_rate_window: Mutex::new((Utc::now(), 0)),
       registration_count,
       execution: config.execution,
       progress_reporter: config.progress_reporter,
@@ -2582,6 +2933,13 @@ async fn handle_webhook(
   if request.path() == WHATSAPP_CALLBACK_PATH {
     return handle_whatsapp_callback(request, body, state).await;
   }
+  let signal = request
+    .path()
+    .strip_prefix("/v1/signals/")
+    .map(str::to_string);
+  if let Some(signal) = signal {
+    return handle_external_signal(request, body, state, signal).await;
+  }
   let event_name = request
     .path()
     .strip_prefix("/_woml/events/")
@@ -3311,7 +3669,9 @@ fn dispatch_run(state: &WebhookRuntimeState, identity: RunProgressIdentity) {
         failure_code: None,
         occurred_at: Utc::now(),
       }),
-      Ok(crate::WorkflowRuntimeOutcome::Waiting { .. }) => None,
+      Ok(crate::WorkflowRuntimeOutcome::Waiting { .. })
+      | Ok(crate::WorkflowRuntimeOutcome::WaitingTime { .. })
+      | Ok(crate::WorkflowRuntimeOutcome::WaitingSignal { .. }) => None,
       Err(error) => Some(TriggerProgress::RunTerminal {
         contract: TRIGGER_PROGRESS_CONTRACT,
         contract_version: TRIGGER_PROGRESS_CONTRACT_VERSION,

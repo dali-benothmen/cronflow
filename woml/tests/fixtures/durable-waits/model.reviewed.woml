@@ -1,0 +1,8 @@
+<woml>
+  <workflow id="durable-wait-model" version="1.0.0">
+    <triggers><manual id="start" /></triggers>
+    <steps>
+      <wait id="pause" name="Durable pause" duration="1s" />
+    </steps>
+  </workflow>
+</woml>

@@ -12,10 +12,11 @@ use serde_json::{json, Map, Value};
 use uuid::Uuid;
 use woml_engine::model::ValueExpression;
 use woml_engine::{
-  CompiledWorkflowDefinition, DurableEventStore, NotificationHostProcessOptions, RunEventPayload,
-  RunStatus, RuntimeExecutionOptions, ScriptHostProcessOptions, TriggerAdmissionRequest,
-  TriggerProgress, WebhookDefinitionRegistration, WebhookRuntimeError, WomlWebhookServer,
-  WomlWebhookServerConfig, WEBHOOK_MAX_BODY_BYTES,
+  CompiledWait, CompiledWaitSignal, CompiledWorkflowDefinition, DurableEventStore,
+  NotificationHostProcessOptions, RunEventPayload, RunStatus, RuntimeExecutionOptions,
+  ScriptHostProcessOptions, TriggerAdmissionRequest, TriggerProgress,
+  WebhookDefinitionRegistration, WebhookRuntimeError, WomlWebhookServer, WomlWebhookServerConfig,
+  WEBHOOK_MAX_BODY_BYTES,
 };
 
 const WEBHOOK_MODEL: &str =
@@ -30,9 +31,38 @@ const RETRY_MODEL: &str = include_str!("../../../woml/tests/fixtures/retry.compi
 const APPROVAL_MODEL: &str = include_str!("../../../woml/tests/fixtures/approval.compiled.v4.json");
 const NOTIFICATION_MODEL: &str =
   include_str!("../../../woml/tests/fixtures/approval-slack.compiled.v5.json");
+const DURABLE_WAIT_MODEL: &str =
+  include_str!("../../../woml/tests/fixtures/durable-waits/model.v17.reviewed.json");
+const DURABLE_WAIT_HASH: &str =
+  "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+const SIGNAL_TOKEN: &str = "signal-ingress-test-token";
 
 fn model() -> CompiledWorkflowDefinition {
   serde_json::from_str(WEBHOOK_MODEL).unwrap()
+}
+
+fn signal_wait_model() -> CompiledWorkflowDefinition {
+  let mut workflow: CompiledWorkflowDefinition = serde_json::from_str(DURABLE_WAIT_MODEL).unwrap();
+  workflow.graph.waits = Some(vec![CompiledWait::Signal {
+    wait_id: "pause".to_string(),
+    node_id: "pause".to_string(),
+    metadata: workflow.graph.nodes[0].metadata.clone(),
+    signals: vec![CompiledWaitSignal {
+      signal: "job.completed".to_string(),
+      schema: json!({
+        "type": "object",
+        "properties": { "status": { "type": "string" } },
+        "required": ["status"],
+        "additionalProperties": false
+      }),
+    }],
+    correlation: ValueExpression::Literal {
+      value: json!("job-42"),
+    },
+    timeout_ms: Some(60_000),
+    on_timeout: "fail".to_string(),
+  }]);
+  workflow
 }
 
 fn production_model(source: &str, path: &str, trigger_id: &str) -> CompiledWorkflowDefinition {
@@ -422,6 +452,333 @@ async fn selected_manual_trigger_fires_once_at_long_lived_runtime_startup() {
 }
 
 #[actix_web::test]
+async fn production_runtime_scheduler_resumes_a_due_timer_without_a_script_worker() {
+  let database = TemporaryDatabase::new("durable-wait-scheduler");
+  let progress = Arc::new(Mutex::new(Vec::<TriggerProgress>::new()));
+  let captured = progress.clone();
+  let workflow: CompiledWorkflowDefinition = serde_json::from_str(DURABLE_WAIT_MODEL).unwrap();
+  let server = WomlWebhookServer::start(WomlWebhookServerConfig {
+    bind_address: "127.0.0.1:0".parse().unwrap(),
+    database_path: database.path().to_path_buf(),
+    registrations: vec![WebhookDefinitionRegistration::new(
+      workflow,
+      DURABLE_WAIT_HASH,
+    )],
+    startup_manual_triggers: BTreeMap::from([(
+      "durable-wait-model".to_string(),
+      "start".to_string(),
+    )]),
+    execution: RuntimeExecutionOptions::new(placeholder_host(), 2_000),
+    progress_reporter: Some(Arc::new(move |message| {
+      captured.lock().unwrap().push(message);
+    })),
+  })
+  .await
+  .unwrap();
+
+  let deadline = Instant::now() + Duration::from_secs(5);
+  let run_id = loop {
+    let selected = progress.lock().unwrap().iter().find_map(|message| {
+      if let TriggerProgress::OccurrenceAccepted { run_id, .. } = message {
+        Some(run_id.clone())
+      } else {
+        None
+      }
+    });
+    if let Some(run_id) = selected {
+      break run_id;
+    }
+    assert!(Instant::now() < deadline, "timer workflow was not admitted");
+    actix_web::rt::time::sleep(Duration::from_millis(10)).await;
+  };
+  wait_for_status(&database, &run_id, RunStatus::Succeeded).await;
+
+  let terminal_deadline = Instant::now() + Duration::from_secs(2);
+  loop {
+    let reported = progress.lock().unwrap().iter().any(|message| {
+      matches!(
+        message,
+        TriggerProgress::RunTerminal {
+          run_id: reported_run_id,
+          status: "succeeded",
+          ..
+        } if reported_run_id == &run_id
+      )
+    });
+    if reported {
+      break;
+    }
+    assert!(
+      Instant::now() < terminal_deadline,
+      "timer completion was not reported to the terminal presentation channel"
+    );
+    actix_web::rt::time::sleep(Duration::from_millis(10)).await;
+  }
+
+  let store = DurableEventStore::open(database.path()).unwrap();
+  let events = store.events(&run_id).unwrap();
+  assert_eq!(
+    events
+      .iter()
+      .filter(|event| matches!(event.payload, RunEventPayload::WaitRegistered(_)))
+      .count(),
+    1
+  );
+  assert_eq!(
+    events
+      .iter()
+      .filter(|event| matches!(event.payload, RunEventPayload::WaitSatisfied(_)))
+      .count(),
+    1
+  );
+  assert!(!events
+    .iter()
+    .any(|event| matches!(event.payload, RunEventPayload::StepAttemptStarted(_))));
+  server.stop().await;
+}
+
+#[actix_web::test]
+async fn external_signal_http_requires_its_token_and_resumes_the_exact_wait() {
+  let database = TemporaryDatabase::new("external-signal-http");
+  let progress = Arc::new(Mutex::new(Vec::<TriggerProgress>::new()));
+  let captured = progress.clone();
+  let server = WomlWebhookServer::start(WomlWebhookServerConfig {
+    bind_address: "127.0.0.1:0".parse().unwrap(),
+    database_path: database.path().to_path_buf(),
+    registrations: vec![WebhookDefinitionRegistration::new(
+      signal_wait_model(),
+      DURABLE_WAIT_HASH,
+    )],
+    startup_manual_triggers: BTreeMap::from([(
+      "durable-wait-model".to_string(),
+      "start".to_string(),
+    )]),
+    execution: RuntimeExecutionOptions::new(placeholder_host(), 2_000)
+      .with_signal_ingress_token(Some(SIGNAL_TOKEN.to_string())),
+    progress_reporter: Some(Arc::new(move |message| {
+      captured.lock().unwrap().push(message);
+    })),
+  })
+  .await
+  .unwrap();
+  let deadline = Instant::now() + Duration::from_secs(5);
+  let run_id = loop {
+    let selected = progress.lock().unwrap().iter().find_map(|message| {
+      if let TriggerProgress::OccurrenceAccepted { run_id, .. } = message {
+        Some(run_id.clone())
+      } else {
+        None
+      }
+    });
+    if let Some(run_id) = selected {
+      break run_id;
+    }
+    assert!(
+      Instant::now() < deadline,
+      "signal workflow was not admitted"
+    );
+    actix_web::rt::time::sleep(Duration::from_millis(10)).await;
+  };
+  wait_for_status(&database, &run_id, RunStatus::Waiting).await;
+  let body = serde_json::to_vec(&json!({
+    "runId": run_id,
+    "waitId": "pause",
+    "correlation": "job-42",
+    "payload": { "status": "passed" }
+  }))
+  .unwrap();
+  let unauthorized = request(
+    server.local_address(),
+    "POST",
+    "/v1/signals/job.completed",
+    &[
+      ("Authorization", "Bearer wrong-token"),
+      ("Content-Type", "application/json"),
+      ("Idempotency-Key", "callback-http-1"),
+    ],
+    &body,
+    None,
+  )
+  .await;
+  assert_eq!(unauthorized.status, 403);
+
+  let authorization = format!("Bearer {SIGNAL_TOKEN}");
+  let secret_payload = serde_json::to_vec(&json!({
+    "runId": run_id,
+    "waitId": "pause",
+    "correlation": "job-42",
+    "payload": { "status": SIGNAL_TOKEN }
+  }))
+  .unwrap();
+  let secret_rejected = request(
+    server.local_address(),
+    "POST",
+    "/v1/signals/job.completed",
+    &[
+      ("Authorization", &authorization),
+      ("Content-Type", "application/json"),
+      ("Idempotency-Key", "callback-secret"),
+    ],
+    &secret_payload,
+    None,
+  )
+  .await;
+  assert_eq!(secret_rejected.status, 422);
+  assert_eq!(secret_rejected.body["code"], "WOML_SIGNAL_PAYLOAD_SECRET");
+
+  let accepted = request(
+    server.local_address(),
+    "POST",
+    "/v1/signals/job.completed",
+    &[
+      ("Authorization", &authorization),
+      ("Content-Type", "application/json"),
+      ("Idempotency-Key", "callback-http-1"),
+    ],
+    &body,
+    None,
+  )
+  .await;
+  assert_eq!(accepted.status, 202);
+  assert_eq!(accepted.body["status"], "accepted");
+  assert_eq!(accepted.body["resolution"], "resolved");
+  wait_for_status(&database, &run_id, RunStatus::Succeeded).await;
+
+  let duplicate = request(
+    server.local_address(),
+    "POST",
+    "/v1/signals/job.completed",
+    &[
+      ("Authorization", &authorization),
+      ("Content-Type", "application/json"),
+      ("Idempotency-Key", "callback-http-1"),
+    ],
+    &body,
+    None,
+  )
+  .await;
+  assert_eq!(duplicate.status, 200);
+  assert_eq!(duplicate.body["status"], "duplicate");
+  server.stop().await;
+}
+
+#[actix_web::test]
+async fn external_signal_http_fails_closed_for_malformed_oversized_and_rate_limited_traffic() {
+  let database = TemporaryDatabase::new("external-signal-hardening");
+  let server = WomlWebhookServer::start(WomlWebhookServerConfig {
+    bind_address: "127.0.0.1:0".parse().unwrap(),
+    database_path: database.path().to_path_buf(),
+    registrations: vec![WebhookDefinitionRegistration::new(
+      signal_wait_model(),
+      DURABLE_WAIT_HASH,
+    )],
+    startup_manual_triggers: BTreeMap::new(),
+    execution: RuntimeExecutionOptions::new(placeholder_host(), 2_000)
+      .with_signal_ingress_token(Some(SIGNAL_TOKEN.to_string())),
+    progress_reporter: None,
+  })
+  .await
+  .unwrap();
+  let authorization = format!("Bearer {SIGNAL_TOKEN}");
+  let address = server.local_address();
+
+  let wrong_method = request(
+    address,
+    "GET",
+    "/v1/signals/job.completed",
+    &[("Authorization", &authorization)],
+    b"",
+    None,
+  )
+  .await;
+  assert_eq!(wrong_method.status, 405);
+  assert_eq!(
+    wrong_method.body["error"]["code"],
+    "WOML_SIGNAL_METHOD_NOT_ALLOWED"
+  );
+
+  let malformed = request(
+    address,
+    "POST",
+    "/v1/signals/job.completed",
+    &[
+      ("Authorization", &authorization),
+      ("Content-Type", "application/json"),
+      ("Idempotency-Key", "malformed-dw8"),
+    ],
+    br#"{"runId": "unterminated"#,
+    None,
+  )
+  .await;
+  assert_eq!(malformed.status, 400);
+  assert_eq!(
+    malformed.body["error"]["code"],
+    "WOML_SIGNAL_PAYLOAD_INVALID"
+  );
+
+  let oversized = vec![b'x'; woml_engine::EXTERNAL_SIGNAL_MAX_PAYLOAD_BYTES + 4_097];
+  let too_large = request(
+    address,
+    "POST",
+    "/v1/signals/job.completed",
+    &[
+      ("Authorization", &authorization),
+      ("Content-Type", "application/json"),
+      ("Idempotency-Key", "oversized-dw8"),
+    ],
+    &oversized,
+    None,
+  )
+  .await;
+  assert_eq!(too_large.status, 413);
+  assert_eq!(
+    too_large.body["error"]["code"],
+    "WOML_SIGNAL_PAYLOAD_TOO_LARGE"
+  );
+  server.stop().await;
+
+  let rate_database = TemporaryDatabase::new("external-signal-rate-limit");
+  let rate_server = WomlWebhookServer::start(WomlWebhookServerConfig {
+    bind_address: "127.0.0.1:0".parse().unwrap(),
+    database_path: rate_database.path().to_path_buf(),
+    registrations: vec![WebhookDefinitionRegistration::new(
+      signal_wait_model(),
+      DURABLE_WAIT_HASH,
+    )],
+    startup_manual_triggers: BTreeMap::new(),
+    execution: RuntimeExecutionOptions::new(placeholder_host(), 2_000)
+      .with_signal_ingress_token(Some(SIGNAL_TOKEN.to_string())),
+    progress_reporter: None,
+  })
+  .await
+  .unwrap();
+  for _ in 0..120 {
+    let response = request(
+      rate_server.local_address(),
+      "POST",
+      "/v1/signals/job.completed",
+      &[("Authorization", &authorization)],
+      b"{}",
+      None,
+    )
+    .await;
+    assert_eq!(response.status, 400);
+  }
+  let limited = request(
+    rate_server.local_address(),
+    "POST",
+    "/v1/signals/job.completed",
+    &[("Authorization", &authorization)],
+    b"{}",
+    None,
+  )
+  .await;
+  assert_eq!(limited.status, 429);
+  assert_eq!(limited.body["error"]["code"], "WOML_SIGNAL_RATE_LIMITED");
+  rate_server.stop().await;
+}
+
+#[actix_web::test]
 async fn schema_auth_shape_content_type_method_and_route_rejections_create_no_run() {
   let database = TemporaryDatabase::new("rejections");
   let server = start_server(&database, placeholder_host()).await;
@@ -769,25 +1126,28 @@ async fn concurrent_requests_and_database_contention_preserve_one_run_per_occurr
     wait_for_status(&database, run_id, RunStatus::Succeeded).await;
   }
 
-  let lock = Connection::open(database.path()).unwrap();
-  lock.execute_batch("BEGIN IMMEDIATE").unwrap();
-  let blocked_request = actix_web::rt::spawn({
-    let authorization = authorization.clone();
-    async move {
-      request(
-        address,
-        "POST",
-        WEBHOOK_PATH,
-        &standard_headers(&authorization, "contention-key"),
-        br#"{"orderId":"after-contention"}"#,
-        None,
-      )
-      .await
-    }
+  let database_path = database.path().to_path_buf();
+  let (locked_sender, locked_receiver) = std::sync::mpsc::sync_channel(1);
+  let locker = std::thread::spawn(move || {
+    let lock = Connection::open(database_path).unwrap();
+    lock.execute_batch("BEGIN IMMEDIATE").unwrap();
+    locked_sender.send(()).unwrap();
+    std::thread::sleep(Duration::from_millis(100));
+    lock.execute_batch("COMMIT").unwrap();
   });
-  actix_web::rt::time::sleep(Duration::from_millis(100)).await;
-  lock.execute_batch("COMMIT").unwrap();
-  let response = blocked_request.await.unwrap();
+  locked_receiver
+    .recv_timeout(Duration::from_secs(5))
+    .expect("contention writer must acquire the database lock");
+  let response = request(
+    address,
+    "POST",
+    WEBHOOK_PATH,
+    &standard_headers(&authorization, "contention-key"),
+    br#"{"orderId":"after-contention"}"#,
+    None,
+  )
+  .await;
+  locker.join().unwrap();
   assert_eq!(
     response.status, 202,
     "contention admission response: {}",

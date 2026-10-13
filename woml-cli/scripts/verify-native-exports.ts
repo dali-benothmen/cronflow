@@ -22,6 +22,7 @@ export const expectedNativeExports = [
   'inspectWomlRun',
   'inspectWomlRunPresentation',
   'inspectWomlRunV2',
+  'inspectWomlWaitsV1',
   'inspectWomlRunArtifacts',
   'inspectWomlStoredRunRequirements',
   'listWomlRunPresentations',
@@ -43,10 +44,12 @@ export const expectedNativeExports = [
   'resumeWomlWorkflowDurableWithProgress',
   'runWomlNotificationProviderJourney',
   'settleWomlApprovalTimeout',
+  'settleWomlTimerWait',
   'startWomlWebhookRuntime',
   'stopWomlWebhookRuntime',
   'submitWomlManualTrigger',
   'submitWomlTriggerOccurrence',
+  'submitWomlExternalSignal',
   'verifyWomlArtifactBackup',
 ] as const;
 

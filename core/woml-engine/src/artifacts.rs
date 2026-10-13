@@ -1180,33 +1180,50 @@ impl S3ArtifactBackend {
     let prefix = self.object_key("blobs/sha256/");
     self.run(async move {
       let empty_hash = hex::encode(Sha256::digest([]));
-      let response = backend
-        .send(
-          Method::GET,
-          "",
-          vec![
-            ("list-type".to_string(), "2".to_string()),
-            ("max-keys".to_string(), limit.min(1_000).to_string()),
-            ("prefix".to_string(), prefix.clone()),
-          ],
-          empty_hash,
-          None,
-          BTreeMap::new(),
-        )
-        .await?;
-      if !response.status().is_success() {
-        return Err(backend_unavailable());
+      for attempt in 0..S3_RECOVERY_ATTEMPTS {
+        let response = backend
+          .send(
+            Method::GET,
+            "",
+            vec![
+              ("list-type".to_string(), "2".to_string()),
+              ("max-keys".to_string(), limit.min(1_000).to_string()),
+              ("prefix".to_string(), prefix.clone()),
+            ],
+            empty_hash.clone(),
+            None,
+            BTreeMap::new(),
+          )
+          .await;
+        match response {
+          Ok(response) if response.status().is_success() => {
+            let body = bounded_response_text(response, S3_CONTROL_RESPONSE_MAX_BYTES).await?;
+            let mut digests = xml_values(&body, "Key")
+              .into_iter()
+              .filter_map(|key| key.strip_prefix(&prefix).map(str::to_string))
+              .map(|suffix| suffix.replace('/', ""))
+              .filter(|digest| {
+                digest.len() == 64 && digest.bytes().all(|byte| byte.is_ascii_hexdigit())
+              })
+              .take(limit)
+              .collect::<Vec<_>>();
+            digests.sort();
+            return Ok(digests);
+          }
+          Ok(response)
+            if !response.status().is_server_error()
+              && response.status() != StatusCode::REQUEST_TIMEOUT
+              && response.status() != StatusCode::TOO_MANY_REQUESTS =>
+          {
+            return Err(backend_unavailable());
+          }
+          Ok(_) | Err(_) => {}
+        }
+        if attempt + 1 < S3_RECOVERY_ATTEMPTS {
+          tokio::time::sleep(Duration::from_millis(25 * (attempt as u64 + 1))).await;
+        }
       }
-      let body = bounded_response_text(response, S3_CONTROL_RESPONSE_MAX_BYTES).await?;
-      let mut digests = xml_values(&body, "Key")
-        .into_iter()
-        .filter_map(|key| key.strip_prefix(&prefix).map(str::to_string))
-        .map(|suffix| suffix.replace('/', ""))
-        .filter(|digest| digest.len() == 64 && digest.bytes().all(|byte| byte.is_ascii_hexdigit()))
-        .take(limit)
-        .collect::<Vec<_>>();
-      digests.sort();
-      Ok(digests)
+      Err(backend_unavailable())
     })
   }
 }
@@ -1222,49 +1239,9 @@ impl ArtifactBackend for S3ArtifactBackend {
     let expected = format!("woml.artifact-store/v1\n{store_id}\n");
     self.run(async move {
       let empty_hash = hex::encode(Sha256::digest([]));
-      let response = backend
-        .send(
-          Method::GET,
-          &key,
-          vec![],
-          empty_hash.clone(),
-          None,
-          BTreeMap::new(),
-        )
-        .await?;
-      if response.status().is_success() {
-        let body = bounded_response_text(response, 1024).await?;
-        return if body == expected {
-          Ok(())
-        } else {
-          Err(backend_unavailable())
-        };
-      }
-      if response.status() != StatusCode::NOT_FOUND {
-        return Err(backend_unavailable());
-      }
       let digest = hex::encode(Sha256::digest(expected.as_bytes()));
-      let mut headers = backend.encryption_headers();
-      headers.insert("if-none-match".to_string(), "*".to_string());
-      headers.insert("content-length".to_string(), expected.len().to_string());
-      let response = backend
-        .send(
-          Method::PUT,
-          &key,
-          vec![],
-          digest,
-          Some(reqwest::Body::from(expected.clone())),
-          headers,
-        )
-        .await?;
-      if response.status().is_success() {
-        return Ok(());
-      }
-      if response.status() != StatusCode::PRECONDITION_FAILED {
-        return Err(backend_unavailable());
-      }
       for attempt in 0..S3_RECOVERY_ATTEMPTS {
-        let response = backend
+        let get = backend
           .send(
             Method::GET,
             &key,
@@ -1273,14 +1250,40 @@ impl ArtifactBackend for S3ArtifactBackend {
             None,
             BTreeMap::new(),
           )
-          .await?;
-        if response.status().is_success() {
-          let body = bounded_response_text(response, 1024).await?;
-          return if body == expected {
-            Ok(())
-          } else {
-            Err(backend_unavailable())
-          };
+          .await;
+        match get {
+          Ok(response) if response.status().is_success() => {
+            let body = bounded_response_text(response, 1024).await?;
+            return if body == expected {
+              Ok(())
+            } else {
+              Err(backend_unavailable())
+            };
+          }
+          Ok(response) if response.status() == StatusCode::NOT_FOUND => {
+            let mut headers = backend.encryption_headers();
+            headers.insert("if-none-match".to_string(), "*".to_string());
+            headers.insert("content-length".to_string(), expected.len().to_string());
+            if let Ok(response) = backend
+              .send(
+                Method::PUT,
+                &key,
+                vec![],
+                digest.clone(),
+                Some(reqwest::Body::from(expected.clone())),
+                headers,
+              )
+              .await
+            {
+              if response.status().is_success() {
+                return Ok(());
+              }
+              if response.status() != StatusCode::PRECONDITION_FAILED {
+                return Err(backend_unavailable());
+              }
+            }
+          }
+          Ok(_) | Err(_) => {}
         }
         if attempt + 1 < S3_RECOVERY_ATTEMPTS {
           tokio::time::sleep(Duration::from_millis(25 * (attempt as u64 + 1))).await;
@@ -1355,21 +1358,28 @@ impl ArtifactBackend for S3ArtifactBackend {
     let backend = self.clone();
     let key = self.blob_key(sha256);
     self.run(async move {
-      let response = backend
-        .send(
-          Method::DELETE,
-          &key,
-          vec![],
-          hex::encode(Sha256::digest([])),
-          None,
-          BTreeMap::new(),
-        )
-        .await?;
-      if response.status().is_success() || response.status() == StatusCode::NOT_FOUND {
-        Ok(())
-      } else {
-        Err(backend_unavailable())
+      let empty_hash = hex::encode(Sha256::digest([]));
+      for attempt in 0..S3_RECOVERY_ATTEMPTS {
+        if let Ok(response) = backend
+          .send(
+            Method::DELETE,
+            &key,
+            vec![],
+            empty_hash.clone(),
+            None,
+            BTreeMap::new(),
+          )
+          .await
+        {
+          if response.status().is_success() || response.status() == StatusCode::NOT_FOUND {
+            return Ok(());
+          }
+        }
+        if attempt + 1 < S3_RECOVERY_ATTEMPTS {
+          tokio::time::sleep(Duration::from_millis(25 * (attempt as u64 + 1))).await;
+        }
       }
+      Err(backend_unavailable())
     })
   }
 
@@ -4328,6 +4338,9 @@ mod tests {
       let stop = Arc::new(AtomicBool::new(false));
       let failed_blob_puts = Arc::new(AtomicUsize::new(1));
       let invisible_blob_reads = Arc::new(AtomicUsize::new(1));
+      let failed_store_id_reads = Arc::new(AtomicUsize::new(1));
+      let failed_deletes = Arc::new(AtomicUsize::new(1));
+      let failed_inventory_reads = Arc::new(AtomicUsize::new(1));
       let thread_objects = Arc::clone(&objects);
       let thread_requests = Arc::clone(&requests);
       let thread_stop = Arc::clone(&stop);
@@ -4340,6 +4353,9 @@ mod tests {
               &thread_requests,
               &failed_blob_puts,
               &invisible_blob_reads,
+              &failed_store_id_reads,
+              &failed_deletes,
+              &failed_inventory_reads,
             ),
             Err(_) => {
               // A nonblocking Windows listener can surface an aborted or
@@ -4377,6 +4393,9 @@ mod tests {
     requests: &Arc<Mutex<Vec<MockS3Request>>>,
     failed_blob_puts: &AtomicUsize,
     invisible_blob_reads: &AtomicUsize,
+    failed_store_id_reads: &AtomicUsize,
+    failed_deletes: &AtomicUsize,
+    failed_inventory_reads: &AtomicUsize,
   ) {
     let _ = stream.set_read_timeout(Some(Duration::from_secs(2)));
     let mut received = Vec::new();
@@ -4440,6 +4459,23 @@ mod tests {
     let path = target.split('?').next().unwrap_or_default();
     let key = path.strip_prefix("/woml-test/").unwrap_or_default();
     let is_blob = key.contains("blobs/sha256/");
+
+    if method == "GET" && key.ends_with("store-id") && decrement_if_positive(failed_store_id_reads)
+    {
+      write_mock_response(&mut stream, 503, "", &[]);
+      return;
+    }
+    if method == "DELETE" && decrement_if_positive(failed_deletes) {
+      write_mock_response(&mut stream, 503, "", &[]);
+      return;
+    }
+    if method == "GET"
+      && target.contains("list-type=2")
+      && decrement_if_positive(failed_inventory_reads)
+    {
+      write_mock_response(&mut stream, 503, "", &[]);
+      return;
+    }
 
     if method == "GET" && target.contains("list-type=2") {
       let prefix = target

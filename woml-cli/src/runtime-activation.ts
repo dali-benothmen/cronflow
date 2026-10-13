@@ -54,7 +54,7 @@ function workflowNodes(
 ): readonly CompiledWorkflowNode[] {
   return [
     ...workflow.graph.nodes,
-    ...(workflow.schemaVersion === 16
+    ...(workflow.schemaVersion === 16 || workflow.schemaVersion === 17
       ? workflow.graph.forEach.flatMap(descriptor => descriptor.body.nodes)
       : []),
   ];

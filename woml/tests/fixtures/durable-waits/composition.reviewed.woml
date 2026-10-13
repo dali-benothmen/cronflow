@@ -1,0 +1,21 @@
+<woml>
+  <workflow id="durable-wait-composition">
+    <triggers><manual id="start" /></triggers>
+    <steps>
+      <step id="seed"><script>return { ok: true };</script></step>
+      <choose>
+        <when test="{{context.steps.seed.ok}}"><wait id="choicePause" duration="1s" /></when>
+        <otherwise><wait id="fallbackPause" duration="1s" /></otherwise>
+      </choose>
+      <parallel id="parallelPause">
+        <wait id="parallelTimer" duration="1s" />
+        <step id="parallelWork"><script>return true;</script></step>
+      </parallel>
+      <fork id="forkPause" join="joined">
+        <branch id="joined"><wait id="forkTimer" duration="1s" /></branch>
+        <branch id="detached"><step id="detachedWork"><script>return true;</script></step></branch>
+      </fork>
+      <step id="done"><script>return { ok: true };</script></step>
+    </steps>
+  </workflow>
+</woml>

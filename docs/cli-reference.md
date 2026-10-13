@@ -161,6 +161,20 @@ Publishes an authenticated event to a running WOML event endpoint. The token is
 loaded from WOML secrets by symbolic name. Applications may call the same HTTP
 endpoint directly; `emit` is a convenient operator client, not a requirement.
 
+## Deliver an external signal
+
+```bash
+woml signal <signalName> --run <runId> --wait <waitId> \
+  --id <idempotencyKey> --correlation <value> --payload <jsonFile> \
+  [--state <path>]
+```
+
+Delivers a bounded JSON payload through the owner-authenticated local runtime
+control channel. It is useful for operators and local scripts. Remote CI,
+scanners, and applications should call the authenticated HTTP signal route
+printed by `woml run`. Both paths use the same durable admission and
+idempotency authority. See [Durable Waits](woml-durable-waits.md).
+
 ## Provider diagnostics
 
 ```bash

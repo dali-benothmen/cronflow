@@ -14,29 +14,40 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 use woml_engine::model::ValueExpression;
 use woml_engine::{
-  create_online_backup, execute_retention, execute_workflow, execute_workflow_durable,
-  execute_workflow_durable_outcome, export_artifact, export_artifact_backup, inspect_artifact,
-  inspect_backup_store, inspect_run_artifacts, last_retention_result, maintain_artifacts,
-  observe_artifacts, plan_retention, prepare_restored_store,
-  recent_run_presentations_from_store_v1, record_verified_backup, recover_durable_runs,
-  resolve_human_approval_durable, restore_artifact_backup, resume_workflow_durable,
-  resume_workflow_durable_any_outcome, resume_workflow_durable_outcome,
+  admit_external_signal_durable, create_online_backup, execute_retention, execute_workflow,
+  execute_workflow_durable, execute_workflow_durable_outcome, export_artifact,
+  export_artifact_backup, inspect_artifact, inspect_backup_store, inspect_run_artifacts,
+  last_retention_result, maintain_artifacts, observe_artifacts, plan_retention,
+  prepare_restored_store, recent_run_presentations_from_store_v1, record_verified_backup,
+  recover_durable_runs, resolve_human_approval_durable, restore_artifact_backup,
+  resume_workflow_durable, resume_workflow_durable_any_outcome, resume_workflow_durable_outcome,
   run_notification_provider_journey_with_custom, run_presentation_from_store_v1,
   settle_approval_timeout_durable, verify_artifact_backup, ApprovalDecision,
   ApprovalDecisionOutcome, ArtifactPolicyV1, ArtifactRuntimeMode, BackupError,
   CompiledReusableInvocation, CompiledWorkflowDefinition, CustomNotificationJourneyOptions,
   CustomProviderScriptArtifact, DurableEventStore, DurableStoreError,
-  ExternalTriggerAdmissionCommand, IntervalProgress, IntervalProgressReporter, LifecycleProgress,
-  NotificationHostClientError, NotificationHostProcessOptions, NotificationJourneyDiagnostics,
-  NotificationJourneyError, ParallelFailurePolicy, ProcessPolicyV1, ProcessRuntimeMode,
-  RetentionError, RetentionPolicyV1, RunFailure, RunPresentationError, RunStatus,
-  RuntimeExecutionError, RuntimeExecutionOptions, RuntimeModuleArtifact, RuntimePolicyProgress,
-  RuntimePolicyProgressReporter, ScheduleProgress, ScheduleProgressReporter,
-  ScriptHostProcessOptions, SystemEngineClock, TriggerAdmissionRequest, TriggerProgress,
-  TriggerProgressReporter, WebhookDefinitionRegistration, WebhookRuntimeError, WomlWebhookServer,
-  WomlWebhookServerConfig, WorkflowCallProgress, WorkflowCallProgressReporter,
-  WorkflowCallRunRelations,
+  ExternalSignalAdmissionOutcome, ExternalSignalAdmissionRequest, ExternalTriggerAdmissionCommand,
+  IntervalProgress, IntervalProgressReporter, LifecycleProgress, NotificationHostClientError,
+  NotificationHostProcessOptions, NotificationJourneyDiagnostics, NotificationJourneyError,
+  ParallelFailurePolicy, ProcessPolicyV1, ProcessRuntimeMode, RetentionError, RetentionPolicyV1,
+  RunFailure, RunPresentationError, RunStatus, RuntimeExecutionError, RuntimeExecutionOptions,
+  RuntimeModuleArtifact, RuntimePolicyProgress, RuntimePolicyProgressReporter, ScheduleProgress,
+  ScheduleProgressReporter, ScriptHostProcessOptions, SystemEngineClock, TimerWaitSettlement,
+  TriggerAdmissionRequest, TriggerProgress, TriggerProgressReporter, WebhookDefinitionRegistration,
+  WebhookRuntimeError, WomlWebhookServer, WomlWebhookServerConfig, WorkflowCallProgress,
+  WorkflowCallProgressReporter, WorkflowCallRunRelations,
 };
+
+#[derive(Serialize)]
+#[serde(tag = "status", rename_all = "snake_case")]
+enum NativeTimerWaitSettlement {
+  Resolved,
+  AlreadyResolved,
+  NotDue {
+    #[serde(rename = "deadline")]
+    deadline: DateTime<Utc>,
+  },
+}
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -390,6 +401,10 @@ struct NativeManualTarget {
 
 enum NativeWebhookRuntimeCommand {
   Activate(mpsc::SyncSender<Result<(), NativeTriggerRuntimeError>>),
+  Signal(
+    ExternalSignalAdmissionRequest,
+    mpsc::SyncSender<Result<ExternalSignalAdmissionOutcome, RuntimeExecutionError>>,
+  ),
   OwnershipLost,
   Stop,
 }
@@ -1516,6 +1531,7 @@ pub fn start_woml_webhook_runtime(
   activation_id: String,
   start_suspended: bool,
   runtime_capabilities_json: Option<String>,
+  signal_ingress_token: Option<String>,
   progress_callback: JsFunction,
 ) -> napi::Result<JsObject> {
   let mut decode_span = woml_engine::performance::PerformanceSpan::new_for_process(
@@ -1601,8 +1617,10 @@ pub fn start_woml_webhook_runtime(
     .with_interval_progress_reporter(interval_progress_reporter)
     .with_workflow_call_progress_reporter(workflow_call_progress_reporter)
     .with_runtime_policy_progress_reporter(runtime_policy_progress_reporter);
-  let execution =
-    apply_runtime_capabilities(execution, runtime_capabilities_json)?.with_shared_script_hosts();
+  let execution = apply_runtime_capabilities(execution, runtime_capabilities_json)?
+    .with_signal_ingress_token(signal_ingress_token)
+    .with_shared_script_hosts();
+  let signal_execution = execution.clone();
   let config = WomlWebhookServerConfig {
     bind_address,
     database_path: PathBuf::from(event_store_path),
@@ -1710,6 +1728,16 @@ pub fn start_woml_webhook_runtime(
                       .map_err(native_trigger_runtime_error);
                     let _ = response.send(outcome);
                   }
+                  Ok(NativeWebhookRuntimeCommand::Signal(request, response)) => {
+                    let outcome = admit_external_signal_durable(
+                      runtime_database_path.clone(),
+                      request,
+                      signal_execution.clone(),
+                    )
+                    .await
+                    .map(|outcome| outcome.admission);
+                    let _ = response.send(outcome);
+                  }
                   Ok(NativeWebhookRuntimeCommand::OwnershipLost) => {
                     let now = Utc::now();
                     runtime_instance_reporter(NativeRuntimeInstanceProgress {
@@ -1810,6 +1838,35 @@ pub async fn activate_woml_webhook_runtime(runtime_id: String) -> napi::Result<(
   result.map_err(trigger_runtime_napi_error)?;
   span.succeed();
   Ok(())
+}
+
+#[napi(ts_return_type = "Promise<string>")]
+pub async fn submit_woml_external_signal(
+  runtime_id: String,
+  request_json: String,
+) -> napi::Result<String> {
+  let request: ExternalSignalAdmissionRequest = serde_json::from_str(&request_json)
+    .map_err(|error| napi::Error::from_reason(format!("Invalid external signal JSON: {error}")))?;
+  let control = webhook_runtimes()
+    .lock()
+    .map_err(|_| napi::Error::from_reason("Trigger runtime registry is unavailable.".to_string()))?
+    .get(&runtime_id)
+    .map(|runtime| runtime.control.clone())
+    .ok_or_else(|| napi::Error::from_reason("WOML trigger runtime does not exist.".to_string()))?;
+  let (response_sender, response_receiver) = mpsc::sync_channel(1);
+  control
+    .send(NativeWebhookRuntimeCommand::Signal(
+      request,
+      response_sender,
+    ))
+    .map_err(|_| napi::Error::from_reason("WOML trigger runtime is stopping.".to_string()))?;
+  let outcome = tokio::task::spawn_blocking(move || response_receiver.recv())
+    .await
+    .map_err(|error| napi::Error::from_reason(format!("Signal admission task failed: {error}")))?
+    .map_err(|_| napi::Error::from_reason("Signal admission response was lost.".to_string()))?
+    .map_err(native_execution_error)?;
+  serde_json::to_string(&outcome)
+    .map_err(|error| napi::Error::from_reason(format!("Could not encode signal outcome: {error}")))
 }
 
 #[napi(ts_return_type = "Promise<string>")]
@@ -2570,6 +2627,18 @@ pub fn inspect_woml_run_v2(event_store_path: String, run_id: String) -> napi::Re
 }
 
 #[napi]
+pub fn inspect_woml_waits_v1(event_store_path: String, run_id: String) -> napi::Result<String> {
+  let store = DurableEventStore::open(PathBuf::from(event_store_path))
+    .map_err(|error| native_run_management_error("WOML_WAIT_INSPECTION_FAILED", error))?;
+  let inspection = store
+    .inspect_waits_v1(&run_id)
+    .map_err(|error| native_run_management_error("WOML_WAIT_INSPECTION_FAILED", error))?;
+  serde_json::to_string(&inspection).map_err(|error| {
+    napi::Error::from_reason(format!("Could not encode WOML wait inspection: {error}"))
+  })
+}
+
+#[napi]
 pub fn cancel_woml_run(
   event_store_path: String,
   run_id: String,
@@ -2593,6 +2662,27 @@ pub fn recover_woml_runs(event_store_path: String) -> napi::Result<String> {
     .map_err(|error| napi::Error::from_reason(error.to_string()))?;
   serde_json::to_string(&report)
     .map_err(|error| napi::Error::from_reason(format!("Could not encode recovery report: {error}")))
+}
+
+#[napi]
+pub fn settle_woml_timer_wait(
+  event_store_path: String,
+  run_id: String,
+  wait_id: String,
+) -> napi::Result<String> {
+  let mut store = DurableEventStore::open(PathBuf::from(event_store_path))
+    .map_err(|error| native_execution_error(RuntimeExecutionError::DurableStore(error)))?;
+  let settlement = match store
+    .settle_timer_wait(&run_id, &wait_id, Utc::now())
+    .map_err(|error| native_execution_error(RuntimeExecutionError::DurableStore(error)))?
+  {
+    TimerWaitSettlement::Resolved { .. } => NativeTimerWaitSettlement::Resolved,
+    TimerWaitSettlement::AlreadyResolved { .. } => NativeTimerWaitSettlement::AlreadyResolved,
+    TimerWaitSettlement::NotDue { deadline } => NativeTimerWaitSettlement::NotDue { deadline },
+  };
+  serde_json::to_string(&settlement).map_err(|error| {
+    napi::Error::from_reason(format!("Could not encode WOML timer settlement: {error}"))
+  })
 }
 
 #[napi(ts_return_type = "Promise<string>")]

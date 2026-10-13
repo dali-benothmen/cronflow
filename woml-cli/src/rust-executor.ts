@@ -338,6 +338,8 @@ export interface WebhookRuntimeOptions extends RustExecutorOptions {
   readonly shutdownTimeoutMs?: number;
   /** Prepare and bind the runtime without opening trigger admission. */
   readonly startSuspended?: boolean;
+  /** Dedicated bearer token for the optional public external-signal endpoint. */
+  readonly signalIngressToken?: string;
   readonly onTriggerProgress?: (progress: TriggerProgressV1) => void;
   readonly onScheduleProgress?: (progress: ScheduleProgressV1) => void;
   readonly onIntervalProgress?: (progress: IntervalProgressV1) => void;
@@ -346,6 +348,34 @@ export interface WebhookRuntimeOptions extends RustExecutorOptions {
     progress: RuntimePolicyProgressV1
   ) => void;
   readonly onRuntimeLifecycle?: (progress: RuntimeInstanceV1) => void;
+}
+
+export interface ExternalSignalAdmissionRequestV1 {
+  readonly profile: 'woml.external-signal-admission/v1';
+  readonly signal: string;
+  readonly runId: string;
+  readonly waitId: string;
+  readonly correlation: string;
+  readonly idempotencyKey: string;
+  readonly payload: JsonValue;
+  readonly receivedAt: string;
+  readonly authenticationClass: 'local_control' | 'http_bearer';
+}
+
+export interface ExternalSignalOutcomeV1 {
+  readonly profile: 'woml.signal-result/v1';
+  readonly status:
+    | 'accepted'
+    | 'duplicate'
+    | 'identity_conflict'
+    | 'already_resolved'
+    | 'target_not_found'
+    | 'rejected';
+  readonly signalId: string;
+  readonly runId: string;
+  readonly waitId: string;
+  readonly resolution?: 'early' | 'resolved';
+  readonly code?: string;
 }
 
 export interface RuntimeInstanceV1 {
@@ -520,7 +550,7 @@ export interface RustRuntimeObservationV1 {
 }
 
 export interface RustBackupStoreInspection {
-  readonly storeVersion: 13 | 14;
+  readonly storeVersion: 13 | 14 | 15;
   readonly definitionHashes: readonly string[];
   readonly deploymentId?: string;
   readonly activationId?: string;
@@ -733,6 +763,26 @@ export interface RustRunInspectionV2 {
       readonly failedNodeId?: string;
     }[];
   };
+}
+
+export interface RustWaitInspectionV1 {
+  readonly profile: 'woml.wait-inspection/v1';
+  readonly runId: string;
+  readonly pendingWaits: number;
+  readonly oldestPendingWaitAgeMs?: number;
+  readonly waits: readonly {
+    readonly runId: string;
+    readonly waitId: string;
+    readonly name: string;
+    readonly kind: 'duration' | 'until' | 'signal';
+    readonly status: 'pending' | 'signaled' | 'elapsed' | 'timed_out' | 'cancelled';
+    readonly registeredAt: string;
+    readonly signals?: readonly string[];
+    readonly correlationDigest?: string;
+    readonly deadline?: string;
+    readonly resolvedAt?: string;
+    readonly winningSignal?: string;
+  }[];
 }
 
 export interface RustRunCancellationResultV1 {
@@ -960,6 +1010,11 @@ interface NativeCore {
     runtimeCapabilitiesJson?: string
   ) => Promise<string>;
   readonly recoverWomlRuns: (eventStorePath: string) => string;
+  readonly settleWomlTimerWait?: (
+    eventStorePath: string,
+    runId: string,
+    waitId: string
+  ) => string;
   readonly startWomlWebhookRuntime: (
     registrationsJson: string,
     startupManualTriggersJson: string,
@@ -973,6 +1028,7 @@ interface NativeCore {
     activationId: string,
     startSuspended: boolean,
     runtimeCapabilitiesJson: string | undefined,
+    signalIngressToken: string | undefined,
     progressCallback: (message: string) => void
   ) => Promise<string>;
   readonly activateWomlWebhookRuntime: (runtimeId: string) => Promise<void>;
@@ -980,6 +1036,10 @@ interface NativeCore {
   readonly submitWomlTriggerOccurrence: (
     runtimeId: string,
     ingressJson: string
+  ) => Promise<string>;
+  readonly submitWomlExternalSignal?: (
+    runtimeId: string,
+    requestJson: string
   ) => Promise<string>;
   readonly submitWomlManualTrigger: (
     runtimeId: string,
@@ -1096,6 +1156,7 @@ interface NativeCore {
     sourcePath: string
   ) => string;
   readonly inspectWomlRunV2: (eventStorePath: string, runId: string) => string;
+  readonly inspectWomlWaitsV1: (eventStorePath: string, runId: string) => string;
   readonly cancelWomlRun: (
     eventStorePath: string,
     runId: string,
@@ -1207,6 +1268,22 @@ export interface WaitingApproval {
   readonly credentialExpiresAt: string;
 }
 
+export interface WaitingTimer {
+  readonly waitId: string;
+  readonly nodeId: string;
+  readonly kind: 'duration' | 'until';
+  readonly registeredAt: string;
+  readonly deadline: string;
+}
+
+export interface WaitingSignal {
+  readonly waitId: string;
+  readonly nodeId: string;
+  readonly registeredAt: string;
+  readonly signals: readonly string[];
+  readonly deadline?: string;
+}
+
 export type RustApprovalRuntimeOutcome =
   | {
       readonly contract: 'woml.runtime-outcome';
@@ -1221,7 +1298,27 @@ export type RustApprovalRuntimeOutcome =
       readonly workflowId: string;
       readonly runId: string;
       readonly approval: WaitingApproval;
+    }
+  | {
+      readonly contract: 'woml.runtime-outcome';
+      readonly version: 1;
+      readonly status: 'waiting_time';
+      readonly workflowId: string;
+      readonly runId: string;
+      readonly wait: WaitingTimer;
+    }
+  | {
+      readonly contract: 'woml.runtime-outcome';
+      readonly version: 1;
+      readonly status: 'waiting_signal';
+      readonly workflowId: string;
+      readonly runId: string;
+      readonly wait: WaitingSignal;
     };
+
+export type TimerWaitSettlement =
+  | { readonly status: 'resolved' | 'already_resolved' }
+  | { readonly status: 'not_due'; readonly deadline: string };
 
 export interface ApprovalDecisionResult {
   readonly contract: 'woml.approval-http';
@@ -1963,7 +2060,7 @@ function executionResult(value: unknown): value is RustWorkflowExecutionResult {
       ]) &&
       Number.isSafeInteger(event.eventSchemaVersion) &&
       Number(event.eventSchemaVersion) >= 1 &&
-      Number(event.eventSchemaVersion) <= 13 &&
+      Number(event.eventSchemaVersion) <= 16 &&
       typeof event.eventId === 'string' &&
       typeof event.runId === 'string' &&
       Number.isSafeInteger(event.sequence) &&
@@ -1992,6 +2089,46 @@ function waitingApproval(value: unknown): value is WaitingApproval {
     (value.onTimeout === 'reject' || value.onTimeout === 'fail') &&
     /^apr_[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+$/.test(String(value.token)) &&
     dateTime(value.credentialExpiresAt)
+  );
+}
+
+function waitingTimer(value: unknown): value is WaitingTimer {
+  if (!record(value)) return false;
+  return (
+    exactKeys(value, [
+      'waitId',
+      'nodeId',
+      'kind',
+      'registeredAt',
+      'deadline',
+    ]) &&
+    /^[a-z][A-Za-z0-9]*$/.test(String(value.waitId)) &&
+    /^[A-Za-z_][A-Za-z0-9_.:-]*$/.test(String(value.nodeId)) &&
+    (value.kind === 'duration' || value.kind === 'until') &&
+    dateTime(value.registeredAt) &&
+    dateTime(value.deadline)
+  );
+}
+
+function waitingSignal(value: unknown): value is WaitingSignal {
+  if (!record(value)) return false;
+  return (
+    exactKeys(value, [
+      'waitId',
+      'nodeId',
+      'registeredAt',
+      'signals',
+      ...(value.deadline === undefined ? [] : ['deadline']),
+    ]) &&
+    /^[a-z][A-Za-z0-9]*$/.test(String(value.waitId)) &&
+    /^[A-Za-z_][A-Za-z0-9_.:-]*$/.test(String(value.nodeId)) &&
+    dateTime(value.registeredAt) &&
+    Array.isArray(value.signals) &&
+    value.signals.length > 0 &&
+    value.signals.every(
+      signal => typeof signal === 'string' && signal.length > 0
+    ) &&
+    (value.deadline === undefined || dateTime(value.deadline))
   );
 }
 
@@ -2029,7 +2166,73 @@ function parseApprovalRuntimeOutcome(json: string): RustApprovalRuntimeOutcome {
   ) {
     return value as unknown as RustApprovalRuntimeOutcome;
   }
+  if (
+    value.status === 'waiting_time' &&
+    exactKeys(value, [
+      'contract',
+      'version',
+      'status',
+      'workflowId',
+      'runId',
+      'wait',
+    ]) &&
+    typeof value.workflowId === 'string' &&
+    value.workflowId.length > 0 &&
+    typeof value.runId === 'string' &&
+    value.runId.length > 0 &&
+    waitingTimer(value.wait)
+  ) {
+    return value as unknown as RustApprovalRuntimeOutcome;
+  }
+  if (
+    value.status === 'waiting_signal' &&
+    exactKeys(value, [
+      'contract',
+      'version',
+      'status',
+      'workflowId',
+      'runId',
+      'wait',
+    ]) &&
+    typeof value.workflowId === 'string' &&
+    value.workflowId.length > 0 &&
+    typeof value.runId === 'string' &&
+    value.runId.length > 0 &&
+    waitingSignal(value.wait)
+  ) {
+    return value as unknown as RustApprovalRuntimeOutcome;
+  }
   throw new Error('The native core returned an invalid approval outcome.');
+}
+
+export function settleTimerWaitWithRust(
+  eventStorePath: string,
+  runId: string,
+  waitId: string,
+  options: Pick<RustExecutorOptions, 'nativeCorePath'> = {}
+): TimerWaitSettlement {
+  const nativePath = options.nativeCorePath ?? defaultNativeCorePath();
+  const native = loadNativeCore(nativePath);
+  if (typeof native.settleWomlTimerWait !== 'function') {
+    throw new Error(
+      `Native core at "${nativePath}" does not expose settleWomlTimerWait; rebuild the Rust addon.`
+    );
+  }
+  const value: unknown = JSON.parse(
+    native.settleWomlTimerWait(eventStorePath, runId, waitId)
+  );
+  if (
+    !record(value) ||
+    (value.status !== 'resolved' &&
+      value.status !== 'already_resolved' &&
+      value.status !== 'not_due') ||
+    (value.status === 'not_due'
+      ? !exactKeys(value, ['status', 'deadline']) || !dateTime(value.deadline)
+      : !exactKeys(value, ['status']))
+  ) {
+    throw new Error('The native core returned an invalid timer settlement.');
+  }
+  return value as TimerWaitSettlement;
 }
 
 function parseApprovalDecisionResult(json: string): ApprovalDecisionResult {
@@ -2678,6 +2881,7 @@ export async function startWebhookRuntimeWithRust(
       options.runtimeCapabilities === undefined
         ? undefined
         : JSON.stringify(options.runtimeCapabilities),
+      options.signalIngressToken,
       message => {
         const decoded: unknown = JSON.parse(message);
         if (record(decoded) && decoded.contract === 'woml.schedule-progress') {
@@ -2758,6 +2962,50 @@ export async function startWebhookRuntimeWithRust(
     );
   }
   return value as unknown as WebhookRuntimeHandle;
+}
+
+export async function submitExternalSignalWithRust(
+  runtimeId: string,
+  request: ExternalSignalAdmissionRequestV1,
+  options: Pick<RustExecutorOptions, 'nativeCorePath'> = {}
+): Promise<ExternalSignalOutcomeV1> {
+  if (runtimeId.length === 0) throw new Error('runtimeId must not be empty.');
+  const nativePath = options.nativeCorePath ?? defaultNativeCorePath();
+  const native = loadNativeCore(nativePath);
+  if (typeof native.submitWomlExternalSignal !== 'function') {
+    throw new Error(
+      `Native core at "${nativePath}" does not expose external signal admission; rebuild the Rust addon.`
+    );
+  }
+  const resultJson = await native
+    .submitWomlExternalSignal(runtimeId, JSON.stringify(request))
+    .catch(decodeTriggerRuntimeError);
+  const value: unknown = JSON.parse(resultJson);
+  if (
+    !record(value) ||
+    value.profile !== 'woml.signal-result/v1' ||
+    ![
+      'accepted',
+      'duplicate',
+      'identity_conflict',
+      'already_resolved',
+      'target_not_found',
+      'rejected',
+    ].includes(String(value.status)) ||
+    typeof value.signalId !== 'string' ||
+    value.signalId.length === 0 ||
+    typeof value.runId !== 'string' ||
+    value.runId.length === 0 ||
+    typeof value.waitId !== 'string' ||
+    value.waitId.length === 0 ||
+    (value.resolution !== undefined &&
+      value.resolution !== 'early' &&
+      value.resolution !== 'resolved') ||
+    (value.code !== undefined && typeof value.code !== 'string')
+  ) {
+    throw new Error('The native core returned an invalid Signal Result v1 value.');
+  }
+  return value as unknown as ExternalSignalOutcomeV1;
 }
 
 export async function activateWebhookRuntimeWithRust(
@@ -3337,7 +3585,7 @@ function backupInspection(value: unknown): RustBackupStoreInspection {
       ['storeVersion', 'definitionHashes'],
       ['deploymentId', 'activationId', 'runtimeInstanceId', 'runtimeLeaseExpiresAt']
     ) ||
-    ![13, 14].includes(Number(value.storeVersion)) ||
+    ![13, 14, 15].includes(Number(value.storeVersion)) ||
     !Array.isArray(value.definitionHashes) ||
     value.definitionHashes.length < 1 ||
     value.definitionHashes.length > 10_000 ||
@@ -4235,6 +4483,71 @@ export function inspectRunV2WithRust(
     throw new Error('The native core returned invalid run-inspection data.');
   }
   return value as unknown as RustRunInspectionV2;
+}
+
+export function inspectWaitsV1WithRust(
+  eventStorePath: string,
+  runId: string,
+  options: Pick<RustExecutorOptions, 'nativeCorePath'> = {}
+): RustWaitInspectionV1 {
+  const nativePath = options.nativeCorePath ?? defaultNativeCorePath();
+  const native = loadNativeCore(nativePath);
+  if (typeof native.inspectWomlWaitsV1 !== 'function') {
+    throw new Error(
+      `Native core at "${nativePath}" does not expose durable-wait inspection; rebuild the Rust addon.`
+    );
+  }
+  const value = callRunManagementNative(() =>
+    native.inspectWomlWaitsV1(eventStorePath, runId)
+  );
+  const wait = (candidate: unknown): boolean =>
+    record(candidate) &&
+    exactKeys(
+      candidate,
+      ['runId', 'waitId', 'name', 'kind', 'status', 'registeredAt'],
+      ['signals', 'correlationDigest', 'deadline', 'resolvedAt', 'winningSignal']
+    ) &&
+    candidate.runId === runId &&
+    typeof candidate.waitId === 'string' &&
+    typeof candidate.name === 'string' &&
+    ['duration', 'until', 'signal'].includes(String(candidate.kind)) &&
+    ['pending', 'signaled', 'elapsed', 'timed_out', 'cancelled'].includes(
+      String(candidate.status)
+    ) &&
+    dateTime(candidate.registeredAt) &&
+    (candidate.signals === undefined ||
+      (Array.isArray(candidate.signals) &&
+        candidate.signals.length <= 16 &&
+        candidate.signals.every(signal => typeof signal === 'string'))) &&
+    (candidate.correlationDigest === undefined ||
+      /^sha256:[a-f0-9]{64}$/.test(String(candidate.correlationDigest))) &&
+    (candidate.deadline === undefined || dateTime(candidate.deadline)) &&
+    (candidate.resolvedAt === undefined || dateTime(candidate.resolvedAt)) &&
+    (candidate.winningSignal === undefined ||
+      typeof candidate.winningSignal === 'string');
+  if (
+    !record(value) ||
+    !exactKeys(
+      value,
+      ['profile', 'runId', 'waits', 'pendingWaits'],
+      ['oldestPendingWaitAgeMs']
+    ) ||
+    value.profile !== 'woml.wait-inspection/v1' ||
+    value.runId !== runId ||
+    !Array.isArray(value.waits) ||
+    value.waits.length > 10_000 ||
+    !value.waits.every(wait) ||
+    !Number.isSafeInteger(value.pendingWaits) ||
+    Number(value.pendingWaits) < 0 ||
+    Number(value.pendingWaits) !==
+      value.waits.filter(candidate => candidate.status === 'pending').length ||
+    (value.oldestPendingWaitAgeMs !== undefined &&
+      (!Number.isSafeInteger(value.oldestPendingWaitAgeMs) ||
+        Number(value.oldestPendingWaitAgeMs) < 0))
+  ) {
+    throw new Error('The native core returned invalid durable-wait inspection data.');
+  }
+  return value as unknown as RustWaitInspectionV1;
 }
 
 export function cancelRunWithRust(

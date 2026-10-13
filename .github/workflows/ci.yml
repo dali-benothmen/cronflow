@@ -86,6 +86,11 @@ jobs:
         run: >-
           bun run benchmark:durable-artifacts &&
           bun scripts/verify-durable-artifacts-release.ts
+      - name: Enforce Durable Waits publication contracts
+        working-directory: woml-cli
+        run: >-
+          bun run benchmark:durable-waits &&
+          bun scripts/verify-durable-waits-release.ts
       - name: Test for-each presentation and clean package
         working-directory: woml-cli
         run: >-
@@ -121,6 +126,15 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy, rustfmt
+      - name: Install locked runtime dependencies
+        working-directory: woml-cli
+        run: bun install --frozen-lockfile
+      - name: Install compiler dependencies
+        working-directory: woml
+        run: bun install --frozen-lockfile
+      - name: Build JavaScript hosts used by Rust integration tests
+        working-directory: woml-cli
+        run: bun run build:js
       - name: Check formatting
         working-directory: core
         run: cargo fmt --all -- --check
@@ -149,6 +163,8 @@ jobs:
           --test for_each_runtime
           --test for_each_recovery
           --test backup_restore
+          --test durable_wait_runtime
+          --test webhook_runtime
           -- --test-threads=1
       - name: Failure diagnostics
         if: failure()
@@ -196,6 +212,12 @@ jobs:
           cargo test --config profile.dev.debug=0
           --config profile.dev.incremental=false -j 1 --locked
           -p woml-engine --lib artifacts::tests -- --test-threads=1
+      - name: Test Durable Waits persistence and concurrency boundaries
+        working-directory: core
+        run: >-
+          cargo test --config profile.dev.debug=0
+          --config profile.dev.incremental=false -j 1 --locked
+          -p woml-engine --test durable_wait_runtime -- --test-threads=1
       - name: Failure diagnostics
         if: failure()
         run: |
@@ -280,6 +302,9 @@ jobs:
       - name: Test Durable Artifacts from the clean release package
         working-directory: woml-cli
         run: bun test tests/durable-artifacts-packaged-release.test.ts --max-concurrency=1
+      - name: Test Durable Waits from the clean release package
+        working-directory: woml-cli
+        run: bun test tests/durable-waits-packaged-release.test.ts --max-concurrency=1
       - name: Pack, seal, and reverify the main artifact
         run: |
           bun woml-cli/scripts/release-artifact.ts pack --root release/main

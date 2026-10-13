@@ -72,6 +72,8 @@ jobs:
           bun run test:for-each-contracts
           bun run test:process-contracts
           bun scripts/verify-process-release.ts
+          bun run test:durable-waits-authoring
+          bun scripts/verify-durable-waits-release.ts
       - name: Run the final source and dependency security review
         run: |
           bun run test:final-review

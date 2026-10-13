@@ -25,10 +25,13 @@ import {
   type CompiledWorkflowDefinitionV14,
   type CompiledWorkflowDefinitionV15,
   type CompiledWorkflowDefinitionV16,
+  type CompiledWorkflowDefinitionV17,
   type CompiledWorkflowEdge,
   type CompiledWorkflowGraph,
   type CompiledWorkflowGraphV13,
   type CompiledWorkflowGraphV16,
+  type CompiledWorkflowGraphV17,
+  type CompiledWaitV1,
   type CompiledWorkflowMetadata,
   type CompiledWorkflowNode,
   type ContextReferenceExpression,
@@ -149,7 +152,7 @@ interface ValidatedParallel {
   readonly metadata?: Readonly<Record<string, JsonValue>>;
   readonly concurrency: number;
   readonly onError: 'fail-fast' | 'wait-all';
-  readonly children: readonly ValidatedStep[];
+  readonly children: readonly (ValidatedStep | ValidatedWait)[];
 }
 
 interface ValidatedForEach {
@@ -174,6 +177,45 @@ interface ValidatedApproval {
   readonly approvedItems: readonly ValidatedFlowItem[];
   readonly rejectedItems: readonly ValidatedFlowItem[];
 }
+
+interface ValidatedWaitValue {
+  readonly expression: ValueExpression;
+  readonly reference?: ValidatedReference;
+}
+
+interface ValidatedWaitSignal {
+  readonly signal: string;
+  readonly schema?: Readonly<Record<string, JsonValue>>;
+}
+
+type ValidatedWait =
+  | {
+      readonly kind: 'wait';
+      readonly waitKind: 'duration';
+      readonly id: string;
+      readonly element: WomlSourceElement;
+      readonly metadata?: Readonly<Record<string, JsonValue>>;
+      readonly durationMs: number;
+    }
+  | {
+      readonly kind: 'wait';
+      readonly waitKind: 'until';
+      readonly id: string;
+      readonly element: WomlSourceElement;
+      readonly metadata?: Readonly<Record<string, JsonValue>>;
+      readonly at: ValidatedWaitValue;
+    }
+  | {
+      readonly kind: 'wait';
+      readonly waitKind: 'signal';
+      readonly id: string;
+      readonly element: WomlSourceElement;
+      readonly metadata?: Readonly<Record<string, JsonValue>>;
+      readonly signals: readonly ValidatedWaitSignal[];
+      readonly correlation: ValidatedWaitValue;
+      readonly timeoutMs?: number;
+      readonly onTimeout: 'fail' | 'continue';
+    };
 
 interface ValidatedForkBranch {
   readonly id: string;
@@ -239,7 +281,8 @@ type ValidatedFlowItem =
   | ValidatedParallel
   | ValidatedForEach
   | ValidatedApproval
-  | ValidatedFork;
+  | ValidatedFork
+  | ValidatedWait;
 
 interface ValidatedFlow {
   readonly items: readonly ValidatedFlowItem[];
@@ -251,6 +294,7 @@ interface ValidatedFlow {
   readonly firstControlChoice?: WomlSourceElement;
   readonly firstSwitch?: WomlSourceElement;
   readonly firstForEach?: WomlSourceElement;
+  readonly firstWait?: WomlSourceElement;
 }
 
 interface FlowValidationContext {
@@ -278,8 +322,7 @@ interface ValidatedInformationalNotification {
 }
 
 type ValidatedLifecycleAction =
-  | ValidatedLifecycleScriptAction
-  | ValidatedInformationalNotification;
+  ValidatedLifecycleScriptAction | ValidatedInformationalNotification;
 
 interface ValidatedLifecycleHook {
   readonly event: LifecycleEventName;
@@ -423,6 +466,7 @@ interface V13LoweringState {
   readonly forEach: CompiledForEachV1[];
   readonly contextVisibility: CompiledContextVisibilityV1[];
   readonly ownedBranchTerminalNodeIds: string[];
+  readonly waits: CompiledWaitV1[];
 }
 
 const supportedElements = new Set([
@@ -456,6 +500,10 @@ const supportedElements = new Set([
   'fork',
   'parallel',
   'for-each',
+  'wait',
+  'wait-until',
+  'wait-for',
+  'accept',
   'when',
   'otherwise',
   'result',
@@ -531,14 +579,26 @@ const elementProfiles: Readonly<Record<string, ElementProfile>> = {
     ]),
   },
   'for-each': {
+    attributes: new Set(['id', 'name', 'description', 'items', 'concurrency']),
+  },
+  wait: {
+    attributes: new Set(['id', 'name', 'description', 'duration']),
+  },
+  'wait-until': {
+    attributes: new Set(['id', 'name', 'description', 'at']),
+  },
+  'wait-for': {
     attributes: new Set([
       'id',
       'name',
       'description',
-      'items',
-      'concurrency',
+      'signal',
+      'correlation',
+      'timeout',
+      'on-timeout',
     ]),
   },
+  accept: { attributes: new Set(['signal']) },
   when: { attributes: new Set(['test']) },
   otherwise: { attributes: new Set() },
   result: { attributes: new Set(['value']) },
@@ -885,6 +945,7 @@ function validateJavaScriptSafeId(
     | 'parallel'
     | 'for-each'
     | 'approval'
+    | 'wait'
 ): string {
   if (
     attribute.value.length > 256 ||
@@ -893,7 +954,7 @@ function validateJavaScriptSafeId(
     failValidation(
       document,
       'WOML_INVALID_ID',
-      `${role === 'trigger' ? 'Trigger' : role === 'branch' ? 'Branch' : role === 'choose' ? 'Choice' : role === 'switch' ? 'Switch' : role === 'fork' ? 'Fork' : role === 'parallel' ? 'Parallel' : role === 'for-each' ? 'For-each' : role === 'approval' ? 'Approval' : 'Step'} ID "${attribute.value}" must be a JavaScript-safe lower-camel identifier.`,
+      `${role === 'trigger' ? 'Trigger' : role === 'branch' ? 'Branch' : role === 'choose' ? 'Choice' : role === 'switch' ? 'Switch' : role === 'fork' ? 'Fork' : role === 'parallel' ? 'Parallel' : role === 'for-each' ? 'For-each' : role === 'approval' ? 'Approval' : role === 'wait' ? 'Wait' : 'Step'} ID "${attribute.value}" must be a JavaScript-safe lower-camel identifier.`,
       attribute.valueSpan,
       'Use letters and numbers, start with a lowercase letter, and do not use hyphens.'
     );
@@ -1211,10 +1272,15 @@ function validateRuntimePolicy(
 function schemaBody(
   document: WomlSourceDocument,
   schema: WomlSourceElement,
-  owner: 'webhook' | 'event'
+  owner: 'webhook' | 'event' | 'signal'
 ): Readonly<Record<string, JsonValue>> {
-  const ownerLabel = owner === 'webhook' ? 'webhook' : 'event';
-  const codePrefix = owner === 'webhook' ? 'WOML_WEBHOOK' : 'WOML_EVENT';
+  const ownerLabel = owner;
+  const codePrefix =
+    owner === 'webhook'
+      ? 'WOML_WEBHOOK'
+      : owner === 'event'
+        ? 'WOML_EVENT'
+        : 'WOML_SIGNAL';
   if (Object.keys(schema.attributes).length > 0) {
     const attribute = Object.values(schema.attributes)[0];
     failValidation(
@@ -1714,10 +1780,9 @@ function parseExactReference(
       ? attribute.valueSpan
       : referenceSpan(document, attribute, structuralId);
   return {
-    path: path
-      .map((segment, index) =>
-        index === 0 && segment === 'payload' ? 'trigger' : segment
-      ),
+    path: path.map((segment, index) =>
+      index === 0 && segment === 'payload' ? 'trigger' : segment
+    ),
     ...(structuralId === undefined ? {} : { structuralId }),
     span,
   };
@@ -1736,13 +1801,14 @@ function registerStructuralId(
     | 'parallel'
     | 'for-each'
     | 'approval'
+    | 'wait'
 ): string {
   const id = validateJavaScriptSafeId(document, attribute, role);
   if (registry.has(id)) {
     failValidation(
       document,
       'WOML_DUPLICATE_ID',
-      `Structural ID "${id}" is duplicated across workflow steps, choices, loops, forks, parallel groups, and approvals.`,
+      `Structural ID "${id}" is duplicated across workflow steps, waits, choices, loops, forks, parallel groups, and approvals.`,
       attribute.valueSpan
     );
   }
@@ -2646,7 +2712,7 @@ function validateNotify(
               ? 'WOML_DISCORD_UNKNOWN_ATTRIBUTE'
               : provider.name === 'whatsapp'
                 ? 'WOML_WHATSAPP_UNKNOWN_ATTRIBUTE'
-            : 'WOML_SLACK_UNKNOWN_ATTRIBUTE',
+                : 'WOML_SLACK_UNKNOWN_ATTRIBUTE',
           triggerOnlyAttribute === 'message'
             ? 'Attribute "message" is valid on a lifecycle notification, not an approval notification.'
             : `Attribute "${triggerOnlyAttribute}" is valid on a ${provider.name === 'telegram' ? 'Telegram' : provider.name === 'discord' ? 'Discord' : provider.name === 'whatsapp' ? 'WhatsApp' : 'Slack'} trigger, not a notification provider.`,
@@ -3133,7 +3199,7 @@ function validateLifecycleNotify(
               ? 'WOML_DISCORD_UNKNOWN_ATTRIBUTE'
               : provider.name === 'whatsapp'
                 ? 'WOML_WHATSAPP_UNKNOWN_ATTRIBUTE'
-            : 'WOML_SLACK_UNKNOWN_ATTRIBUTE',
+                : 'WOML_SLACK_UNKNOWN_ATTRIBUTE',
           `Attribute "${invalidName}" is valid on a ${provider.name === 'telegram' ? 'Telegram' : provider.name === 'discord' ? 'Discord' : provider.name === 'whatsapp' ? 'WhatsApp' : 'Slack'} trigger, not a lifecycle notification.`,
           invalid.nameSpan
         );
@@ -3147,7 +3213,7 @@ function validateLifecycleNotify(
           ? requiredDiscordAttribute(document, provider, 'message')
           : provider.name === 'whatsapp'
             ? requiredWhatsAppAttribute(document, provider, 'message')
-        : requiredSlackAttribute(document, provider, 'message'),
+            : requiredSlackAttribute(document, provider, 'message'),
       event,
       stepIds
     );
@@ -3321,115 +3387,116 @@ function validateLifecycle(
       lifecycleHookOrder.indexOf(
         left.name as keyof typeof lifecycleHookEvents
       ) -
-      lifecycleHookOrder.indexOf(
-        right.name as keyof typeof lifecycleHookEvents
-      )
+      lifecycleHookOrder.indexOf(right.name as keyof typeof lifecycleHookEvents)
   );
   const hooks = orderedChildren.map(
     (hook, hookIndex): ValidatedLifecycleHook => {
-    const event =
-      lifecycleHookEvents[hook.name as keyof typeof lifecycleHookEvents];
-    const stepFilter = hook.attributes.steps;
-    const isStepHook = event.startsWith('step_');
-    let filteredStepIds: readonly string[] | undefined;
-    if (stepFilter !== undefined) {
-      if (!isStepHook) {
-        failValidation(
-          document,
-          'WOML_LIFECYCLE_STEP_FILTER_INVALID',
-          `Attribute "steps" is valid only on step lifecycle hooks.`,
-          stepFilter.nameSpan
-        );
-      }
-      const values = stepFilter.value.trim().split(/\s+/).filter(Boolean);
-      if (values.length === 0 || new Set(values).size !== values.length) {
-        failValidation(
-          document,
-          'WOML_LIFECYCLE_STEP_FILTER_INVALID',
-          'Lifecycle step filters must be a non-empty list of unique step IDs.',
-          stepFilter.valueSpan
-        );
-      }
-      for (const id of values) {
-        if (!javascriptSafeIdPattern.test(id)) {
+      const event =
+        lifecycleHookEvents[hook.name as keyof typeof lifecycleHookEvents];
+      const stepFilter = hook.attributes.steps;
+      const isStepHook = event.startsWith('step_');
+      let filteredStepIds: readonly string[] | undefined;
+      if (stepFilter !== undefined) {
+        if (!isStepHook) {
           failValidation(
             document,
             'WOML_LIFECYCLE_STEP_FILTER_INVALID',
-            `Lifecycle step filter "${id}" is not a valid step ID.`,
-            stepFilter.valueSpan
+            `Attribute "steps" is valid only on step lifecycle hooks.`,
+            stepFilter.nameSpan
           );
         }
-        if (!allStepIds.has(id)) {
+        const values = stepFilter.value.trim().split(/\s+/).filter(Boolean);
+        if (values.length === 0 || new Set(values).size !== values.length) {
           failValidation(
             document,
-            'WOML_LIFECYCLE_STEP_UNKNOWN',
-            `Lifecycle step filter names unknown executable step "${id}".`,
+            'WOML_LIFECYCLE_STEP_FILTER_INVALID',
+            'Lifecycle step filters must be a non-empty list of unique step IDs.',
             stepFilter.valueSpan
           );
         }
-      }
-      filteredStepIds = values;
-    }
-    const actionElements = elementChildren(document, hook);
-    if (actionElements.length === 0) {
-      failValidation(
-        document,
-        'WOML_LIFECYCLE_ACTION_REQUIRED',
-        `<${hook.name}> requires at least one <script> or <notify> action.`,
-        hook.openTagSpan
-      );
-    }
-    const actions = actionElements.map(
-      (action, actionIndex): ValidatedLifecycleAction => {
-        if (action.name === 'script') {
-          const body = scriptBody(document, action);
-          const analysis = analyzeWomlLifecycleScript(body.source, {
-            shadowedServices,
-          });
-          if (analysis.issue !== undefined) {
-            const sourceFile = new SourceFile(document.file, document.source);
-            const start = body.span.start.offset + analysis.issue.start;
+        for (const id of values) {
+          if (!javascriptSafeIdPattern.test(id)) {
             failValidation(
               document,
-              analysis.issue.code,
-              analysis.issue.message,
-              sourceFile.span(
-                start,
-                Math.max(start + 1, body.span.start.offset + analysis.issue.end)
-              ),
-              analysis.issue.hint
+              'WOML_LIFECYCLE_STEP_FILTER_INVALID',
+              `Lifecycle step filter "${id}" is not a valid step ID.`,
+              stepFilter.valueSpan
             );
           }
-          return {
-            kind: 'script',
-            source: body.source,
-            scriptSpan: body.span,
-            scriptAnalysis: analysis,
-          };
+          if (!allStepIds.has(id)) {
+            failValidation(
+              document,
+              'WOML_LIFECYCLE_STEP_UNKNOWN',
+              `Lifecycle step filter names unknown executable step "${id}".`,
+              stepFilter.valueSpan
+            );
+          }
         }
-        if (action.name === 'notify') {
-          return validateLifecycleNotify(
-            document,
-            action,
-            event,
-            hookIndex,
-            actionIndex,
-            allStepIds
-          );
-        }
+        filteredStepIds = values;
+      }
+      const actionElements = elementChildren(document, hook);
+      if (actionElements.length === 0) {
         failValidation(
           document,
-          'WOML_LIFECYCLE_ACTION_INVALID',
-          `<${hook.name}> supports <script> and <notify> actions only.`,
-          action.openTagSpan
+          'WOML_LIFECYCLE_ACTION_REQUIRED',
+          `<${hook.name}> requires at least one <script> or <notify> action.`,
+          hook.openTagSpan
         );
       }
-    );
-    return {
-      event,
-      ...(filteredStepIds === undefined ? {} : { stepIds: filteredStepIds }),
-      actions,
-    };
+      const actions = actionElements.map(
+        (action, actionIndex): ValidatedLifecycleAction => {
+          if (action.name === 'script') {
+            const body = scriptBody(document, action);
+            const analysis = analyzeWomlLifecycleScript(body.source, {
+              shadowedServices,
+            });
+            if (analysis.issue !== undefined) {
+              const sourceFile = new SourceFile(document.file, document.source);
+              const start = body.span.start.offset + analysis.issue.start;
+              failValidation(
+                document,
+                analysis.issue.code,
+                analysis.issue.message,
+                sourceFile.span(
+                  start,
+                  Math.max(
+                    start + 1,
+                    body.span.start.offset + analysis.issue.end
+                  )
+                ),
+                analysis.issue.hint
+              );
+            }
+            return {
+              kind: 'script',
+              source: body.source,
+              scriptSpan: body.span,
+              scriptAnalysis: analysis,
+            };
+          }
+          if (action.name === 'notify') {
+            return validateLifecycleNotify(
+              document,
+              action,
+              event,
+              hookIndex,
+              actionIndex,
+              allStepIds
+            );
+          }
+          failValidation(
+            document,
+            'WOML_LIFECYCLE_ACTION_INVALID',
+            `<${hook.name}> supports <script> and <notify> actions only.`,
+            action.openTagSpan
+          );
+        }
+      );
+      return {
+        event,
+        ...(filteredStepIds === undefined ? {} : { stepIds: filteredStepIds }),
+        actions,
+      };
     }
   );
   return { hooks };
@@ -3446,7 +3513,7 @@ function collectScriptAnalyses(
     }
     if (item.kind === 'parallel') {
       for (const child of item.children) {
-        analyses.set(child.id, child.scriptAnalysis);
+        if (child.kind === 'step') analyses.set(child.id, child.scriptAnalysis);
       }
       continue;
     }
@@ -3468,8 +3535,10 @@ function collectScriptAnalyses(
       }
       continue;
     }
-    collectScriptAnalyses(item.approvedItems, analyses);
-    collectScriptAnalyses(item.rejectedItems, analyses);
+    if (item.kind === 'approval') {
+      collectScriptAnalyses(item.approvedItems, analyses);
+      collectScriptAnalyses(item.rejectedItems, analyses);
+    }
   }
   return analyses;
 }
@@ -3497,7 +3566,11 @@ function collectValidatedSteps(
     if (item.kind === 'step') {
       steps.push(item);
     } else if (item.kind === 'parallel') {
-      steps.push(...item.children);
+      steps.push(
+        ...item.children.filter(
+          (child): child is ValidatedStep => child.kind === 'step'
+        )
+      );
     } else if (item.kind === 'forEach') {
       collectValidatedSteps(item.items, steps);
     } else if (item.kind === 'branch') {
@@ -3508,7 +3581,7 @@ function collectValidatedSteps(
       for (const branch of item.branches) {
         collectValidatedSteps(branch.items, steps);
       }
-    } else {
+    } else if (item.kind === 'approval') {
       collectValidatedSteps(item.approvedItems, steps);
       collectValidatedSteps(item.rejectedItems, steps);
     }
@@ -3735,9 +3808,13 @@ function validateBranchArm(
     sourceElementName === 'choose' ? 'WOML_CHOOSE' : 'WOML_BRANCH';
   const testReference =
     arm.name === 'when'
-      ? parseExactReference(document, requiredAttribute(document, arm, 'test'), {
-          allowIteration: context.insideForEach,
-        })
+      ? parseExactReference(
+          document,
+          requiredAttribute(document, arm, 'test'),
+          {
+            allowIteration: context.insideForEach,
+          }
+        )
       : undefined;
   const children = elementChildren(document, arm);
   const results = children.filter(child => child.name === 'result');
@@ -3885,9 +3962,13 @@ function validateControlChoiceArm(
 ): ValidatedControlChoiceArm {
   const testReference =
     arm.name === 'when'
-      ? parseExactReference(document, requiredAttribute(document, arm, 'test'), {
-          allowIteration: context.insideForEach,
-        })
+      ? parseExactReference(
+          document,
+          requiredAttribute(document, arm, 'test'),
+          {
+            allowIteration: context.insideForEach,
+          }
+        )
       : undefined;
   const children = elementChildren(document, arm);
   const result = children.find(child => child.name === 'result');
@@ -4378,12 +4459,15 @@ function validateParallel(
     failValidation(
       document,
       'WOML_PARALLEL_EMPTY',
-      `<parallel id="${id}"> must contain at least one direct <step> child.`,
+      `<parallel id="${id}"> must contain at least one direct <step> or durable-wait child.`,
       parallel.openTagSpan
     );
   }
 
-  const unsupportedChild = childElements.find(child => child.name !== 'step');
+  const supportedChildren = new Set(['step', 'wait', 'wait-until', 'wait-for']);
+  const unsupportedChild = childElements.find(
+    child => !supportedChildren.has(child.name)
+  );
   if (unsupportedChild !== undefined) {
     if (unsupportedChild.name === 'approval') {
       failValidation(
@@ -4397,14 +4481,16 @@ function validateParallel(
     failValidation(
       document,
       'WOML_PARALLEL_CHILD_UNSUPPORTED',
-      `<parallel id="${id}"> accepts direct <step> children only in this profile; found <${unsupportedChild.name}>.`,
+      `<parallel id="${id}"> accepts direct <step>, <wait>, <wait-until>, and <wait-for> children; found <${unsupportedChild.name}>.`,
       unsupportedChild.openTagSpan,
       'Move branching around the parallel group, or wait for a future explicit lane/sequence construct.'
     );
   }
 
   const children = childElements.map(child =>
-    validateStep(document, child, registry, context.shadowedServices)
+    child.name === 'step'
+      ? validateStep(document, child, registry, context.shadowedServices)
+      : validateWait(document, child, registry, context)
   );
   const concurrencyAttribute = parallel.attributes.concurrency;
   let concurrency = children.length;
@@ -4477,12 +4563,7 @@ function validateForEach(
     );
   }
 
-  const id = registerStructuralId(
-    document,
-    registry,
-    idAttribute,
-    'for-each'
-  );
+  const id = registerStructuralId(document, registry, idAttribute, 'for-each');
   const itemsReference = parseExactReference(document, itemsAttribute, {
     invalidCode: 'WOML_FOR_EACH_ITEMS_INVALID',
     invalidMessage:
@@ -4605,6 +4686,313 @@ function validateForEach(
   };
 }
 
+const maximumDurableWaitMs = 365 * durationUnitsMs.d;
+const signalNamePattern = /^[a-z][a-z0-9]*(?:[._-][a-z0-9]+)+$/;
+const rfc3339InstantPattern =
+  /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,9})?(?:Z|[+-]\d{2}:\d{2})$/;
+
+function durableWaitDurationMs(
+  document: WomlSourceDocument,
+  attribute: WomlSourceAttribute
+): number {
+  const match = /^([1-9][0-9]*)(ms|s|m|h|d)$/.exec(attribute.value);
+  if (match === null) {
+    failValidation(
+      document,
+      'WOML_WAIT_DURATION_INVALID',
+      `Wait duration "${attribute.value}" must be one positive whole duration using ms, s, m, h, or d.`,
+      attribute.valueSpan,
+      'Examples: 1s, 10m, 24h, 30d'
+    );
+  }
+  const milliseconds =
+    Number(match[1]) *
+    durationUnitsMs[match[2] as keyof typeof durationUnitsMs];
+  if (
+    !Number.isSafeInteger(milliseconds) ||
+    milliseconds < durationUnitsMs.s ||
+    milliseconds > maximumDurableWaitMs
+  ) {
+    failValidation(
+      document,
+      'WOML_WAIT_DURATION_INVALID',
+      `Wait duration "${attribute.value}" must resolve to a whole duration from 1s through 365d.`,
+      attribute.valueSpan
+    );
+  }
+  return milliseconds;
+}
+
+function waitValue(
+  document: WomlSourceDocument,
+  attribute: WomlSourceAttribute,
+  role: 'at' | 'correlation',
+  allowIteration: boolean
+): ValidatedWaitValue {
+  if (attribute.value.startsWith('{{')) {
+    const reference = parseExactReference(document, attribute, {
+      allowIteration,
+      invalidCode:
+        role === 'at'
+          ? 'WOML_WAIT_TIME_INVALID'
+          : 'WOML_SIGNAL_CORRELATION_INVALID',
+      invalidMessage:
+        role === 'at'
+          ? 'Wait-until "at" must be an RFC 3339 instant or exactly one WOML context reference.'
+          : 'Wait-for "correlation" must be a bounded literal or exactly one WOML context reference.',
+    });
+    return {
+      expression: { kind: 'contextReference', path: reference.path },
+      reference,
+    };
+  }
+  if (role === 'at') {
+    if (
+      !rfc3339InstantPattern.test(attribute.value) ||
+      !Number.isFinite(Date.parse(attribute.value))
+    ) {
+      failValidation(
+        document,
+        'WOML_WAIT_TIME_INVALID',
+        `Wait-until time "${attribute.value}" must be an RFC 3339 instant with an explicit timezone.`,
+        attribute.valueSpan,
+        'Example: 2026-10-13T20:00:00Z'
+      );
+    }
+  } else {
+    const byteLength = new TextEncoder().encode(attribute.value).byteLength;
+    if (
+      attribute.value.length === 0 ||
+      attribute.value !== attribute.value.trim() ||
+      byteLength > 256 ||
+      /[\u0000-\u001f\u007f]/.test(attribute.value)
+    ) {
+      failValidation(
+        document,
+        'WOML_SIGNAL_CORRELATION_INVALID',
+        'Wait-for correlation literals must contain 1 through 256 UTF-8 bytes without surrounding whitespace or control characters.',
+        attribute.valueSpan
+      );
+    }
+  }
+  return { expression: { kind: 'literal', value: attribute.value } };
+}
+
+function validatedSignalName(
+  document: WomlSourceDocument,
+  attribute: WomlSourceAttribute
+): string {
+  if (
+    new TextEncoder().encode(attribute.value).byteLength > 128 ||
+    !signalNamePattern.test(attribute.value)
+  ) {
+    failValidation(
+      document,
+      'WOML_SIGNAL_NAME_INVALID',
+      `Signal name "${attribute.value}" must contain lowercase alphanumeric segments separated by one dot, underscore, or hyphen.`,
+      attribute.valueSpan,
+      'Examples: security.scan.completed, payment_received, ci-finished'
+    );
+  }
+  return attribute.value;
+}
+
+function validateWait(
+  document: WomlSourceDocument,
+  element: WomlSourceElement,
+  registry: Set<string>,
+  context: FlowValidationContext
+): ValidatedWait {
+  const id = registerStructuralId(
+    document,
+    registry,
+    requiredAttribute(document, element, 'id'),
+    'wait'
+  );
+  const metadata = flowItemMetadata(document, element);
+
+  if (element.name === 'wait') {
+    ensureEmptyElement(document, element);
+    return {
+      kind: 'wait',
+      waitKind: 'duration',
+      id,
+      element,
+      metadata,
+      durationMs: durableWaitDurationMs(
+        document,
+        requiredAttribute(document, element, 'duration')
+      ),
+    };
+  }
+
+  if (element.name === 'wait-until') {
+    ensureEmptyElement(document, element);
+    return {
+      kind: 'wait',
+      waitKind: 'until',
+      id,
+      element,
+      metadata,
+      at: waitValue(
+        document,
+        requiredAttribute(document, element, 'at'),
+        'at',
+        context.insideForEach
+      ),
+    };
+  }
+
+  const correlation = waitValue(
+    document,
+    requiredAttribute(document, element, 'correlation'),
+    'correlation',
+    context.insideForEach
+  );
+  const signalAttribute = element.attributes.signal;
+  const children = elementChildren(document, element);
+  const accepts = children.filter(child => child.name === 'accept');
+  const directSchemas = children.filter(child => child.name === 'schema');
+  const invalidChild = children.find(
+    child => child.name !== 'accept' && child.name !== 'schema'
+  );
+  if (invalidChild !== undefined) {
+    failValidation(
+      document,
+      'WOML_WAIT_STRUCTURE_INVALID',
+      `<wait-for> cannot contain <${invalidChild.name}>; use one <schema> with signal="...", or one or more <accept> children.`,
+      invalidChild.openTagSpan
+    );
+  }
+  if (signalAttribute !== undefined && accepts.length > 0) {
+    failValidation(
+      document,
+      'WOML_WAIT_SIGNAL_FORM_CONFLICT',
+      '<wait-for> must use either the "signal" attribute or <accept> children, never both.',
+      accepts[0].openTagSpan
+    );
+  }
+  if (signalAttribute === undefined && accepts.length === 0) {
+    failValidation(
+      document,
+      'WOML_WAIT_SIGNAL_REQUIRED',
+      '<wait-for> requires a "signal" attribute or at least one <accept> child.',
+      element.openTagSpan
+    );
+  }
+  if (accepts.length > 16) {
+    failValidation(
+      document,
+      'WOML_WAIT_SIGNAL_LIMIT_EXCEEDED',
+      '<wait-for> accepts at most 16 distinct signal names.',
+      accepts[16].openTagSpan
+    );
+  }
+  if (accepts.length > 0 && directSchemas.length > 0) {
+    failValidation(
+      document,
+      'WOML_WAIT_SCHEMA_PLACEMENT_INVALID',
+      'A multi-signal <wait-for> places each optional <schema> inside its <accept>.',
+      directSchemas[0].openTagSpan
+    );
+  }
+  if (directSchemas.length > 1) {
+    failValidation(
+      document,
+      'WOML_WAIT_SCHEMA_PLACEMENT_INVALID',
+      'A single-signal <wait-for> accepts at most one <schema>.',
+      directSchemas[1].openTagSpan
+    );
+  }
+
+  const signals: ValidatedWaitSignal[] = [];
+  if (signalAttribute !== undefined) {
+    signals.push({
+      signal: validatedSignalName(document, signalAttribute),
+      ...(directSchemas[0] === undefined
+        ? {}
+        : { schema: schemaBody(document, directSchemas[0], 'signal') }),
+    });
+  } else {
+    for (const accept of accepts) {
+      const schemas = elementChildren(document, accept);
+      if (
+        schemas.length > 1 ||
+        (schemas.length === 1 && schemas[0].name !== 'schema')
+      ) {
+        failValidation(
+          document,
+          'WOML_WAIT_SCHEMA_PLACEMENT_INVALID',
+          '<accept> may contain at most one <schema>.',
+          schemas[1]?.openTagSpan ??
+            schemas[0]?.openTagSpan ??
+            accept.openTagSpan
+        );
+      }
+      signals.push({
+        signal: validatedSignalName(
+          document,
+          requiredAttribute(document, accept, 'signal')
+        ),
+        ...(schemas[0] === undefined
+          ? {}
+          : { schema: schemaBody(document, schemas[0], 'signal') }),
+      });
+    }
+  }
+  const duplicate = signals.find(
+    (signal, index) =>
+      signals.findIndex(candidate => candidate.signal === signal.signal) !==
+      index
+  );
+  if (duplicate !== undefined) {
+    const duplicateElement = accepts.find(
+      accept => accept.attributes.signal?.value === duplicate.signal
+    );
+    failValidation(
+      document,
+      'WOML_WAIT_SIGNAL_DUPLICATE',
+      `Signal "${duplicate.signal}" is accepted more than once by the same wait.`,
+      duplicateElement?.attributes.signal?.valueSpan ?? element.openTagSpan
+    );
+  }
+
+  const timeoutAttribute = element.attributes.timeout;
+  const timeoutMs =
+    timeoutAttribute === undefined
+      ? undefined
+      : durableWaitDurationMs(document, timeoutAttribute);
+  const onTimeoutAttribute = element.attributes['on-timeout'];
+  if (onTimeoutAttribute !== undefined && timeoutMs === undefined) {
+    failValidation(
+      document,
+      'WOML_WAIT_TIMEOUT_POLICY_INVALID',
+      'Attribute "on-timeout" requires a timeout on the same <wait-for>.',
+      onTimeoutAttribute.nameSpan
+    );
+  }
+  const onTimeout = onTimeoutAttribute?.value ?? 'fail';
+  if (onTimeout !== 'fail' && onTimeout !== 'continue') {
+    failValidation(
+      document,
+      'WOML_WAIT_TIMEOUT_POLICY_INVALID',
+      `Wait-for on-timeout must be "fail" or "continue", found "${onTimeout}".`,
+      onTimeoutAttribute!.valueSpan
+    );
+  }
+  return {
+    kind: 'wait',
+    waitKind: 'signal',
+    id,
+    element,
+    metadata,
+    signals,
+    correlation,
+    ...(timeoutMs === undefined ? {} : { timeoutMs }),
+    onTimeout,
+  };
+}
+
 function validateFlowItem(
   document: WomlSourceDocument,
   element: WomlSourceElement,
@@ -4613,12 +5001,7 @@ function validateFlowItem(
   context: FlowValidationContext
 ): ValidatedFlowItem {
   if (element.name === 'step')
-    return validateStep(
-      document,
-      element,
-      registry,
-      context.shadowedServices
-    );
+    return validateStep(document, element, registry, context.shadowedServices);
   if (element.name === 'branch') {
     if (context.insideForkBranch) {
       failValidation(
@@ -4695,6 +5078,21 @@ function validateFlowItem(
       );
     }
     return validateForEach(document, element, registry, context);
+  }
+  if (
+    element.name === 'wait' ||
+    element.name === 'wait-until' ||
+    element.name === 'wait-for'
+  ) {
+    return validateWait(document, element, registry, context);
+  }
+  if (element.name === 'accept' || element.name === 'schema') {
+    failValidation(
+      document,
+      'WOML_WAIT_STRUCTURE_INVALID',
+      `<${element.name}> is valid only inside its durable wait owner.`,
+      element.openTagSpan
+    );
   }
   if (element.name === 'approval') {
     if (context.insideForEach) {
@@ -4780,7 +5178,7 @@ function collectFlowOutputIds(
   output = new Set<string>()
 ): Set<string> {
   for (const item of items) {
-    if (item.kind === 'step') {
+    if (item.kind === 'step' || item.kind === 'wait') {
       output.add(item.id);
     } else if (item.kind === 'parallel') {
       for (const child of item.children) output.add(child.id);
@@ -4817,6 +5215,26 @@ function validateReferenceAvailability(
   const invisible = new Set(invisibleBefore);
   for (const item of items) {
     if (item.kind === 'step') {
+      available.add(item.id);
+      continue;
+    }
+
+    if (item.kind === 'wait') {
+      const reference =
+        item.waitKind === 'until'
+          ? item.at.reference
+          : item.waitKind === 'signal'
+            ? item.correlation.reference
+            : undefined;
+      if (reference !== undefined) {
+        assertReferenceAvailable(
+          document,
+          reference,
+          allIds,
+          available,
+          invisible
+        );
+      }
       available.add(item.id);
       continue;
     }
@@ -5030,13 +5448,10 @@ function validateSteps(
 
   const structuralIds = new Set<string>();
   const items = children.map(child =>
-    validateFlowItem(
-      document,
-      child,
-      structuralIds,
-      '<steps>',
-      { ...rootFlowValidationContext, shadowedServices }
-    )
+    validateFlowItem(document, child, structuralIds, '<steps>', {
+      ...rootFlowValidationContext,
+      shadowedServices,
+    })
   );
   validateReferenceAvailability(document, items, structuralIds);
 
@@ -5244,6 +5659,38 @@ function validateSteps(
   const firstControlChoice = findFirstKind(items, 'controlChoice');
   const firstSwitch = findFirstKind(items, 'switch');
   const firstForEach = findFirstKind(items, 'forEach');
+  const findFirstWait = (
+    flowItems: readonly ValidatedFlowItem[]
+  ): WomlSourceElement | undefined => {
+    for (const item of flowItems) {
+      if (item.kind === 'wait') return item.element;
+      if (
+        item.kind === 'branch' ||
+        item.kind === 'controlChoice' ||
+        item.kind === 'switch'
+      ) {
+        for (const arm of item.arms) {
+          const nested = findFirstWait(arm.items);
+          if (nested !== undefined) return nested;
+        }
+      } else if (item.kind === 'forEach') {
+        const nested = findFirstWait(item.items);
+        if (nested !== undefined) return nested;
+      } else if (item.kind === 'approval') {
+        const approved = findFirstWait(item.approvedItems);
+        if (approved !== undefined) return approved;
+        const rejected = findFirstWait(item.rejectedItems);
+        if (rejected !== undefined) return rejected;
+      } else if (item.kind === 'fork') {
+        for (const branch of item.branches) {
+          const nested = findFirstWait(branch.items);
+          if (nested !== undefined) return nested;
+        }
+      }
+    }
+    return undefined;
+  };
+  const firstWait = findFirstWait(items);
 
   return {
     items,
@@ -5255,6 +5702,7 @@ function validateSteps(
     ...(firstControlChoice === undefined ? {} : { firstControlChoice }),
     ...(firstSwitch === undefined ? {} : { firstSwitch }),
     ...(firstForEach === undefined ? {} : { firstForEach }),
+    ...(firstWait === undefined ? {} : { firstWait }),
   };
 }
 
@@ -5357,7 +5805,10 @@ function lowerBranch(branch: ValidatedBranch): LoweredFlowFragment {
   };
 }
 
-function lowerParallel(parallel: ValidatedParallel): LoweredFlowFragment {
+function lowerParallelFragments(
+  parallel: ValidatedParallel,
+  childFragments: readonly LoweredFlowFragment[]
+): LoweredFlowFragment {
   const startId = `__woml_parallel__${parallel.id}__start`;
   const start: CompiledWorkflowNode = {
     id: startId,
@@ -5371,7 +5822,6 @@ function lowerParallel(parallel: ValidatedParallel): LoweredFlowFragment {
     },
     ...(parallel.metadata === undefined ? {} : { metadata: parallel.metadata }),
   };
-  const childFragments = parallel.children.map(lowerStep);
   const join: CompiledWorkflowNode = {
     id: parallel.id,
     handler: 'engine.parallel-join',
@@ -5406,6 +5856,18 @@ function lowerParallel(parallel: ValidatedParallel): LoweredFlowFragment {
       ...joinEdges,
     ],
   };
+}
+
+function lowerParallel(parallel: ValidatedParallel): LoweredFlowFragment {
+  return lowerParallelFragments(
+    parallel,
+    parallel.children.map(child => {
+      if (child.kind !== 'step') {
+        throw new Error('Legacy parallel lowering cannot contain a durable wait.');
+      }
+      return lowerStep(child);
+    })
+  );
 }
 
 function approvalRouteEdge(
@@ -5599,18 +6061,64 @@ function lowerStepV13(
   };
 }
 
+function lowerWaitV17(
+  wait: ValidatedWait,
+  visibleBefore: ReadonlySet<string>,
+  state: V13LoweringState
+): LoweredV13FlowFragment {
+  const common = {
+    waitId: wait.id,
+    nodeId: wait.id,
+    ...(wait.metadata === undefined ? {} : { metadata: wait.metadata }),
+  };
+  const descriptor: CompiledWaitV1 =
+    wait.waitKind === 'duration'
+      ? { ...common, kind: 'duration', durationMs: wait.durationMs }
+      : wait.waitKind === 'until'
+        ? { ...common, kind: 'until', at: wait.at.expression }
+        : {
+            ...common,
+            kind: 'signal',
+            signals: wait.signals,
+            correlation: wait.correlation.expression,
+            ...(wait.timeoutMs === undefined
+              ? {}
+              : { timeoutMs: wait.timeoutMs }),
+            onTimeout: wait.onTimeout,
+          };
+  state.waits.push(descriptor);
+  const node: CompiledWorkflowNode = {
+    id: wait.id,
+    handler: 'engine.durable-wait',
+    inputs: { kind: 'object', fields: {} },
+    ...(wait.metadata === undefined ? {} : { metadata: wait.metadata }),
+  };
+  return {
+    entryId: wait.id,
+    exitId: wait.id,
+    nodes: [node],
+    edges: [],
+    visibleAfter: new Set([...visibleBefore, wait.id]),
+    lastResultNodeId: wait.id,
+  };
+}
+
 function lowerParallelV13(
   parallel: ValidatedParallel,
   visibleBefore: ReadonlySet<string>,
   state: V13LoweringState
 ): LoweredV13FlowFragment {
-  for (const child of parallel.children) {
-    state.contextVisibility.push({
-      nodeId: child.id,
-      stepIds: [...visibleBefore],
-    });
-  }
-  const fragment = lowerParallel(parallel);
+  const childFragments = parallel.children.map(child => {
+    if (child.kind === 'step') {
+      state.contextVisibility.push({
+        nodeId: child.id,
+        stepIds: [...visibleBefore],
+      });
+      return lowerStep(child);
+    }
+    return lowerWaitV17(child, visibleBefore, state);
+  });
+  const fragment = lowerParallelFragments(parallel, childFragments);
   return {
     ...fragment,
     visibleAfter: new Set([
@@ -6017,6 +6525,7 @@ function lowerForEachV16(
     forEach: [],
     contextVisibility: [],
     ownedBranchTerminalNodeIds: [],
+    waits: [],
   };
   const body = lowerFlowItemsV13(
     loop.items,
@@ -6029,8 +6538,11 @@ function lowerForEachV16(
     bodyState.forEach.length > 0 ||
     bodyState.ownedBranchTerminalNodeIds.length > 0
   ) {
-    throw new Error('Model v16 for-each body contains a forbidden nested owner.');
+    throw new Error(
+      'Model v16 for-each body contains a forbidden nested owner.'
+    );
   }
+  state.waits.push(...bodyState.waits);
   state.forEach.push({
     forEachId: loop.id,
     openNodeId,
@@ -6061,10 +6573,7 @@ function lowerForEachV16(
   return {
     entryId: openNodeId,
     exitId: loop.id,
-    nodes: [
-      v13EmptyEngineNode(openNodeId, 'engine.for-each-open'),
-      resultNode,
-    ],
+    nodes: [v13EmptyEngineNode(openNodeId, 'engine.for-each-open'), resultNode],
     edges: [alwaysEdge(openNodeId, loop.id)],
     visibleAfter: new Set([...visibleBefore, loop.id]),
     lastResultNodeId: loop.id,
@@ -6078,6 +6587,7 @@ function lowerFlowItemV13(
   state: V13LoweringState
 ): LoweredV13FlowFragment {
   if (item.kind === 'step') return lowerStepV13(item, visibleBefore, state);
+  if (item.kind === 'wait') return lowerWaitV17(item, visibleBefore, state);
   if (item.kind === 'parallel')
     return lowerParallelV13(item, visibleBefore, state);
   if (item.kind === 'branch')
@@ -6137,6 +6647,7 @@ function lowerWorkflowV13(items: readonly ValidatedFlowItem[]): {
   readonly fragment: LoweredV13FlowFragment;
   readonly graph: CompiledWorkflowGraphV13;
   readonly forEach: readonly CompiledForEachV1[];
+  readonly waits: readonly CompiledWaitV1[];
 } {
   const state: V13LoweringState = {
     forks: [],
@@ -6144,6 +6655,7 @@ function lowerWorkflowV13(items: readonly ValidatedFlowItem[]): {
     forEach: [],
     contextVisibility: [],
     ownedBranchTerminalNodeIds: [],
+    waits: [],
   };
   const fragment = lowerFlowItemsV13(items, new Set(), 'root', state);
   if (fragment.lastResultNodeId === undefined) {
@@ -6169,6 +6681,7 @@ function lowerWorkflowV13(items: readonly ValidatedFlowItem[]): {
   return {
     fragment,
     forEach: state.forEach,
+    waits: state.waits,
     graph: {
       entryNodeIds: [fragment.entryId],
       nodes: [
@@ -6536,10 +7049,11 @@ function validateDocument(document: WomlSourceDocument): ValidatedWorkflow {
       ? []
       : validateTriggers(document, triggersElement);
   const shadowedServices = modules
-    .filter(module =>
-      module.name === 'telegram' ||
-      module.name === 'discord' ||
-      module.name === 'whatsapp'
+    .filter(
+      module =>
+        module.name === 'telegram' ||
+        module.name === 'discord' ||
+        module.name === 'whatsapp'
     )
     .map(module => module.name);
   const flow = validateSteps(document, stepsElement, shadowedServices);
@@ -6594,12 +7108,10 @@ export function inspectWomlMigrationDiagnostics(
           severity: 'warning',
           code: 'WOML_BUILTIN_SERVICE_SHADOWED',
           phase: 'validation',
-          message:
-            `The local module alias "${imported.name}" shadows the built-in services.${imported.name} capability in this workflow.`,
+          message: `The local module alias "${imported.name}" shadows the built-in services.${imported.name} capability in this workflow.`,
           file: document.file,
           location: imported.element.openTagSpan,
-          hint:
-            `Keep this name to preserve the local module, or rename it when you want services.${imported.name}.send() from the built-in ${provider} provider.`,
+          hint: `Keep this name to preserve the local module, or rename it when you want services.${imported.name}.send() from the built-in ${provider} provider.`,
         });
       }
     }
@@ -6789,7 +7301,10 @@ export interface PreparedReusableWorkflow {
     readonly message?: ValueExpression;
     readonly messageAttribute?: WomlSourceAttribute;
   }[];
-  readonly invocationAttributes: ReadonlyMap<string, Readonly<Record<string, WomlSourceAttribute>>>;
+  readonly invocationAttributes: ReadonlyMap<
+    string,
+    Readonly<Record<string, WomlSourceAttribute>>
+  >;
 }
 
 function reusableRuntimeName(alias: string, moduleName: string): string {
@@ -6828,7 +7343,9 @@ function reusableLifecycleIds(
   for (const child of lifecycle.children) {
     if (child.kind !== 'element') continue;
     const ids = child.children
-      .filter((action): action is WomlSourceElement => action.kind === 'element')
+      .filter(
+        (action): action is WomlSourceElement => action.kind === 'element'
+      )
       .map((_, index) => `${invocationId}:${child.name}:${index}`);
     if (child.name === 'on-success') result.onSuccess = ids;
     if (child.name === 'on-error') result.onError = ids;
@@ -6849,7 +7366,10 @@ function parseProviderUsageMessage(
       attribute.valueSpan
     );
   }
-  const parts: ({ readonly kind: 'text'; readonly text: string } | ContextReferenceExpression)[] = [];
+  const parts: (
+    | { readonly kind: 'text'; readonly text: string }
+    | ContextReferenceExpression
+  )[] = [];
   let cursor = 0;
   let placeholders = 0;
   for (const match of attribute.value.matchAll(/\{\{([^{}]+)\}\}/g)) {
@@ -6865,7 +7385,10 @@ function parseProviderUsageMessage(
     }
     if (preceding.length > 0) parts.push({ kind: 'text', text: preceding });
     const reference = match[1].trim();
-    const parsed = /^context\.(payload(?:\.[A-Za-z_$][A-Za-z0-9_$]*)+|steps\.[a-z][A-Za-z0-9]*(?:\.[A-Za-z_$][A-Za-z0-9_$]*)+)$/.exec(reference);
+    const parsed =
+      /^context\.(payload(?:\.[A-Za-z_$][A-Za-z0-9_$]*)+|steps\.[a-z][A-Za-z0-9]*(?:\.[A-Za-z_$][A-Za-z0-9_$]*)+)$/.exec(
+        reference
+      );
     if (parsed === null) {
       failValidation(
         document,
@@ -6877,9 +7400,11 @@ function parseProviderUsageMessage(
     }
     parts.push({
       kind: 'contextReference',
-      path: parsed[1].split('.').map((segment, index) =>
-        index === 0 && segment === 'payload' ? 'trigger' : segment
-      ),
+      path: parsed[1]
+        .split('.')
+        .map((segment, index) =>
+          index === 0 && segment === 'payload' ? 'trigger' : segment
+        ),
     });
     placeholders += 1;
     cursor = start + match[0].length;
@@ -6908,16 +7433,19 @@ function boundReusableProps(
     if (attribute === undefined) return [];
     const secret = /^\{\{secrets\.([A-Z][A-Z0-9_]*)\}\}$/.exec(attribute.value);
     const context = /^\{\{context\.(.+)\}\}$/.exec(attribute.value);
-    return [{
-      name: prop.name,
-      bindingName: prop.bindingName,
-      secret: prop.secret,
-      expression: secret !== null
-        ? { kind: 'secret' as const, name: secret[1] }
-        : context !== null
-          ? { kind: 'context' as const, path: context[1] }
-          : { kind: 'literal' as const, value: attribute.value },
-    }];
+    return [
+      {
+        name: prop.name,
+        bindingName: prop.bindingName,
+        secret: prop.secret,
+        expression:
+          secret !== null
+            ? { kind: 'secret' as const, name: secret[1] }
+            : context !== null
+              ? { kind: 'context' as const, path: context[1] }
+              : { kind: 'literal' as const, value: attribute.value },
+      },
+    ];
   });
 }
 
@@ -6950,20 +7478,30 @@ export function prepareResolvedReusableWorkflow(
         relative(
           options.projectRoot,
           resolve(dirname(document.file), item.from)
-        ).split(sep).join('/'),
+        )
+          .split(sep)
+          .join('/'),
       ])
   );
-  const definitions = new Map<string, {
-    prepared: PreparedReusableStepDefinition;
-    inspection: WomlDocumentInspection;
-    script: WomlSourceElement;
-  }>();
+  const definitions = new Map<
+    string,
+    {
+      prepared: PreparedReusableStepDefinition;
+      inspection: WomlDocumentInspection;
+      script: WomlSourceElement;
+    }
+  >();
   for (const resolvedDefinition of graph.definitions) {
     if (
-      directDefinitions.get(resolvedDefinition.alias) !== resolvedDefinition.sourcePath ||
+      directDefinitions.get(resolvedDefinition.alias) !==
+        resolvedDefinition.sourcePath ||
       definitions.has(resolvedDefinition.alias)
-    ) continue;
-    const absolutePath = resolve(options.projectRoot, resolvedDefinition.sourcePath);
+    )
+      continue;
+    const absolutePath = resolve(
+      options.projectRoot,
+      resolvedDefinition.sourcePath
+    );
     const definitionDocument = parseWoml(readFileSync(absolutePath, 'utf8'), {
       file: absolutePath,
     });
@@ -6975,11 +7513,15 @@ export function prepareResolvedReusableWorkflow(
     )!;
     const raw = script.children[0];
     const originalSource = raw?.kind === 'raw' ? raw.value : '';
-    const analysis = inspection.kind === 'reusable-step'
-      ? analyzeWomlReusableScript(originalSource)
-      : analyzeWomlNotificationProviderScript(originalSource);
+    const analysis =
+      inspection.kind === 'reusable-step'
+        ? analyzeWomlReusableScript(originalSource)
+        : analyzeWomlNotificationProviderScript(originalSource);
     if (analysis.issue !== undefined) {
-      const sourceFile = new SourceFile(definitionDocument.file, definitionDocument.source);
+      const sourceFile = new SourceFile(
+        definitionDocument.file,
+        definitionDocument.source
+      );
       const start = script.children[0].span.start.offset + analysis.issue.start;
       throw new WomlCompileError({
         phase: 'compile',
@@ -6990,7 +7532,9 @@ export function prepareResolvedReusableWorkflow(
           start,
           start + Math.max(1, analysis.issue.end - analysis.issue.start)
         ),
-        ...(analysis.issue.hint === undefined ? {} : { hint: analysis.issue.hint }),
+        ...(analysis.issue.hint === undefined
+          ? {}
+          : { hint: analysis.issue.hint }),
       });
     }
     const moduleImports = inspection.imports
@@ -7015,35 +7559,45 @@ export function prepareResolvedReusableWorkflow(
     };
     const scriptSource = rewriteServices(originalSource);
     const scriptArtifactId = `reusable_${resolvedDefinition.alias.replaceAll('-', '_')}_${resolvedDefinition.digest.slice(7, 23)}`;
-    const lifecycleScripts = inspection.lifecycle?.children.flatMap(hook => {
-      if (hook.kind !== 'element') return [];
-      return hook.children.flatMap((action, index) => {
-        if (action.kind !== 'element' || action.name !== 'script') return [];
-        const body = action.children[0];
-        const source = body?.kind === 'raw' ? body.value : '';
-        const analysis = analyzeWomlLifecycleScript(source);
-        if (analysis.issue !== undefined) {
-          const sourceFile = new SourceFile(definitionDocument.file, definitionDocument.source);
-          const start = (body?.span.start.offset ?? action.openTagSpan.start.offset) + analysis.issue.start;
-          throw new WomlCompileError({
-            phase: 'compile',
-            code: analysis.issue.code,
-            message: analysis.issue.message,
-            file: definitionDocument.file,
-            location: sourceFile.span(
-              start,
-              start + Math.max(1, analysis.issue.end - analysis.issue.start)
-            ),
-            ...(analysis.issue.hint === undefined ? {} : { hint: analysis.issue.hint }),
-          });
-        }
-        return [{
-          hook: hook.name as 'on-success' | 'on-error' | 'on-complete',
-          index,
-          source: rewriteServices(source),
-        }];
-      });
-    }) ?? [];
+    const lifecycleScripts =
+      inspection.lifecycle?.children.flatMap(hook => {
+        if (hook.kind !== 'element') return [];
+        return hook.children.flatMap((action, index) => {
+          if (action.kind !== 'element' || action.name !== 'script') return [];
+          const body = action.children[0];
+          const source = body?.kind === 'raw' ? body.value : '';
+          const analysis = analyzeWomlLifecycleScript(source);
+          if (analysis.issue !== undefined) {
+            const sourceFile = new SourceFile(
+              definitionDocument.file,
+              definitionDocument.source
+            );
+            const start =
+              (body?.span.start.offset ?? action.openTagSpan.start.offset) +
+              analysis.issue.start;
+            throw new WomlCompileError({
+              phase: 'compile',
+              code: analysis.issue.code,
+              message: analysis.issue.message,
+              file: definitionDocument.file,
+              location: sourceFile.span(
+                start,
+                start + Math.max(1, analysis.issue.end - analysis.issue.start)
+              ),
+              ...(analysis.issue.hint === undefined
+                ? {}
+                : { hint: analysis.issue.hint }),
+            });
+          }
+          return [
+            {
+              hook: hook.name as 'on-success' | 'on-error' | 'on-complete',
+              index,
+              source: rewriteServices(source),
+            },
+          ];
+        });
+      }) ?? [];
     const prepared: PreparedReusableStepDefinition = {
       kind: inspection.kind,
       alias: resolvedDefinition.alias,
@@ -7060,8 +7614,12 @@ export function prepareResolvedReusableWorkflow(
 
   const invocations: CompiledReusableStepInvocationV1[] = [];
   const providerInvocations: CompiledReusableNotificationProviderV1[] = [];
-  const providerDeliveries: PreparedReusableWorkflow['providerDeliveries'][number][] = [];
-  const invocationAttributes = new Map<string, Readonly<Record<string, WomlSourceAttribute>>>();
+  const providerDeliveries: PreparedReusableWorkflow['providerDeliveries'][number][] =
+    [];
+  const invocationAttributes = new Map<
+    string,
+    Readonly<Record<string, WomlSourceAttribute>>
+  >();
   const transform = (
     element: WomlSourceElement,
     ancestors: readonly WomlSourceElement[] = []
@@ -7070,15 +7628,24 @@ export function prepareResolvedReusableWorkflow(
     if (found?.inspection.kind === 'notification-provider') {
       if (ancestors.at(-1)?.name === 'triggers') return element;
       const notify = ancestors.at(-1);
-      const providerIndex = notify?.children
-        .filter((child): child is WomlSourceElement => child.kind === 'element')
-        .indexOf(element) ?? -1;
-      const approval = [...ancestors].reverse().find(item => item.name === 'approval');
+      const providerIndex =
+        notify?.children
+          .filter(
+            (child): child is WomlSourceElement => child.kind === 'element'
+          )
+          .indexOf(element) ?? -1;
+      const approval = [...ancestors]
+        .reverse()
+        .find(item => item.name === 'approval');
       const lifecycle = ancestors.find(item => item.name === 'lifecycle');
-      const hook = lifecycle === undefined
-        ? undefined
-        : ancestors.find(item => item.name.startsWith('on-'));
-      const domain = approval === undefined ? 'informational' as const : 'approval' as const;
+      const hook =
+        lifecycle === undefined
+          ? undefined
+          : ancestors.find(item => item.name.startsWith('on-'));
+      const domain =
+        approval === undefined
+          ? ('informational' as const)
+          : ('approval' as const);
       let providerId: string;
       let ownerNodeId: string | undefined;
       if (approval !== undefined) {
@@ -7086,10 +7653,14 @@ export function prepareResolvedReusableWorkflow(
         providerId = `${ownerNodeId}:notify:${providerIndex}:channel:0`;
       } else {
         const hookIndex = lifecycle!.children
-          .filter((child): child is WomlSourceElement => child.kind === 'element')
+          .filter(
+            (child): child is WomlSourceElement => child.kind === 'element'
+          )
           .indexOf(hook!);
         const actionIndex = hook!.children
-          .filter((child): child is WomlSourceElement => child.kind === 'element')
+          .filter(
+            (child): child is WomlSourceElement => child.kind === 'element'
+          )
           .indexOf(notify!);
         providerId = `lifecycle:${hookIndex}:action:${actionIndex}:provider:${providerIndex}:channel:0`;
       }
@@ -7104,7 +7675,12 @@ export function prepareResolvedReusableWorkflow(
         props: boundReusableProps(found.prepared.props, element),
         ...(found.inspection.lifecycle === undefined
           ? {}
-          : { lifecycle: reusableLifecycleIds(providerId, found.inspection.lifecycle) }),
+          : {
+              lifecycle: reusableLifecycleIds(
+                providerId,
+                found.inspection.lifecycle
+              ),
+            }),
       });
       providerDeliveries.push({
         providerId,
@@ -7118,7 +7694,11 @@ export function prepareResolvedReusableWorkflow(
           : {}),
       });
       const attributes: Record<string, WomlSourceAttribute> = {
-        channels: syntheticAttribute('channels', '#custom-provider', element.openTagSpan),
+        channels: syntheticAttribute(
+          'channels',
+          '#custom-provider',
+          element.openTagSpan
+        ),
         'bot-token': syntheticAttribute(
           'bot-token',
           '{{secrets.WOML_CUSTOM_PROVIDER_PLACEHOLDER}}',
@@ -7146,7 +7726,8 @@ export function prepareResolvedReusableWorkflow(
         'retry-backoff',
         'retry-max-delay',
       ]) {
-        const attribute = element.attributes[name] ??
+        const attribute =
+          element.attributes[name] ??
           (name === 'name' || name === 'description'
             ? definitionAttributes[name]
             : undefined);
@@ -7164,7 +7745,12 @@ export function prepareResolvedReusableWorkflow(
         props: boundProps,
         ...(found.inspection.lifecycle === undefined
           ? {}
-          : { lifecycle: reusableLifecycleIds(invocationId, found.inspection.lifecycle) }),
+          : {
+              lifecycle: reusableLifecycleIds(
+                invocationId,
+                found.inspection.lifecycle
+              ),
+            }),
       });
       invocationAttributes.set(invocationId, element.attributes);
       const raw: WomlSourceRawText = {
@@ -7181,7 +7767,9 @@ export function prepareResolvedReusableWorkflow(
     return {
       ...element,
       children: element.children.map(child =>
-        child.kind === 'element' ? transform(child, [...ancestors, element]) : child
+        child.kind === 'element'
+          ? transform(child, [...ancestors, element])
+          : child
       ),
     };
   };
@@ -7199,12 +7787,22 @@ export function prepareResolvedReusableWorkflow(
     ) ?? []),
     ...[...definitions.values()].flatMap(({ prepared, inspection }) =>
       prepared.imports.map(imported => {
-        const declaration = inspection.imports.find(item => item.name === imported.name)!;
+        const declaration = inspection.imports.find(
+          item => item.name === imported.name
+        )!;
         return {
           ...declaration.element,
           attributes: {
-            name: syntheticAttribute('name', imported.runtimeName, declaration.element.openTagSpan),
-            from: syntheticAttribute('from', imported.from, declaration.element.openTagSpan),
+            name: syntheticAttribute(
+              'name',
+              imported.runtimeName,
+              declaration.element.openTagSpan
+            ),
+            from: syntheticAttribute(
+              'from',
+              imported.from,
+              declaration.element.openTagSpan
+            ),
           },
         };
       })
@@ -7227,7 +7825,9 @@ export function prepareResolvedReusableWorkflow(
   root = { ...root, children };
   return {
     document: { ...document, root },
-    rootSource: relative(options.projectRoot, resolve(document.file)).split(sep).join('/'),
+    rootSource: relative(options.projectRoot, resolve(document.file))
+      .split(sep)
+      .join('/'),
     definitions: [...definitions.values()].map(value => value.prepared),
     invocations,
     providerInvocations,
@@ -7240,7 +7840,9 @@ function compileValidatedWoml(
   document: WomlSourceDocument,
   moduleRuntime?: CompiledModuleRuntimeV1,
   forceModelV14 = false,
-  forcedCommunicationServices: readonly ('telegram' | 'discord' | 'whatsapp')[] = []
+  forcedCommunicationServices: readonly (
+    'telegram' | 'discord' | 'whatsapp'
+  )[] = []
 ): CompiledWorkflowDefinition {
   assertWomlDocumentRunnable(document);
   const {
@@ -7281,9 +7883,13 @@ function compileValidatedWoml(
     ...workflowNotifications,
     ...lifecycleNotifications,
   ].filter(delivery => delivery.provider === 'whatsapp');
-  const localTelegramModule = modules.some(module => module.name === 'telegram');
+  const localTelegramModule = modules.some(
+    module => module.name === 'telegram'
+  );
   const localDiscordModule = modules.some(module => module.name === 'discord');
-  const localWhatsAppModule = modules.some(module => module.name === 'whatsapp');
+  const localWhatsAppModule = modules.some(
+    module => module.name === 'whatsapp'
+  );
   const allScriptAnalyses = [
     ...scriptAnalyses.values(),
     ...lifecycleScripts.map(item => item.analysis),
@@ -7322,7 +7928,8 @@ function compileValidatedWoml(
     usesTelegramMessaging ||
     usesDiscordMessaging ||
     usesWhatsAppMessaging;
-  const usesModelV16 = flow.firstForEach !== undefined;
+  const usesModelV17 = flow.firstWait !== undefined;
+  const usesModelV16 = usesModelV17 || flow.firstForEach !== undefined;
   const usesModelV14 =
     usesModelV16 ||
     usesModelV15 ||
@@ -7332,6 +7939,24 @@ function compileValidatedWoml(
     usesModelV14 ||
     flow.firstFork !== undefined ||
     flow.firstControlChoice !== undefined;
+  if (triggers.length === 0 && flow.firstApproval !== undefined) {
+    failCompile(
+      document,
+      'WOML_WORKFLOW_CALL_WAIT_UNSUPPORTED',
+      'A call-only workflow cannot contain Human Approval in Workflow Calls v1.',
+      flow.firstApproval.openTagSpan,
+      'Use terminal steps, branch, parallel, retry, modules, and managed services. Long approval-waiting child calls require the future engine suspension boundary.'
+    );
+  }
+  if (triggers.length === 0 && flow.firstWait !== undefined) {
+    failCompile(
+      document,
+      'WOML_WORKFLOW_CALL_WAIT_UNSUPPORTED',
+      'A call-only workflow cannot contain a durable wait until suspended synchronous workflow calls are implemented in DW6.',
+      flow.firstWait.openTagSpan,
+      'Add a trigger and start this workflow asynchronously, or keep the called workflow terminal until DW6.'
+    );
+  }
   if (modules.length > 0 && moduleRuntime === undefined) {
     failCompile(
       document,
@@ -7347,15 +7972,6 @@ function compileValidatedWoml(
       'WOML_MODULE_RUNTIME_UNEXPECTED',
       'A module runtime profile cannot be attached to a workflow with no <module> declarations.',
       workflow.openTagSpan
-    );
-  }
-  if (triggers.length === 0 && flow.firstApproval !== undefined) {
-    failCompile(
-      document,
-      'WOML_WORKFLOW_CALL_WAIT_UNSUPPORTED',
-      'A call-only workflow cannot contain Human Approval in Workflow Calls v1.',
-      flow.firstApproval.openTagSpan,
-      'Use terminal steps, branch, parallel, retry, modules, and managed services. Long approval-waiting child calls require the future engine suspension boundary.'
     );
   }
   if (moduleRuntime !== undefined) {
@@ -7406,6 +8022,7 @@ function compileValidatedWoml(
     !flow.items.some(
       item =>
         item.kind === 'step' ||
+        item.kind === 'wait' ||
         item.kind === 'branch' ||
         item.kind === 'approval' ||
         item.kind === 'forEach'
@@ -7419,9 +8036,9 @@ function compileValidatedWoml(
     failCompile(
       document,
       'WOML_WORKFLOW_RESULT_REQUIRED',
-      `This Model v${usesModelV16 ? '16' : usesModelV15 ? '15' : usesModelV14 ? '14' : '13'} workflow has no deterministic value-producing item on its main route.`,
+      `This Model v${usesModelV17 ? '17' : usesModelV16 ? '16' : usesModelV15 ? '15' : usesModelV14 ? '14' : '13'} workflow has no deterministic value-producing item on its main route.`,
       source.openTagSpan,
-      'Add a main-route <step>, result-producing <choose id="..."> or <switch id="...">, or <approval> before the terminal control structure.'
+      'Add a main-route <step>, durable wait, result-producing <choose id="..."> or <switch id="...">, or <approval> before the terminal control structure.'
     );
   }
   const loweredV13 = usesStructuredGraph
@@ -7487,7 +8104,7 @@ function compileValidatedWoml(
           nodes,
           edges: lowered.edges,
         } satisfies CompiledWorkflowGraph)
-      : usesModelV16
+      : usesModelV17
         ? ({
             ...loweredV13.graph,
             nodes: withScriptRuntimeBindings(
@@ -7504,14 +8121,33 @@ function compileValidatedWoml(
                 ),
               },
             })),
-          } satisfies CompiledWorkflowGraphV16)
-        : ({
-            ...loweredV13.graph,
-            nodes: withScriptRuntimeBindings(
-              loweredV13.graph.nodes,
-              scriptAnalyses
-            ),
-          } satisfies CompiledWorkflowGraphV13);
+            waits: loweredV13.waits,
+          } satisfies CompiledWorkflowGraphV17)
+        : usesModelV16
+          ? ({
+              ...loweredV13.graph,
+              nodes: withScriptRuntimeBindings(
+                loweredV13.graph.nodes,
+                scriptAnalyses
+              ),
+              forEach: loweredV13.forEach.map(loop => ({
+                ...loop,
+                body: {
+                  ...loop.body,
+                  nodes: withScriptRuntimeBindings(
+                    loop.body.nodes,
+                    scriptAnalyses
+                  ),
+                },
+              })),
+            } satisfies CompiledWorkflowGraphV16)
+          : ({
+              ...loweredV13.graph,
+              nodes: withScriptRuntimeBindings(
+                loweredV13.graph.nodes,
+                scriptAnalyses
+              ),
+            } satisfies CompiledWorkflowGraphV13);
   const communication = usesModelV15
     ? {
         profileVersion: 1 as const,
@@ -7655,47 +8291,58 @@ function compileValidatedWoml(
       : { runtimePolicy: runtimePolicy.value }),
   };
   const compiled: CompiledWorkflowDefinition = usesStructuredGraph
-    ? usesModelV16
+    ? usesModelV17
       ? ({
-          schemaVersion: 16,
+          schemaVersion: 17,
           ...definition,
-          graph: baseGraph as CompiledWorkflowGraphV16,
+          graph: baseGraph as CompiledWorkflowGraphV17,
           runtimePolicy: runtimePolicy?.value ?? {
             profileVersion: 1,
             concurrency: 1,
           },
           ...(communication === undefined ? {} : { communication }),
-        } satisfies CompiledWorkflowDefinitionV16)
-      : usesModelV15
-      ? ({
-          schemaVersion: 15,
-          ...definition,
-          communication: communication!,
-          graph: baseGraph as CompiledWorkflowGraphV13,
-          runtimePolicy: runtimePolicy?.value ?? {
-            profileVersion: 1,
-            concurrency: 1,
-          },
-        } satisfies CompiledWorkflowDefinitionV15)
-      : usesModelV14
-      ? ({
-          schemaVersion: 14,
-          ...definition,
-          graph: baseGraph as CompiledWorkflowGraphV13,
-          runtimePolicy: runtimePolicy?.value ?? {
-            profileVersion: 1,
-            concurrency: 1,
-          },
-        } satisfies CompiledWorkflowDefinitionV14)
-      : ({
-          schemaVersion: 13,
-          ...definition,
-          graph: baseGraph as CompiledWorkflowGraphV13,
-          runtimePolicy: runtimePolicy?.value ?? {
-            profileVersion: 1,
-            concurrency: 1,
-          },
-        } satisfies CompiledWorkflowDefinitionV13)
+        } satisfies CompiledWorkflowDefinitionV17)
+      : usesModelV16
+        ? ({
+            schemaVersion: 16,
+            ...definition,
+            graph: baseGraph as CompiledWorkflowGraphV16,
+            runtimePolicy: runtimePolicy?.value ?? {
+              profileVersion: 1,
+              concurrency: 1,
+            },
+            ...(communication === undefined ? {} : { communication }),
+          } satisfies CompiledWorkflowDefinitionV16)
+        : usesModelV15
+          ? ({
+              schemaVersion: 15,
+              ...definition,
+              communication: communication!,
+              graph: baseGraph as CompiledWorkflowGraphV13,
+              runtimePolicy: runtimePolicy?.value ?? {
+                profileVersion: 1,
+                concurrency: 1,
+              },
+            } satisfies CompiledWorkflowDefinitionV15)
+          : usesModelV14
+            ? ({
+                schemaVersion: 14,
+                ...definition,
+                graph: baseGraph as CompiledWorkflowGraphV13,
+                runtimePolicy: runtimePolicy?.value ?? {
+                  profileVersion: 1,
+                  concurrency: 1,
+                },
+              } satisfies CompiledWorkflowDefinitionV14)
+            : ({
+                schemaVersion: 13,
+                ...definition,
+                graph: baseGraph as CompiledWorkflowGraphV13,
+                runtimePolicy: runtimePolicy?.value ?? {
+                  profileVersion: 1,
+                  concurrency: 1,
+                },
+              } satisfies CompiledWorkflowDefinitionV13)
     : runtimePolicy !== undefined
       ? {
           schemaVersion: 12,
@@ -7749,25 +8396,25 @@ export function compilePreparedReusableWorkflow(
 ):
   | CompiledWorkflowDefinitionV14
   | CompiledWorkflowDefinitionV15
-  | CompiledWorkflowDefinitionV16 {
-  const compiled = compileValidatedWoml(
-    prepared.document,
-    moduleRuntime,
-    true
-  );
+  | CompiledWorkflowDefinitionV16
+  | CompiledWorkflowDefinitionV17 {
+  const compiled = compileValidatedWoml(prepared.document, moduleRuntime, true);
   if (
     compiled.schemaVersion !== 14 &&
     compiled.schemaVersion !== 15 &&
-    compiled.schemaVersion !== 16
+    compiled.schemaVersion !== 16 &&
+    compiled.schemaVersion !== 17
   ) {
     throw new Error(
-      'reusable-step lowering did not produce Model v14, v15, or v16'
+      'reusable-step lowering did not produce Model v14, v15, v16, or v17'
     );
   }
   const invocationsByNode = new Map(
     prepared.invocations.map(invocation => [invocation.nodeId, invocation])
   );
-  const patchReusableNode = (node: CompiledWorkflowNode): CompiledWorkflowNode => {
+  const patchReusableNode = (
+    node: CompiledWorkflowNode
+  ): CompiledWorkflowNode => {
     const invocation = invocationsByNode.get(node.id);
     if (invocation === undefined) return node;
     const requiredSecrets = invocation.props
@@ -7795,7 +8442,9 @@ export function compilePreparedReusableWorkflow(
   };
   const nodes = compiled.graph.nodes.map(patchReusableNode);
   const compiledForEach =
-    compiled.schemaVersion === 16 ? compiled.graph.forEach : undefined;
+    compiled.schemaVersion === 16 || compiled.schemaVersion === 17
+      ? compiled.graph.forEach
+      : undefined;
   const forEach = compiledForEach?.map(loop => ({
     ...loop,
     body: {
@@ -7804,7 +8453,10 @@ export function compilePreparedReusableWorkflow(
     },
   }));
   const visibility = new Map(
-    (compiled.graph.contextVisibility ?? []).map(item => [item.nodeId, item.stepIds])
+    (compiled.graph.contextVisibility ?? []).map(item => [
+      item.nodeId,
+      item.stepIds,
+    ])
   );
   for (const loop of compiledForEach ?? []) {
     for (const item of loop.body.contextVisibility) {
@@ -7812,7 +8464,10 @@ export function compilePreparedReusableWorkflow(
     }
   }
   const providerById = new Map(
-    prepared.providerInvocations.map(invocation => [invocation.providerId, invocation])
+    prepared.providerInvocations.map(invocation => [
+      invocation.providerId,
+      invocation,
+    ])
   );
   const deliveryById = new Map(
     prepared.providerDeliveries.map(delivery => [delivery.providerId, delivery])
@@ -7844,7 +8499,8 @@ export function compilePreparedReusableWorkflow(
         node?.handler === 'engine.branch-result' ||
         node?.handler === 'engine.choice-result' ||
         node?.handler === 'engine.approval-join'
-      ) result.add(predecessor);
+      )
+        result.add(predecessor);
       return result;
     });
     const guaranteed = new Set(
@@ -7855,9 +8511,14 @@ export function compilePreparedReusableWorkflow(
     visibilityMemo.set(nodeId, guaranteed);
     return guaranteed;
   };
-  const patchDeliveryExpression = (expression: ValueExpression): ValueExpression => {
+  const patchDeliveryExpression = (
+    expression: ValueExpression
+  ): ValueExpression => {
     if (expression.kind === 'array') {
-      return { ...expression, items: expression.items.map(patchDeliveryExpression) };
+      return {
+        ...expression,
+        items: expression.items.map(patchDeliveryExpression),
+      };
     }
     if (expression.kind !== 'object') return expression;
     const deliveryId = expression.fields.deliveryId;
@@ -7898,12 +8559,17 @@ export function compilePreparedReusableWorkflow(
   for (const invocation of prepared.invocations) {
     const available = new Set(visibility.get(invocation.nodeId) ?? []);
     for (const prop of invocation.props) {
-      if (prop.expression.kind !== 'context' || !prop.expression.path.startsWith('steps.')) {
+      if (
+        prop.expression.kind !== 'context' ||
+        !prop.expression.path.startsWith('steps.')
+      ) {
         continue;
       }
       const referencedId = prop.expression.path.split('.')[1];
       if (available.has(referencedId)) continue;
-      const attribute = prepared.invocationAttributes.get(invocation.invocationId)?.[prop.name];
+      const attribute = prepared.invocationAttributes.get(
+        invocation.invocationId
+      )?.[prop.name];
       failCompile(
         prepared.document,
         'WOML_REUSABLE_PROP_CONTEXT_UNAVAILABLE',
@@ -7928,9 +8594,7 @@ export function compilePreparedReusableWorkflow(
       ),
       ...(delivery.message?.kind === 'template'
         ? delivery.message.parts.flatMap(part =>
-            part.kind === 'contextReference'
-              ? [part.path.join('.')]
-              : []
+            part.kind === 'contextReference' ? [part.path.join('.')] : []
           )
         : []),
     ];
@@ -7942,7 +8606,8 @@ export function compilePreparedReusableWorkflow(
         prepared.document,
         'WOML_REUSABLE_PROP_CONTEXT_UNAVAILABLE',
         `Custom provider <${provider.alias}> cannot read step "${referencedId}" from this notification position.`,
-        delivery.messageAttribute?.valueSpan ?? prepared.document.root.openTagSpan,
+        delivery.messageAttribute?.valueSpan ??
+          prepared.document.root.openTagSpan,
         'Pass context.payload or a step output available before this notification.'
       );
     }
@@ -7951,18 +8616,19 @@ export function compilePreparedReusableWorkflow(
     ...node,
     inputs: patchDeliveryExpression(node.inputs),
   }));
-  const patchedLifecycle = compiled.lifecycle === undefined
-    ? undefined
-    : {
-        ...compiled.lifecycle,
-        hooks: compiled.lifecycle.hooks.map(hook => ({
-          ...hook,
-          actions: hook.actions.map(action => ({
-            ...action,
-            inputs: patchDeliveryExpression(action.inputs),
+  const patchedLifecycle =
+    compiled.lifecycle === undefined
+      ? undefined
+      : {
+          ...compiled.lifecycle,
+          hooks: compiled.lifecycle.hooks.map(hook => ({
+            ...hook,
+            actions: hook.actions.map(action => ({
+              ...action,
+              inputs: patchDeliveryExpression(action.inputs),
+            })),
           })),
-        })),
-      };
+        };
   const patched = {
     ...compiled,
     graph: {
@@ -7979,7 +8645,8 @@ export function compilePreparedReusableWorkflow(
   return patched as
     | CompiledWorkflowDefinitionV14
     | CompiledWorkflowDefinitionV15
-    | CompiledWorkflowDefinitionV16;
+    | CompiledWorkflowDefinitionV16
+    | CompiledWorkflowDefinitionV17;
 }
 
 export function compileWoml(
@@ -7994,9 +8661,7 @@ export function compileWomlWithModules(
   options: {
     readonly forceModelV15?: boolean;
     readonly forcedCommunicationServices?: readonly (
-      | 'telegram'
-      | 'discord'
-      | 'whatsapp'
+      'telegram' | 'discord' | 'whatsapp'
     )[];
   } = {}
 ):
@@ -8007,7 +8672,8 @@ export function compileWomlWithModules(
   | CompiledWorkflowDefinitionV13
   | CompiledWorkflowDefinitionV14
   | CompiledWorkflowDefinitionV15
-  | CompiledWorkflowDefinitionV16 {
+  | CompiledWorkflowDefinitionV16
+  | CompiledWorkflowDefinitionV17 {
   const compiled = compileValidatedWoml(
     document,
     moduleRuntime,
@@ -8023,10 +8689,11 @@ export function compileWomlWithModules(
     compiled.schemaVersion !== 13 &&
     compiled.schemaVersion !== 14 &&
     compiled.schemaVersion !== 15 &&
-    compiled.schemaVersion !== 16
+    compiled.schemaVersion !== 16 &&
+    compiled.schemaVersion !== 17
   ) {
     throw new Error(
-      'module compilation did not produce Model v9, v10, v11, v12, v13, v14, v15, or v16'
+      'module compilation did not produce Model v9, v10, v11, v12, v13, v14, v15, v16, or v17'
     );
   }
   return compiled;

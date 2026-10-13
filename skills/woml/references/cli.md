@@ -130,6 +130,20 @@ woml emit <eventName> --id <publisherEventId> --data @<jsonFile> \
 
 Loads the bearer token from WOML secrets and publishes a top-level JSON object to a running public event endpoint. `emit` is an operator convenience; applications may call the same endpoint directly. Internal workflow-to-workflow fan-out uses `services.events.emit()` instead.
 
+## Deliver a durable external signal
+
+```bash
+woml signal <signalName> --run <runId> --wait <waitId> \
+  --id <idempotencyKey> --correlation <value> --payload <jsonFile> \
+  [--state <path>]
+```
+
+This is the local operator path to the active runtime that owns the selected
+state store. The payload file must contain JSON. Keep the idempotency key stable
+when retrying the same callback; changing the content under the same key is a
+conflict. Remote applications should use the authenticated HTTP signal route
+printed by `woml run` after `WOML_SIGNAL_TOKEN` is configured.
+
 ## Provider diagnostics
 
 ```bash
