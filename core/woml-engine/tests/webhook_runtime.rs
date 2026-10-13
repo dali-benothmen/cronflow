@@ -1126,25 +1126,28 @@ async fn concurrent_requests_and_database_contention_preserve_one_run_per_occurr
     wait_for_status(&database, run_id, RunStatus::Succeeded).await;
   }
 
-  let lock = Connection::open(database.path()).unwrap();
-  lock.execute_batch("BEGIN IMMEDIATE").unwrap();
-  let blocked_request = actix_web::rt::spawn({
-    let authorization = authorization.clone();
-    async move {
-      request(
-        address,
-        "POST",
-        WEBHOOK_PATH,
-        &standard_headers(&authorization, "contention-key"),
-        br#"{"orderId":"after-contention"}"#,
-        None,
-      )
-      .await
-    }
+  let database_path = database.path().to_path_buf();
+  let (locked_sender, locked_receiver) = std::sync::mpsc::sync_channel(1);
+  let locker = std::thread::spawn(move || {
+    let lock = Connection::open(database_path).unwrap();
+    lock.execute_batch("BEGIN IMMEDIATE").unwrap();
+    locked_sender.send(()).unwrap();
+    std::thread::sleep(Duration::from_millis(100));
+    lock.execute_batch("COMMIT").unwrap();
   });
-  actix_web::rt::time::sleep(Duration::from_millis(100)).await;
-  lock.execute_batch("COMMIT").unwrap();
-  let response = blocked_request.await.unwrap();
+  locked_receiver
+    .recv_timeout(Duration::from_secs(5))
+    .expect("contention writer must acquire the database lock");
+  let response = request(
+    address,
+    "POST",
+    WEBHOOK_PATH,
+    &standard_headers(&authorization, "contention-key"),
+    br#"{"orderId":"after-contention"}"#,
+    None,
+  )
+  .await;
+  locker.join().unwrap();
   assert_eq!(
     response.status, 202,
     "contention admission response: {}",

@@ -126,6 +126,15 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy, rustfmt
+      - name: Install locked runtime dependencies
+        working-directory: woml-cli
+        run: bun install --frozen-lockfile
+      - name: Install compiler dependencies
+        working-directory: woml
+        run: bun install --frozen-lockfile
+      - name: Build JavaScript hosts used by Rust integration tests
+        working-directory: woml-cli
+        run: bun run build:js
       - name: Check formatting
         working-directory: core
         run: cargo fmt --all -- --check
