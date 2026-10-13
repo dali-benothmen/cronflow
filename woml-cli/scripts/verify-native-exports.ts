@@ -48,6 +48,7 @@ export const expectedNativeExports = [
   'stopWomlWebhookRuntime',
   'submitWomlManualTrigger',
   'submitWomlTriggerOccurrence',
+  'submitWomlExternalSignal',
   'verifyWomlArtifactBackup',
 ] as const;
 

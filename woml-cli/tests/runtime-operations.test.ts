@@ -7,6 +7,7 @@ import { join, resolve } from 'node:path';
 import { runCli, type CliIo } from '../src/cli';
 import {
   readRuntimeDescriptor,
+  requestRuntimeSignal,
   requestRuntimeStop,
   runtimeDescriptorPath,
   startRuntimeControl,
@@ -111,6 +112,96 @@ describe('Owner-only runtime control', () => {
 
       expect(await requestRuntimeStop(control.descriptor)).toBe('requested');
       await expect(control.stopRequested).resolves.toBeUndefined();
+    } finally {
+      await control.close();
+    }
+  });
+
+  test('delivers bounded signals through the owner capability and woml signal', async () => {
+    const directory = await temporaryDirectory('signal');
+    const statePath = join(directory, 'state.sqlite');
+    const payloadPath = join(directory, 'payload.json');
+    const received: unknown[] = [];
+    const control = startRuntimeControl({
+      runtimeInstanceId: 'runtime_signal_test',
+      deploymentId: 'deployment_signal_test',
+      port: 0,
+      operations: {
+        signal: request => {
+          received.push(request);
+          return {
+            profile: 'woml.signal-result/v1',
+            status: 'accepted',
+            signalId: 'signal_test',
+            runId: request.runId,
+            waitId: request.waitId,
+            resolution: 'resolved',
+          };
+        },
+      },
+    });
+    try {
+      await writeRuntimeDescriptor(runtimeDescriptorPath(statePath), control.descriptor);
+      await writeFile(payloadPath, JSON.stringify({ status: 'passed' }));
+      await expect(
+        requestRuntimeSignal(
+          { ...control.descriptor, capability: 'x'.repeat(43) },
+          {
+            signal: 'job.completed',
+            runId: 'run_42',
+            waitId: 'result',
+            correlation: 'job-42',
+            idempotencyKey: 'callback-42',
+            payload: { status: 'passed' },
+          }
+        )
+      ).rejects.toMatchObject({ code: 'WOML_ADMIN_UNAUTHORIZED' });
+
+      let stdout = '';
+      let stderr = '';
+      const exitCode = await runCli(
+        [
+          'signal',
+          'job.completed',
+          '--run',
+          'run_42',
+          '--wait',
+          'result',
+          '--id',
+          'callback-42',
+          '--correlation',
+          'job-42',
+          '--payload',
+          payloadPath,
+          '--state',
+          statePath,
+        ],
+        {
+          stdout: value => {
+            stdout += value;
+          },
+          stderr: value => {
+            stderr += value;
+          },
+        }
+      );
+      expect(exitCode).toBe(0);
+      expect(stderr).toBe('');
+      expect(JSON.parse(stdout)).toMatchObject({
+        profile: 'woml.signal-result/v1',
+        status: 'accepted',
+        resolution: 'resolved',
+      });
+      expect(received).toEqual([
+        {
+          signal: 'job.completed',
+          runId: 'run_42',
+          waitId: 'result',
+          correlation: 'job-42',
+          idempotencyKey: 'callback-42',
+          payload: { status: 'passed' },
+        },
+      ]);
     } finally {
       await control.close();
     }

@@ -338,6 +338,8 @@ export interface WebhookRuntimeOptions extends RustExecutorOptions {
   readonly shutdownTimeoutMs?: number;
   /** Prepare and bind the runtime without opening trigger admission. */
   readonly startSuspended?: boolean;
+  /** Dedicated bearer token for the optional public external-signal endpoint. */
+  readonly signalIngressToken?: string;
   readonly onTriggerProgress?: (progress: TriggerProgressV1) => void;
   readonly onScheduleProgress?: (progress: ScheduleProgressV1) => void;
   readonly onIntervalProgress?: (progress: IntervalProgressV1) => void;
@@ -346,6 +348,34 @@ export interface WebhookRuntimeOptions extends RustExecutorOptions {
     progress: RuntimePolicyProgressV1
   ) => void;
   readonly onRuntimeLifecycle?: (progress: RuntimeInstanceV1) => void;
+}
+
+export interface ExternalSignalAdmissionRequestV1 {
+  readonly profile: 'woml.external-signal-admission/v1';
+  readonly signal: string;
+  readonly runId: string;
+  readonly waitId: string;
+  readonly correlation: string;
+  readonly idempotencyKey: string;
+  readonly payload: JsonValue;
+  readonly receivedAt: string;
+  readonly authenticationClass: 'local_control' | 'http_bearer';
+}
+
+export interface ExternalSignalOutcomeV1 {
+  readonly profile: 'woml.signal-result/v1';
+  readonly status:
+    | 'accepted'
+    | 'duplicate'
+    | 'identity_conflict'
+    | 'already_resolved'
+    | 'target_not_found'
+    | 'rejected';
+  readonly signalId: string;
+  readonly runId: string;
+  readonly waitId: string;
+  readonly resolution?: 'early' | 'resolved';
+  readonly code?: string;
 }
 
 export interface RuntimeInstanceV1 {
@@ -978,6 +1008,7 @@ interface NativeCore {
     activationId: string,
     startSuspended: boolean,
     runtimeCapabilitiesJson: string | undefined,
+    signalIngressToken: string | undefined,
     progressCallback: (message: string) => void
   ) => Promise<string>;
   readonly activateWomlWebhookRuntime: (runtimeId: string) => Promise<void>;
@@ -985,6 +1016,10 @@ interface NativeCore {
   readonly submitWomlTriggerOccurrence: (
     runtimeId: string,
     ingressJson: string
+  ) => Promise<string>;
+  readonly submitWomlExternalSignal?: (
+    runtimeId: string,
+    requestJson: string
   ) => Promise<string>;
   readonly submitWomlManualTrigger: (
     runtimeId: string,
@@ -1220,6 +1255,14 @@ export interface WaitingTimer {
   readonly deadline: string;
 }
 
+export interface WaitingSignal {
+  readonly waitId: string;
+  readonly nodeId: string;
+  readonly registeredAt: string;
+  readonly signals: readonly string[];
+  readonly deadline?: string;
+}
+
 export type RustApprovalRuntimeOutcome =
   | {
       readonly contract: 'woml.runtime-outcome';
@@ -1242,6 +1285,14 @@ export type RustApprovalRuntimeOutcome =
       readonly workflowId: string;
       readonly runId: string;
       readonly wait: WaitingTimer;
+    }
+  | {
+      readonly contract: 'woml.runtime-outcome';
+      readonly version: 1;
+      readonly status: 'waiting_signal';
+      readonly workflowId: string;
+      readonly runId: string;
+      readonly wait: WaitingSignal;
     };
 
 export type TimerWaitSettlement =
@@ -2038,6 +2089,28 @@ function waitingTimer(value: unknown): value is WaitingTimer {
   );
 }
 
+function waitingSignal(value: unknown): value is WaitingSignal {
+  if (!record(value)) return false;
+  return (
+    exactKeys(value, [
+      'waitId',
+      'nodeId',
+      'registeredAt',
+      'signals',
+      ...(value.deadline === undefined ? [] : ['deadline']),
+    ]) &&
+    /^[a-z][A-Za-z0-9]*$/.test(String(value.waitId)) &&
+    /^[A-Za-z_][A-Za-z0-9_.:-]*$/.test(String(value.nodeId)) &&
+    dateTime(value.registeredAt) &&
+    Array.isArray(value.signals) &&
+    value.signals.length > 0 &&
+    value.signals.every(
+      signal => typeof signal === 'string' && signal.length > 0
+    ) &&
+    (value.deadline === undefined || dateTime(value.deadline))
+  );
+}
+
 function parseApprovalRuntimeOutcome(json: string): RustApprovalRuntimeOutcome {
   const value: unknown = JSON.parse(json);
   if (
@@ -2087,6 +2160,24 @@ function parseApprovalRuntimeOutcome(json: string): RustApprovalRuntimeOutcome {
     typeof value.runId === 'string' &&
     value.runId.length > 0 &&
     waitingTimer(value.wait)
+  ) {
+    return value as unknown as RustApprovalRuntimeOutcome;
+  }
+  if (
+    value.status === 'waiting_signal' &&
+    exactKeys(value, [
+      'contract',
+      'version',
+      'status',
+      'workflowId',
+      'runId',
+      'wait',
+    ]) &&
+    typeof value.workflowId === 'string' &&
+    value.workflowId.length > 0 &&
+    typeof value.runId === 'string' &&
+    value.runId.length > 0 &&
+    waitingSignal(value.wait)
   ) {
     return value as unknown as RustApprovalRuntimeOutcome;
   }
@@ -2769,6 +2860,7 @@ export async function startWebhookRuntimeWithRust(
       options.runtimeCapabilities === undefined
         ? undefined
         : JSON.stringify(options.runtimeCapabilities),
+      options.signalIngressToken,
       message => {
         const decoded: unknown = JSON.parse(message);
         if (record(decoded) && decoded.contract === 'woml.schedule-progress') {
@@ -2849,6 +2941,50 @@ export async function startWebhookRuntimeWithRust(
     );
   }
   return value as unknown as WebhookRuntimeHandle;
+}
+
+export async function submitExternalSignalWithRust(
+  runtimeId: string,
+  request: ExternalSignalAdmissionRequestV1,
+  options: Pick<RustExecutorOptions, 'nativeCorePath'> = {}
+): Promise<ExternalSignalOutcomeV1> {
+  if (runtimeId.length === 0) throw new Error('runtimeId must not be empty.');
+  const nativePath = options.nativeCorePath ?? defaultNativeCorePath();
+  const native = loadNativeCore(nativePath);
+  if (typeof native.submitWomlExternalSignal !== 'function') {
+    throw new Error(
+      `Native core at "${nativePath}" does not expose external signal admission; rebuild the Rust addon.`
+    );
+  }
+  const resultJson = await native
+    .submitWomlExternalSignal(runtimeId, JSON.stringify(request))
+    .catch(decodeTriggerRuntimeError);
+  const value: unknown = JSON.parse(resultJson);
+  if (
+    !record(value) ||
+    value.profile !== 'woml.signal-result/v1' ||
+    ![
+      'accepted',
+      'duplicate',
+      'identity_conflict',
+      'already_resolved',
+      'target_not_found',
+      'rejected',
+    ].includes(String(value.status)) ||
+    typeof value.signalId !== 'string' ||
+    value.signalId.length === 0 ||
+    typeof value.runId !== 'string' ||
+    value.runId.length === 0 ||
+    typeof value.waitId !== 'string' ||
+    value.waitId.length === 0 ||
+    (value.resolution !== undefined &&
+      value.resolution !== 'early' &&
+      value.resolution !== 'resolved') ||
+    (value.code !== undefined && typeof value.code !== 'string')
+  ) {
+    throw new Error('The native core returned an invalid Signal Result v1 value.');
+  }
+  return value as unknown as ExternalSignalOutcomeV1;
 }
 
 export async function activateWebhookRuntimeWithRust(

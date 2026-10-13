@@ -87,6 +87,7 @@ import {
   activateWebhookRuntimeWithRust,
   startWebhookRuntimeWithRust,
   stopWebhookRuntimeWithRust,
+  submitExternalSignalWithRust,
   submitTriggerOccurrenceWithRust,
   submitManualTriggerWithRust,
   TriggerRuntimeError,
@@ -171,6 +172,7 @@ import {
   readRuntimeDescriptor,
   removeRuntimeDescriptor,
   requestRuntimeOperation,
+  requestRuntimeSignal,
   requestRuntimeStop,
   RuntimeControlError,
   runtimeDescriptorPath,
@@ -314,6 +316,10 @@ function emitUsage(): string {
   return 'Usage: woml emit <eventName> --id <publisherEventId> --data @<jsonFile> --server <url> --token-secret <NAME>';
 }
 
+function signalUsage(): string {
+  return 'Usage: woml signal <name> --run <runId> --wait <waitId> --id <idempotencyKey> --correlation <value> --payload <jsonFile> [--state <path>]';
+}
+
 function checkUsage(): string {
   return 'Usage: woml check <workflow.woml|directory>... [--config <path>] [--process-policy <path>] [--artifact-policy <path>] [--json]';
 }
@@ -323,7 +329,7 @@ function typesUsage(): string {
 }
 
 function usage(): string {
-  return `${runUsage()}\n${testUsage()}\n${logFollowUsage}\n${checkUsage()}\n${typesUsage()}\n${inspectUsage}\n${artifactsUsage()}\n${backupUsage}\n${restoreUsage}\n${pruneUsage}\n${listUsage()}\n${getUsage()}\n${cancelUsage()}\n${stopUsage()}\n${emitUsage()}\n${secretsUsage()}\n${providerDoctorUsage()}`;
+  return `${runUsage()}\n${testUsage()}\n${logFollowUsage}\n${checkUsage()}\n${typesUsage()}\n${inspectUsage}\n${artifactsUsage()}\n${backupUsage}\n${restoreUsage}\n${pruneUsage}\n${listUsage()}\n${getUsage()}\n${cancelUsage()}\n${stopUsage()}\n${emitUsage()}\n${signalUsage()}\n${secretsUsage()}\n${providerDoctorUsage()}`;
 }
 
 interface RunArguments {
@@ -673,6 +679,82 @@ interface EmitArguments {
   readonly dataPath: string;
   readonly server: string;
   readonly tokenSecretName: string;
+}
+
+interface SignalArguments {
+  readonly signal: string;
+  readonly runId: string;
+  readonly waitId: string;
+  readonly idempotencyKey: string;
+  readonly correlation: string;
+  readonly payloadPath: string;
+  readonly statePath: string;
+}
+
+const signalNamePattern = /^[a-z][a-z0-9]*(?:[._-][a-z0-9]+)+$/;
+
+function parseSignalArguments(args: readonly string[]): SignalArguments {
+  const [, signal, ...options] = args;
+  if (
+    signal === undefined ||
+    signal.length > 128 ||
+    !signalNamePattern.test(signal) ||
+    options.length < 10 ||
+    options.length > 12 ||
+    options.length % 2 !== 0
+  ) {
+    throw new CliInputError('WOML_CLI_ARGUMENTS_INVALID', signalUsage());
+  }
+  const values = new Map<string, string>();
+  for (let index = 0; index < options.length; index += 2) {
+    const option = options[index]!;
+    const value = options[index + 1];
+    if (
+      value === undefined ||
+      values.has(option) ||
+      ![
+        '--run',
+        '--wait',
+        '--id',
+        '--correlation',
+        '--payload',
+        '--state',
+      ].includes(option)
+    ) {
+      throw new CliInputError('WOML_CLI_ARGUMENTS_INVALID', signalUsage());
+    }
+    values.set(option, value);
+  }
+  const runId = values.get('--run');
+  const waitId = values.get('--wait');
+  const idempotencyKey = values.get('--id');
+  const correlation = values.get('--correlation');
+  const payloadPath = values.get('--payload');
+  if (
+    runId === undefined ||
+    runId.length > 256 ||
+    waitId === undefined ||
+    waitId.length > 128 ||
+    idempotencyKey === undefined ||
+    idempotencyKey.length > 256 ||
+    correlation === undefined ||
+    correlation.length > 256 ||
+    payloadPath === undefined ||
+    [runId, waitId, idempotencyKey, correlation, payloadPath].some(
+      value => value.length === 0
+    )
+  ) {
+    throw new CliInputError('WOML_CLI_ARGUMENTS_INVALID', signalUsage());
+  }
+  return {
+    signal,
+    runId,
+    waitId,
+    idempotencyKey,
+    correlation,
+    payloadPath: resolve(payloadPath),
+    statePath: resolve(values.get('--state') ?? '.woml/state.sqlite'),
+  };
 }
 
 const eventNamePattern = /^[a-z][a-z0-9]*(?:[._-][a-z0-9]+)+$/;
@@ -2665,9 +2747,6 @@ async function runSingleCheckCommand(
           'Durable waits did not lower to the frozen compiled Model v17 contract.'
         );
       }
-      const timersExecutable = compiled.graph.waits.every(
-        wait => wait.kind === 'duration' || wait.kind === 'until'
-      );
       const workflowElement = document.root.children.find(
         (child): child is WomlSourceElement =>
           child.kind === 'element' && child.name === 'workflow'
@@ -2683,9 +2762,9 @@ async function runSingleCheckCommand(
               valid: true,
               workflowId: workflowElement?.attributes.id?.value,
               feature: 'durable-waits',
-              executable: timersExecutable,
+              executable: true,
               modelVersion: compiled.schemaVersion,
-              runtimePhase: timersExecutable ? 'DW3' : 'DW4',
+              runtimePhase: 'DW5',
             },
             null,
             2
@@ -2697,9 +2776,7 @@ async function runSingleCheckCommand(
         `WOML check passed for workflow "${workflowElement?.attributes.id?.value ?? filePath}".\n`
       );
       io.stdout(
-        timersExecutable
-          ? 'Compiled Model v17 passed frontend and durable Rust timer validation.\n'
-          : 'Compiled Model v17 passed frontend validation. External signal admission begins in DW4.\n'
+        'Compiled Model v17 passed frontend and durable Rust wait validation.\n'
       );
       return 0;
     }
@@ -3320,6 +3397,12 @@ async function runApprovalWorkflow(
       );
       continue;
     }
+    if (outcome.status === 'waiting_signal') {
+      throw new CliInputError(
+        'WOML_SIGNAL_RUNTIME_REQUIRED',
+        `run ${outcome.runId} is waiting for ${outcome.wait.signals.join(', ')}. Keep it active with "woml run" and deliver the callback with "woml signal" or the authenticated HTTP endpoint.`
+      );
+    }
     const waiting = outcome;
     await serveApprovalAndWait({
       outcome: waiting,
@@ -3522,6 +3605,12 @@ async function runNotificationWorkflow(
       );
       continue;
     }
+    if (outcome.status === 'waiting_signal') {
+      throw new CliInputError(
+        'WOML_SIGNAL_RUNTIME_REQUIRED',
+        `run ${outcome.runId} is waiting for ${outcome.wait.signals.join(', ')}. Keep it active with "woml run" and deliver the callback with "woml signal" or the authenticated HTTP endpoint.`
+      );
+    }
     const waiting = outcome;
     printNotificationApproval(io, waiting, args.filePath, args.statePath);
     const hasCustomProvider =
@@ -3672,6 +3761,12 @@ async function resumeStoredRun(
         runtimeOptions
       );
       continue;
+    }
+    if (outcome.status === 'waiting_signal') {
+      throw new CliInputError(
+        'WOML_SIGNAL_RUNTIME_REQUIRED',
+        `run ${outcome.runId} is waiting for ${outcome.wait.signals.join(', ')}. Keep it active with "woml run" and deliver the callback with "woml signal" or the authenticated HTTP endpoint.`
+      );
     }
     const waiting = outcome;
     if (requirements.hasNotifications) {
@@ -4745,6 +4840,13 @@ async function activateWorkflows(
     if (productionSources.length > 0) {
       await mkdir(dirname(args.statePath), { recursive: true });
       const store = dependencies.createSecretStore();
+      const hasSignalWait = productionSources.some(source =>
+        'waits' in source.workflow.graph &&
+        source.workflow.graph.waits?.some(wait => wait.kind === 'signal')
+      );
+      const signalIngressToken = hasSignalWait
+        ? await store.get('WOML_SIGNAL_TOKEN')
+        : undefined;
       for (const source of productionSources) {
         if (source.runtimeModules.length > 0) {
           const publicModules = source.runtimeModules.filter(
@@ -4849,7 +4951,8 @@ async function activateWorkflows(
         activationRequirements.publicHttp ||
         routes.length > 0 ||
         uniqueEventRoutes.length > 0 ||
-        hasWhatsAppEndpoint;
+        hasWhatsAppEndpoint ||
+        signalIngressToken !== undefined;
       const currentActivationId = activationIdentity(productionSources);
       const currentDeploymentId = deploymentIdentity(args.statePath);
       const runtime = await profileAsync(
@@ -4872,6 +4975,7 @@ async function activateWorkflows(
               shutdownTimeoutMs: args.shutdownTimeoutMs,
               startSuspended: true,
               runtimeCapabilities: args.runtimeCapabilities,
+              signalIngressToken,
               onTriggerProgress: progress => {
                 observe(progress);
                 if (
@@ -5125,6 +5229,22 @@ async function activateWorkflows(
                 );
                 return result.code;
               },
+              signal: request =>
+                submitExternalSignalWithRust(
+                  runtime.runtimeId,
+                  {
+                    profile: 'woml.external-signal-admission/v1',
+                    signal: request.signal,
+                    runId: request.runId,
+                    waitId: request.waitId,
+                    correlation: request.correlation,
+                    idempotencyKey: request.idempotencyKey,
+                    payload: request.payload as JsonValue,
+                    receivedAt: new Date().toISOString(),
+                    authenticationClass: 'local_control',
+                  },
+                  { nativeCorePath: dependencies.nativeCorePath }
+                ),
             },
           })
       );
@@ -5760,6 +5880,71 @@ async function runEmitCommand(
   }
 }
 
+async function runSignalCommand(
+  args: readonly string[],
+  io: CliIo,
+  dependencies: CliDependencies
+): Promise<number> {
+  try {
+    const signal = parseSignalArguments(args);
+    let source: string;
+    try {
+      source = await readFile(signal.payloadPath, 'utf8');
+    } catch {
+      throw new CliInputError(
+        'WOML_SIGNAL_PAYLOAD_NOT_FOUND',
+        'signal payload file does not exist or cannot be read.'
+      );
+    }
+    if (new TextEncoder().encode(source).byteLength > 1_048_576) {
+      throw new CliInputError(
+        'WOML_SIGNAL_PAYLOAD_TOO_LARGE',
+        'signal payload exceeds the 1 MiB limit.'
+      );
+    }
+    let payload: JsonValue;
+    try {
+      payload = JSON.parse(source) as JsonValue;
+    } catch {
+      throw new CliInputError(
+        'WOML_SIGNAL_PAYLOAD_INVALID',
+        'signal payload file must contain valid JSON.'
+      );
+    }
+    const descriptor = await readRuntimeDescriptor(
+      runtimeDescriptorPath(signal.statePath)
+    );
+    const outcome = await requestRuntimeSignal(
+      descriptor,
+      {
+        signal: signal.signal,
+        runId: signal.runId,
+        waitId: signal.waitId,
+        correlation: signal.correlation,
+        idempotencyKey: signal.idempotencyKey,
+        payload,
+      },
+      (dependencies.fetch ?? globalThis.fetch) as typeof globalThis.fetch
+    );
+    io.stdout(`${JSON.stringify(outcome)}\n`);
+    const status =
+      outcome !== null &&
+      typeof outcome === 'object' &&
+      'status' in outcome &&
+      typeof outcome.status === 'string'
+        ? outcome.status
+        : undefined;
+    return status === 'accepted' || status === 'duplicate' ? 0 : 1;
+  } catch (error) {
+    if (error instanceof CliInputError && error.message === signalUsage()) {
+      io.stderr(`${signalUsage()}\n`);
+      return 2;
+    }
+    io.stderr(`${formatError(error)}\n`);
+    return 1;
+  }
+}
+
 async function runSecretsCommand(
   args: readonly string[],
   io: CliIo,
@@ -6116,6 +6301,7 @@ async function runCliUnprofiled(
     'types',
     'secrets',
     'emit',
+    'signal',
     'stop',
     'inspect',
     'backup',
@@ -6167,6 +6353,10 @@ async function runCliUnprofiled(
 
   if (args[0] === 'secrets') {
     return await runSecretsCommand(args, io, dependencies);
+  }
+
+  if (args[0] === 'signal') {
+    return await runSignalCommand(args, io, dependencies);
   }
 
   if (

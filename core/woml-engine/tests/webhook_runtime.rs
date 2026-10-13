@@ -12,10 +12,11 @@ use serde_json::{json, Map, Value};
 use uuid::Uuid;
 use woml_engine::model::ValueExpression;
 use woml_engine::{
-  CompiledWorkflowDefinition, DurableEventStore, NotificationHostProcessOptions, RunEventPayload,
-  RunStatus, RuntimeExecutionOptions, ScriptHostProcessOptions, TriggerAdmissionRequest,
-  TriggerProgress, WebhookDefinitionRegistration, WebhookRuntimeError, WomlWebhookServer,
-  WomlWebhookServerConfig, WEBHOOK_MAX_BODY_BYTES,
+  CompiledWait, CompiledWaitSignal, CompiledWorkflowDefinition, DurableEventStore,
+  NotificationHostProcessOptions, RunEventPayload, RunStatus, RuntimeExecutionOptions,
+  ScriptHostProcessOptions, TriggerAdmissionRequest, TriggerProgress,
+  WebhookDefinitionRegistration, WebhookRuntimeError, WomlWebhookServer, WomlWebhookServerConfig,
+  WEBHOOK_MAX_BODY_BYTES,
 };
 
 const WEBHOOK_MODEL: &str =
@@ -34,9 +35,34 @@ const DURABLE_WAIT_MODEL: &str =
   include_str!("../../../woml/tests/fixtures/durable-waits/model.v17.reviewed.json");
 const DURABLE_WAIT_HASH: &str =
   "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+const SIGNAL_TOKEN: &str = "signal-ingress-test-token";
 
 fn model() -> CompiledWorkflowDefinition {
   serde_json::from_str(WEBHOOK_MODEL).unwrap()
+}
+
+fn signal_wait_model() -> CompiledWorkflowDefinition {
+  let mut workflow: CompiledWorkflowDefinition = serde_json::from_str(DURABLE_WAIT_MODEL).unwrap();
+  workflow.graph.waits = Some(vec![CompiledWait::Signal {
+    wait_id: "pause".to_string(),
+    node_id: "pause".to_string(),
+    metadata: workflow.graph.nodes[0].metadata.clone(),
+    signals: vec![CompiledWaitSignal {
+      signal: "job.completed".to_string(),
+      schema: json!({
+        "type": "object",
+        "properties": { "status": { "type": "string" } },
+        "required": ["status"],
+        "additionalProperties": false
+      }),
+    }],
+    correlation: ValueExpression::Literal {
+      value: json!("job-42"),
+    },
+    timeout_ms: Some(60_000),
+    on_timeout: "fail".to_string(),
+  }]);
+  workflow
 }
 
 fn production_model(source: &str, path: &str, trigger_id: &str) -> CompiledWorkflowDefinition {
@@ -508,6 +534,131 @@ async fn production_runtime_scheduler_resumes_a_due_timer_without_a_script_worke
   assert!(!events
     .iter()
     .any(|event| matches!(event.payload, RunEventPayload::StepAttemptStarted(_))));
+  server.stop().await;
+}
+
+#[actix_web::test]
+async fn external_signal_http_requires_its_token_and_resumes_the_exact_wait() {
+  let database = TemporaryDatabase::new("external-signal-http");
+  let progress = Arc::new(Mutex::new(Vec::<TriggerProgress>::new()));
+  let captured = progress.clone();
+  let server = WomlWebhookServer::start(WomlWebhookServerConfig {
+    bind_address: "127.0.0.1:0".parse().unwrap(),
+    database_path: database.path().to_path_buf(),
+    registrations: vec![WebhookDefinitionRegistration::new(
+      signal_wait_model(),
+      DURABLE_WAIT_HASH,
+    )],
+    startup_manual_triggers: BTreeMap::from([(
+      "durable-wait-model".to_string(),
+      "start".to_string(),
+    )]),
+    execution: RuntimeExecutionOptions::new(placeholder_host(), 2_000)
+      .with_signal_ingress_token(Some(SIGNAL_TOKEN.to_string())),
+    progress_reporter: Some(Arc::new(move |message| {
+      captured.lock().unwrap().push(message);
+    })),
+  })
+  .await
+  .unwrap();
+  let deadline = Instant::now() + Duration::from_secs(5);
+  let run_id = loop {
+    let selected = progress.lock().unwrap().iter().find_map(|message| {
+      if let TriggerProgress::OccurrenceAccepted { run_id, .. } = message {
+        Some(run_id.clone())
+      } else {
+        None
+      }
+    });
+    if let Some(run_id) = selected {
+      break run_id;
+    }
+    assert!(
+      Instant::now() < deadline,
+      "signal workflow was not admitted"
+    );
+    actix_web::rt::time::sleep(Duration::from_millis(10)).await;
+  };
+  wait_for_status(&database, &run_id, RunStatus::Waiting).await;
+  let body = serde_json::to_vec(&json!({
+    "runId": run_id,
+    "waitId": "pause",
+    "correlation": "job-42",
+    "payload": { "status": "passed" }
+  }))
+  .unwrap();
+  let unauthorized = request(
+    server.local_address(),
+    "POST",
+    "/v1/signals/job.completed",
+    &[
+      ("Authorization", "Bearer wrong-token"),
+      ("Content-Type", "application/json"),
+      ("Idempotency-Key", "callback-http-1"),
+    ],
+    &body,
+    None,
+  )
+  .await;
+  assert_eq!(unauthorized.status, 403);
+
+  let authorization = format!("Bearer {SIGNAL_TOKEN}");
+  let secret_payload = serde_json::to_vec(&json!({
+    "runId": run_id,
+    "waitId": "pause",
+    "correlation": "job-42",
+    "payload": { "status": SIGNAL_TOKEN }
+  }))
+  .unwrap();
+  let secret_rejected = request(
+    server.local_address(),
+    "POST",
+    "/v1/signals/job.completed",
+    &[
+      ("Authorization", &authorization),
+      ("Content-Type", "application/json"),
+      ("Idempotency-Key", "callback-secret"),
+    ],
+    &secret_payload,
+    None,
+  )
+  .await;
+  assert_eq!(secret_rejected.status, 422);
+  assert_eq!(secret_rejected.body["code"], "WOML_SIGNAL_PAYLOAD_SECRET");
+
+  let accepted = request(
+    server.local_address(),
+    "POST",
+    "/v1/signals/job.completed",
+    &[
+      ("Authorization", &authorization),
+      ("Content-Type", "application/json"),
+      ("Idempotency-Key", "callback-http-1"),
+    ],
+    &body,
+    None,
+  )
+  .await;
+  assert_eq!(accepted.status, 202);
+  assert_eq!(accepted.body["status"], "accepted");
+  assert_eq!(accepted.body["resolution"], "resolved");
+  wait_for_status(&database, &run_id, RunStatus::Succeeded).await;
+
+  let duplicate = request(
+    server.local_address(),
+    "POST",
+    "/v1/signals/job.completed",
+    &[
+      ("Authorization", &authorization),
+      ("Content-Type", "application/json"),
+      ("Idempotency-Key", "callback-http-1"),
+    ],
+    &body,
+    None,
+  )
+  .await;
+  assert_eq!(duplicate.status, 200);
+  assert_eq!(duplicate.body["status"], "duplicate");
   server.stop().await;
 }
 

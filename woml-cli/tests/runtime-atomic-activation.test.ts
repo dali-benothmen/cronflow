@@ -19,6 +19,7 @@ import {
   listRunsWithRust,
   startWebhookRuntimeWithRust,
   stopWebhookRuntimeWithRust,
+  submitExternalSignalWithRust,
 } from '../src/rust-executor';
 import type { SecretMetadata, SecretStore } from '../src/secrets';
 
@@ -32,6 +33,10 @@ const scriptHostPath = resolve(packageRoot, 'src/script-host.ts');
 const modelPath = resolve(
   packageRoot,
   '../woml/tests/fixtures/triggers-webhook.compiled.v7.json'
+);
+const durableWaitModelPath = resolve(
+  packageRoot,
+  '../woml/tests/fixtures/durable-waits/model.v17.reviewed.json'
 );
 const temporaryDirectories: string[] = [];
 
@@ -203,5 +208,107 @@ describe('Atomic Rust activation gate', () => {
     expect(
       listRunsWithRust(statePath, {}, { nativeCorePath }).runs
     ).toHaveLength(0);
+  }, 15_000);
+
+  test('submits an external signal through the staged native runtime boundary', async () => {
+    if (!existsSync(nativeCorePath)) return;
+    const directory = await mkdtemp(join(tmpdir(), 'woml-dw5-native-signal-'));
+    temporaryDirectories.push(directory);
+    const statePath = join(directory, 'state.sqlite');
+    const model = (await Bun.file(durableWaitModelPath).json()) as Record<
+      string,
+      any
+    >;
+    model.graph.waits = [
+      {
+        waitId: 'pause',
+        nodeId: 'pause',
+        metadata: { name: 'Wait for job' },
+        kind: 'signal',
+        signals: [
+          {
+            signal: 'job.completed',
+            schema: {
+              type: 'object',
+              properties: { status: { type: 'string' } },
+              required: ['status'],
+              additionalProperties: false,
+            },
+          },
+        ],
+        correlation: { kind: 'literal', value: 'job-42' },
+        timeoutMs: 60_000,
+        onTimeout: 'fail',
+      },
+    ];
+    const workflow = model as unknown as CompiledWorkflowDefinition;
+    const handle = await startWebhookRuntimeWithRust(
+      [
+        {
+          workflow,
+          definitionHash: compiledDefinitionHash(workflow),
+          resolvedSecrets: {},
+        },
+      ],
+      statePath,
+      {
+        nativeCorePath,
+        scriptHostPath,
+        host: '127.0.0.1',
+        port: 0,
+        startupManualTriggers: { 'durable-wait-model': 'start' },
+      }
+    );
+    try {
+      const deadline = Date.now() + 5_000;
+      let waitingRunId: string | undefined;
+      while (Date.now() < deadline) {
+        waitingRunId = listRunsWithRust(
+          statePath,
+          { limit: 10 },
+          { nativeCorePath }
+        ).runs.find(run => run.status === 'waiting')?.runId;
+        if (waitingRunId !== undefined) break;
+        await Bun.sleep(10);
+      }
+      expect(waitingRunId).toBeDefined();
+      const outcome = await submitExternalSignalWithRust(
+        handle.runtimeId,
+        {
+          profile: 'woml.external-signal-admission/v1',
+          signal: 'job.completed',
+          runId: waitingRunId!,
+          waitId: 'pause',
+          correlation: 'job-42',
+          idempotencyKey: 'native-callback-1',
+          payload: { status: 'passed' },
+          receivedAt: new Date().toISOString(),
+          authenticationClass: 'local_control',
+        },
+        { nativeCorePath }
+      );
+      expect(outcome).toMatchObject({
+        profile: 'woml.signal-result/v1',
+        status: 'accepted',
+        resolution: 'resolved',
+        runId: waitingRunId,
+      });
+      while (Date.now() < deadline) {
+        const settled = listRunsWithRust(
+          statePath,
+          { limit: 10 },
+          { nativeCorePath }
+        ).runs.find(run => run.runId === waitingRunId);
+        if (settled?.status === 'succeeded') break;
+        await Bun.sleep(10);
+      }
+      expect(
+        listRunsWithRust(statePath, { limit: 10 }, { nativeCorePath }).runs.find(
+          run => run.runId === waitingRunId
+        )?.status
+      ).toBe('succeeded');
+    } finally {
+      await stopWebhookRuntimeWithRust(handle.runtimeId, { nativeCorePath });
+    }
   }, 15_000);
 });

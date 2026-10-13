@@ -52,6 +52,18 @@ export interface RuntimeAdminOperations {
     runId: string,
     commandId: string
   ) => string | undefined | Promise<string | undefined>;
+  readonly signal?: (
+    request: RuntimeSignalRequestV1
+  ) => unknown | Promise<unknown>;
+}
+
+export interface RuntimeSignalRequestV1 {
+  readonly signal: string;
+  readonly runId: string;
+  readonly waitId: string;
+  readonly correlation: string;
+  readonly idempotencyKey: string;
+  readonly payload: unknown;
 }
 
 export interface RuntimePresentationSurface {
@@ -130,6 +142,7 @@ const DEFAULT_MAX_REQUEST_BYTES = 16 * 1024;
 const DEFAULT_MAX_RESPONSE_BYTES = 2 * 1024 * 1024;
 const DEFAULT_MAX_CONCURRENT_REQUESTS = 16;
 const DEFAULT_MAX_OPERATIONS_PER_MINUTE = 120;
+const MAX_SIGNAL_REQUEST_BYTES = 1_048_576 + 4_096;
 const LOOPBACK_HOSTS = new Set(['127.0.0.1', 'localhost', '::1']);
 
 function safeEqual(left: string, right: string): boolean {
@@ -381,6 +394,98 @@ export function startRuntimeControl(options: {
     port: options.port ?? 0,
     async fetch(request) {
       const url = new URL(request.url);
+      if (request.method === 'POST' && url.pathname.startsWith('/v1/signals/')) {
+        if (!authorized(request)) {
+          return Response.json(
+            { error: { code: 'WOML_ADMIN_UNAUTHORIZED' } },
+            { status: 401 }
+          );
+        }
+        if (options.operations?.signal === undefined) {
+          return Response.json(
+            { error: { code: 'WOML_SIGNAL_UNAVAILABLE' } },
+            { status: 404 }
+          );
+        }
+        const limited = beginOperation();
+        if (limited !== undefined) return limited;
+        try {
+          const signal = decodeURIComponent(url.pathname.slice('/v1/signals/'.length));
+          const contentLength = Number(request.headers.get('content-length') ?? 0);
+          if (
+            !/^[a-z][a-z0-9]*(?:[._-][a-z0-9]+)+$/.test(signal) ||
+            signal.length > 128 ||
+            !Number.isFinite(contentLength) ||
+            contentLength < 0 ||
+            contentLength > MAX_SIGNAL_REQUEST_BYTES
+          ) {
+            return Response.json(
+              { error: { code: 'WOML_SIGNAL_REQUEST_INVALID' } },
+              { status: contentLength > MAX_SIGNAL_REQUEST_BYTES ? 413 : 400 }
+            );
+          }
+          const text = await request.text();
+          if (new TextEncoder().encode(text).byteLength > MAX_SIGNAL_REQUEST_BYTES) {
+            return Response.json(
+              { error: { code: 'WOML_SIGNAL_PAYLOAD_TOO_LARGE' } },
+              { status: 413 }
+            );
+          }
+          const body: unknown = JSON.parse(text);
+          if (body === null || typeof body !== 'object' || Array.isArray(body)) {
+            throw new Error('invalid signal body');
+          }
+          const value = body as Record<string, unknown>;
+          if (
+            !Object.keys(value).every(key =>
+              ['runId', 'waitId', 'correlation', 'idempotencyKey', 'payload'].includes(key)
+            ) ||
+            Object.keys(value).length !== 5 ||
+            typeof value.runId !== 'string' ||
+            value.runId.length < 1 ||
+            value.runId.length > 256 ||
+            typeof value.waitId !== 'string' ||
+            value.waitId.length < 1 ||
+            value.waitId.length > 128 ||
+            typeof value.correlation !== 'string' ||
+            value.correlation.length < 1 ||
+            value.correlation.length > 256 ||
+            typeof value.idempotencyKey !== 'string' ||
+            value.idempotencyKey.length < 1 ||
+            value.idempotencyKey.length > 256
+          ) {
+            throw new Error('invalid signal body');
+          }
+          return boundedJson(
+            await options.operations.signal({
+              signal,
+              runId: value.runId,
+              waitId: value.waitId,
+              correlation: value.correlation,
+              idempotencyKey: value.idempotencyKey,
+              payload: value.payload,
+            })
+          );
+        } catch (error) {
+          if (error instanceof URIError || error instanceof SyntaxError) {
+            return Response.json(
+              { error: { code: 'WOML_SIGNAL_REQUEST_INVALID' } },
+              { status: 400 }
+            );
+          }
+          const candidate =
+            error instanceof Error && 'code' in error ? String(error.code) : '';
+          if (/^WOML_[A-Z0-9_]{1,123}$/.test(candidate)) {
+            return Response.json({ error: { code: candidate } }, { status: 422 });
+          }
+          return Response.json(
+            { error: { code: 'WOML_SIGNAL_REQUEST_INVALID' } },
+            { status: 400 }
+          );
+        } finally {
+          inFlight -= 1;
+        }
+      }
       if (
         request.method === 'GET' &&
         (url.pathname.startsWith('/v1/presentations/runs/') ||
@@ -796,4 +901,52 @@ export async function requestRuntimeStop(
   return result.code === 'WOML_RUNTIME_ALREADY_DRAINING'
     ? 'already_draining'
     : 'requested';
+}
+
+export async function requestRuntimeSignal(
+  descriptor: RuntimeDescriptorV1,
+  request: RuntimeSignalRequestV1,
+  fetcher: typeof fetch = globalThis.fetch
+): Promise<unknown> {
+  if (Date.now() >= Date.parse(descriptor.expiresAt)) {
+    throw new RuntimeControlError(
+      'WOML_ADMIN_CAPABILITY_EXPIRED',
+      'The runtime administration capability has expired.'
+    );
+  }
+  const response = await fetcher(
+    `${descriptor.adminUrl}/v1/signals/${encodeURIComponent(request.signal)}`,
+    {
+      method: 'POST',
+      headers: {
+        authorization: `Bearer ${descriptor.capability}`,
+        'content-type': 'application/json',
+      },
+      body: JSON.stringify({
+        runId: request.runId,
+        waitId: request.waitId,
+        correlation: request.correlation,
+        idempotencyKey: request.idempotencyKey,
+        payload: request.payload,
+      }),
+    }
+  );
+  const result: unknown = await response.json();
+  if (!response.ok) {
+    const code =
+      result !== null &&
+      typeof result === 'object' &&
+      'error' in result &&
+      result.error !== null &&
+      typeof result.error === 'object' &&
+      'code' in result.error &&
+      typeof result.error.code === 'string'
+        ? result.error.code
+        : 'WOML_SIGNAL_REQUEST_FAILED';
+    throw new RuntimeControlError(
+      code,
+      `External signal request failed with HTTP ${response.status}.`
+    );
+  }
+  return result;
 }

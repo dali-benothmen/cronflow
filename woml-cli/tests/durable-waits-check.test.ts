@@ -40,13 +40,13 @@ async function check(source: string, ...options: string[]) {
 }
 
 describe('woml check durable-wait authoring', () => {
-  test('accepts valid Model v17 signal source without claiming DW4 execution', async () => {
+  test('accepts valid Model v17 signal source as executable in DW5', async () => {
     const result = await check(valid);
     expect(result.exitCode).toBe(0);
     expect(result.stderr).toBe('');
     expect(result.stdout).toContain('WOML check passed');
     expect(result.stdout).toContain('Compiled Model v17');
-    expect(result.stdout).toContain('External signal admission begins in DW4');
+    expect(result.stdout).toContain('durable Rust wait validation');
   });
 
   test('returns the frozen frontend-validation profile as JSON', async () => {
@@ -57,13 +57,13 @@ describe('woml check durable-wait authoring', () => {
       valid: true,
       workflowId: 'durable-wait-check',
       feature: 'durable-waits',
-      executable: false,
+      executable: true,
       modelVersion: 17,
-      runtimePhase: 'DW4',
+      runtimePhase: 'DW5',
     });
   });
 
-  test('reports duration and until waits as executable in DW3', async () => {
+  test('reports duration and until waits through the unified DW5 runtime', async () => {
     const result = await check(
       valid.replace(
         '<wait-for id="result" signal="job.completed" correlation="{{context.steps.begin.jobId}}" timeout="1h" />',
@@ -76,7 +76,7 @@ describe('woml check durable-wait authoring', () => {
       feature: 'durable-waits',
       executable: true,
       modelVersion: 17,
-      runtimePhase: 'DW3',
+      runtimePhase: 'DW5',
     });
   });
 
