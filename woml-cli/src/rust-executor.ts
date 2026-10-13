@@ -765,6 +765,26 @@ export interface RustRunInspectionV2 {
   };
 }
 
+export interface RustWaitInspectionV1 {
+  readonly profile: 'woml.wait-inspection/v1';
+  readonly runId: string;
+  readonly pendingWaits: number;
+  readonly oldestPendingWaitAgeMs?: number;
+  readonly waits: readonly {
+    readonly runId: string;
+    readonly waitId: string;
+    readonly name: string;
+    readonly kind: 'duration' | 'until' | 'signal';
+    readonly status: 'pending' | 'signaled' | 'elapsed' | 'timed_out' | 'cancelled';
+    readonly registeredAt: string;
+    readonly signals?: readonly string[];
+    readonly correlationDigest?: string;
+    readonly deadline?: string;
+    readonly resolvedAt?: string;
+    readonly winningSignal?: string;
+  }[];
+}
+
 export interface RustRunCancellationResultV1 {
   readonly profile: 'woml.run-control.result/v1';
   readonly commandId: string;
@@ -1136,6 +1156,7 @@ interface NativeCore {
     sourcePath: string
   ) => string;
   readonly inspectWomlRunV2: (eventStorePath: string, runId: string) => string;
+  readonly inspectWomlWaitsV1: (eventStorePath: string, runId: string) => string;
   readonly cancelWomlRun: (
     eventStorePath: string,
     runId: string,
@@ -4462,6 +4483,71 @@ export function inspectRunV2WithRust(
     throw new Error('The native core returned invalid run-inspection data.');
   }
   return value as unknown as RustRunInspectionV2;
+}
+
+export function inspectWaitsV1WithRust(
+  eventStorePath: string,
+  runId: string,
+  options: Pick<RustExecutorOptions, 'nativeCorePath'> = {}
+): RustWaitInspectionV1 {
+  const nativePath = options.nativeCorePath ?? defaultNativeCorePath();
+  const native = loadNativeCore(nativePath);
+  if (typeof native.inspectWomlWaitsV1 !== 'function') {
+    throw new Error(
+      `Native core at "${nativePath}" does not expose durable-wait inspection; rebuild the Rust addon.`
+    );
+  }
+  const value = callRunManagementNative(() =>
+    native.inspectWomlWaitsV1(eventStorePath, runId)
+  );
+  const wait = (candidate: unknown): boolean =>
+    record(candidate) &&
+    exactKeys(
+      candidate,
+      ['runId', 'waitId', 'name', 'kind', 'status', 'registeredAt'],
+      ['signals', 'correlationDigest', 'deadline', 'resolvedAt', 'winningSignal']
+    ) &&
+    candidate.runId === runId &&
+    typeof candidate.waitId === 'string' &&
+    typeof candidate.name === 'string' &&
+    ['duration', 'until', 'signal'].includes(String(candidate.kind)) &&
+    ['pending', 'signaled', 'elapsed', 'timed_out', 'cancelled'].includes(
+      String(candidate.status)
+    ) &&
+    dateTime(candidate.registeredAt) &&
+    (candidate.signals === undefined ||
+      (Array.isArray(candidate.signals) &&
+        candidate.signals.length <= 16 &&
+        candidate.signals.every(signal => typeof signal === 'string'))) &&
+    (candidate.correlationDigest === undefined ||
+      /^sha256:[a-f0-9]{64}$/.test(String(candidate.correlationDigest))) &&
+    (candidate.deadline === undefined || dateTime(candidate.deadline)) &&
+    (candidate.resolvedAt === undefined || dateTime(candidate.resolvedAt)) &&
+    (candidate.winningSignal === undefined ||
+      typeof candidate.winningSignal === 'string');
+  if (
+    !record(value) ||
+    !exactKeys(
+      value,
+      ['profile', 'runId', 'waits', 'pendingWaits'],
+      ['oldestPendingWaitAgeMs']
+    ) ||
+    value.profile !== 'woml.wait-inspection/v1' ||
+    value.runId !== runId ||
+    !Array.isArray(value.waits) ||
+    value.waits.length > 10_000 ||
+    !value.waits.every(wait) ||
+    !Number.isSafeInteger(value.pendingWaits) ||
+    Number(value.pendingWaits) < 0 ||
+    Number(value.pendingWaits) !==
+      value.waits.filter(candidate => candidate.status === 'pending').length ||
+    (value.oldestPendingWaitAgeMs !== undefined &&
+      (!Number.isSafeInteger(value.oldestPendingWaitAgeMs) ||
+        Number(value.oldestPendingWaitAgeMs) < 0))
+  ) {
+    throw new Error('The native core returned invalid durable-wait inspection data.');
+  }
+  return value as unknown as RustWaitInspectionV1;
 }
 
 export function cancelRunWithRust(

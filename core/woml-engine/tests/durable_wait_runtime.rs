@@ -12,9 +12,9 @@ use woml_engine::{
   resume_workflow_durable_outcome, CompiledWait, CompiledWaitSignal, CompiledWorkflowDefinition,
   DurableDagEngine, DurableEventStore, DurableWaitKind, DurableWaitStatus,
   ExternalSignalAdmissionRequest, ExternalSignalAdmissionStatus, ExternalSignalResolution,
-  FixedEngineClock, RunCancellationStatus, RunEventPayload, RunStatus, RuntimeExecutionOptions,
-  ScriptHostProcessOptions, SignalWaitTimeoutSettlement, TimerWaitSettlement,
-  TriggerAdmissionRequest, WaitRegisteredData, WorkflowRuntimeOutcome,
+  FixedEngineClock, InspectedWaitStatusV1, RunCancellationStatus, RunEventPayload, RunStatus,
+  RuntimeExecutionOptions, ScriptHostProcessOptions, SignalWaitTimeoutSettlement,
+  TimerWaitSettlement, TriggerAdmissionRequest, WaitRegisteredData, WorkflowRuntimeOutcome,
   DURABLE_STORE_SCHEMA_VERSION,
 };
 
@@ -198,6 +198,13 @@ async fn timer_wait_persists_before_releasing_execution_resources() {
     projection.durable_waits["pause"].status,
     DurableWaitStatus::Registered
   );
+  let inspection = store.inspect_waits_v1(&run_id).unwrap();
+  assert_eq!(inspection.profile, "woml.wait-inspection/v1");
+  assert_eq!(inspection.pending_waits, 1);
+  assert_eq!(inspection.waits.len(), 1);
+  assert_eq!(inspection.waits[0].wait_id, "pause");
+  assert_eq!(inspection.waits[0].status, InspectedWaitStatusV1::Pending);
+  assert!(inspection.waits[0].correlation_digest.is_none());
   assert!(store.due_timer_waits(started_at, 10).unwrap().is_empty());
   assert_eq!(
     store

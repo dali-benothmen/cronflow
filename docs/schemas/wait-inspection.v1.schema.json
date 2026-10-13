@@ -1,0 +1,47 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://woml.dev/schemas/wait-inspection/v1",
+  "title": "WOML Payload-Free Durable Wait Inspection v1",
+  "description": "Bounded operator inspection for durable waits without signal payloads, credentials, or raw correlation values.",
+  "x-status": "durable-waits-dw7-frozen",
+  "x-forbiddenFields": ["payload", "context", "result", "credentials", "secret", "token", "correlation", "body"],
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["profile", "runId", "waits", "pendingWaits"],
+  "properties": {
+    "profile": { "const": "woml.wait-inspection/v1" },
+    "runId": { "type": "string", "minLength": 1, "maxLength": 320 },
+    "waits": {
+      "type": "array",
+      "maxItems": 10000,
+      "items": { "$ref": "#/$defs/wait" }
+    },
+    "pendingWaits": { "type": "integer", "minimum": 0, "maximum": 10000 },
+    "oldestPendingWaitAgeMs": { "type": "integer", "minimum": 0 }
+  },
+  "$defs": {
+    "wait": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["runId", "waitId", "name", "kind", "status", "registeredAt"],
+      "properties": {
+        "runId": { "type": "string", "minLength": 1, "maxLength": 320 },
+        "waitId": { "type": "string", "minLength": 1, "maxLength": 320 },
+        "name": { "type": "string", "minLength": 1, "maxLength": 320 },
+        "kind": { "enum": ["duration", "until", "signal"] },
+        "status": { "enum": ["pending", "signaled", "elapsed", "timed_out", "cancelled"] },
+        "registeredAt": { "type": "string", "format": "date-time" },
+        "signals": {
+          "type": "array",
+          "maxItems": 16,
+          "uniqueItems": true,
+          "items": { "type": "string", "minLength": 1, "maxLength": 160 }
+        },
+        "correlationDigest": { "type": "string", "pattern": "^sha256:[a-f0-9]{64}$" },
+        "deadline": { "type": "string", "format": "date-time" },
+        "resolvedAt": { "type": "string", "format": "date-time" },
+        "winningSignal": { "type": "string", "minLength": 1, "maxLength": 160 }
+      }
+    }
+  }
+}

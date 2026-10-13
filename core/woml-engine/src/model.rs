@@ -2046,9 +2046,11 @@ fn inspect_parallel_contract(workflow: &CompiledWorkflowDefinition, issues: &mut
           && edge.parallel_id.as_deref() == Some(*parallel_id)
           && edge.branch_id.is_none()
           && matches!(edge.condition, EdgeCondition::Always)
-          && nodes
-            .get(edge.to.as_str())
-            .is_some_and(|node| node.handler == "runtime.script")
+          && nodes.get(edge.to.as_str()).is_some_and(|node| {
+            node.handler == "runtime.script"
+              || workflow.schema_version >= COMPILED_MODEL_SCHEMA_VERSION_V17
+                && node.handler == "engine.durable-wait"
+          })
       })
       && join_edges.iter().enumerate().all(|(index, edge)| {
         edge.id == format!("{parallel_id}:join:{index}")

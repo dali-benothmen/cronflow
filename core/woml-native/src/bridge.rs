@@ -2627,6 +2627,18 @@ pub fn inspect_woml_run_v2(event_store_path: String, run_id: String) -> napi::Re
 }
 
 #[napi]
+pub fn inspect_woml_waits_v1(event_store_path: String, run_id: String) -> napi::Result<String> {
+  let store = DurableEventStore::open(PathBuf::from(event_store_path))
+    .map_err(|error| native_run_management_error("WOML_WAIT_INSPECTION_FAILED", error))?;
+  let inspection = store
+    .inspect_waits_v1(&run_id)
+    .map_err(|error| native_run_management_error("WOML_WAIT_INSPECTION_FAILED", error))?;
+  serde_json::to_string(&inspection).map_err(|error| {
+    napi::Error::from_reason(format!("Could not encode WOML wait inspection: {error}"))
+  })
+}
+
+#[napi]
 pub fn cancel_woml_run(
   event_store_path: String,
   run_id: String,

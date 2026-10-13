@@ -1,7 +1,7 @@
 import { describe, expect, test } from 'bun:test';
-import { mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { join, resolve } from 'node:path';
 
 import { runCli, type CliIo } from '../src/cli';
 
@@ -91,6 +91,25 @@ describe('woml check durable-wait authoring', () => {
         'return { jobId: services.jobs.id("job-1") };'
       );
     const result = await check(source, '--json');
+    expect(result.stderr).toBe('');
+    expect(result.exitCode).toBe(0);
+    expect(JSON.parse(result.stdout)).toMatchObject({
+      valid: true,
+      feature: 'durable-waits',
+      modelVersion: 17,
+    });
+  });
+
+  test('accepts executable waits in choose, fork, and parallel control flow', async () => {
+    const source = await readFile(
+      resolve(
+        import.meta.dir,
+        '../../woml/tests/fixtures/durable-waits/composition.reviewed.woml'
+      ),
+      'utf8'
+    );
+    const result = await check(source, '--json');
+    expect(result.stderr).toBe('');
     expect(result.exitCode).toBe(0);
     expect(JSON.parse(result.stdout)).toMatchObject({
       valid: true,

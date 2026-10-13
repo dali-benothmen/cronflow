@@ -1,5 +1,8 @@
 import { describe, expect, test } from 'bun:test';
 import { readFileSync } from 'node:fs';
+import { resolve } from 'node:path';
+
+import Ajv2020 from 'ajv/dist/2020';
 
 import {
   compileWoml,
@@ -36,6 +39,66 @@ function diagnostic(source: string): WomlValidationError | WomlCompileError {
 }
 
 describe('WOML durable waits DW0 and DW1', () => {
+  test('freezes payload-free wait inspection and run inspection v8 schemas', () => {
+    const schemaRoot = resolve(import.meta.dir, '../../docs/schemas');
+    const ajv = new Ajv2020({ allErrors: true, strict: false });
+    ajv.addFormat('date-time', {
+      validate: (value: string) => Number.isFinite(Date.parse(value)),
+    });
+    for (const name of [
+      'artifact-reference.v1.schema.json',
+      'artifact-inspection.v1.schema.json',
+      'artifact-run-inspection.v1.schema.json',
+      'wait-inspection.v1.schema.json',
+      'run-inspection.v8.schema.json',
+    ]) {
+      ajv.addSchema(
+        JSON.parse(readFileSync(resolve(schemaRoot, name), 'utf8'))
+      );
+    }
+    const validate = ajv.getSchema('https://woml.dev/schemas/run-inspection/v8');
+    if (validate === undefined) throw new Error('Missing run inspection v8 schema.');
+    const inspected = {
+      profile: 'woml.run-inspection/v8',
+      runId: 'run_waiting',
+      workflowId: 'wait-composition',
+      status: 'waiting',
+      businessOutcome: 'undecided',
+      lifecycleStatus: 'idle',
+      hooks: [],
+      warnings: [],
+      cancellation: { requested: false },
+      artifacts: {
+        profile: 'woml.artifact-run-inspection/v1',
+        runId: 'run_waiting',
+        artifacts: [],
+        truncated: false,
+      },
+      durableWaits: {
+        profile: 'woml.wait-inspection/v1',
+        runId: 'run_waiting',
+        pendingWaits: 1,
+        oldestPendingWaitAgeMs: 250,
+        waits: [
+          {
+            runId: 'run_waiting',
+            waitId: 'scanResult',
+            name: 'Wait for scan result',
+            kind: 'signal',
+            status: 'pending',
+            registeredAt: '2026-10-13T10:00:00Z',
+            signals: ['scan.completed'],
+            correlationDigest:
+              'sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+            deadline: '2026-10-13T11:00:00Z',
+          },
+        ],
+      },
+    };
+    expect(validate(inspected), JSON.stringify(validate.errors)).toBe(true);
+    expect(validate({ ...inspected, payload: { secret: true } })).toBe(false);
+  });
+
   test('deep-equals the reviewed compiled Model v17 fixture', () => {
     const source = fixture('model.reviewed.woml');
     expect(

@@ -1103,7 +1103,8 @@ function inspectParallelGroups(
           edge.parallelId === parallelId &&
           edge.branchId === undefined &&
           edge.condition.kind === 'always' &&
-          nodes.get(edge.to)?.handler === 'runtime.script'
+          (nodes.get(edge.to)?.handler === 'runtime.script' ||
+            nodes.get(edge.to)?.handler === 'engine.durable-wait')
       ) &&
       joinEdges.every(
         (edge, index) =>

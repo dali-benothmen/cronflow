@@ -152,7 +152,7 @@ interface ValidatedParallel {
   readonly metadata?: Readonly<Record<string, JsonValue>>;
   readonly concurrency: number;
   readonly onError: 'fail-fast' | 'wait-all';
-  readonly children: readonly ValidatedStep[];
+  readonly children: readonly (ValidatedStep | ValidatedWait)[];
 }
 
 interface ValidatedForEach {
@@ -3513,7 +3513,7 @@ function collectScriptAnalyses(
     }
     if (item.kind === 'parallel') {
       for (const child of item.children) {
-        analyses.set(child.id, child.scriptAnalysis);
+        if (child.kind === 'step') analyses.set(child.id, child.scriptAnalysis);
       }
       continue;
     }
@@ -3566,7 +3566,11 @@ function collectValidatedSteps(
     if (item.kind === 'step') {
       steps.push(item);
     } else if (item.kind === 'parallel') {
-      steps.push(...item.children);
+      steps.push(
+        ...item.children.filter(
+          (child): child is ValidatedStep => child.kind === 'step'
+        )
+      );
     } else if (item.kind === 'forEach') {
       collectValidatedSteps(item.items, steps);
     } else if (item.kind === 'branch') {
@@ -4455,12 +4459,15 @@ function validateParallel(
     failValidation(
       document,
       'WOML_PARALLEL_EMPTY',
-      `<parallel id="${id}"> must contain at least one direct <step> child.`,
+      `<parallel id="${id}"> must contain at least one direct <step> or durable-wait child.`,
       parallel.openTagSpan
     );
   }
 
-  const unsupportedChild = childElements.find(child => child.name !== 'step');
+  const supportedChildren = new Set(['step', 'wait', 'wait-until', 'wait-for']);
+  const unsupportedChild = childElements.find(
+    child => !supportedChildren.has(child.name)
+  );
   if (unsupportedChild !== undefined) {
     if (unsupportedChild.name === 'approval') {
       failValidation(
@@ -4474,14 +4481,16 @@ function validateParallel(
     failValidation(
       document,
       'WOML_PARALLEL_CHILD_UNSUPPORTED',
-      `<parallel id="${id}"> accepts direct <step> children only in this profile; found <${unsupportedChild.name}>.`,
+      `<parallel id="${id}"> accepts direct <step>, <wait>, <wait-until>, and <wait-for> children; found <${unsupportedChild.name}>.`,
       unsupportedChild.openTagSpan,
       'Move branching around the parallel group, or wait for a future explicit lane/sequence construct.'
     );
   }
 
   const children = childElements.map(child =>
-    validateStep(document, child, registry, context.shadowedServices)
+    child.name === 'step'
+      ? validateStep(document, child, registry, context.shadowedServices)
+      : validateWait(document, child, registry, context)
   );
   const concurrencyAttribute = parallel.attributes.concurrency;
   let concurrency = children.length;
@@ -5796,7 +5805,10 @@ function lowerBranch(branch: ValidatedBranch): LoweredFlowFragment {
   };
 }
 
-function lowerParallel(parallel: ValidatedParallel): LoweredFlowFragment {
+function lowerParallelFragments(
+  parallel: ValidatedParallel,
+  childFragments: readonly LoweredFlowFragment[]
+): LoweredFlowFragment {
   const startId = `__woml_parallel__${parallel.id}__start`;
   const start: CompiledWorkflowNode = {
     id: startId,
@@ -5810,7 +5822,6 @@ function lowerParallel(parallel: ValidatedParallel): LoweredFlowFragment {
     },
     ...(parallel.metadata === undefined ? {} : { metadata: parallel.metadata }),
   };
-  const childFragments = parallel.children.map(lowerStep);
   const join: CompiledWorkflowNode = {
     id: parallel.id,
     handler: 'engine.parallel-join',
@@ -5845,6 +5856,18 @@ function lowerParallel(parallel: ValidatedParallel): LoweredFlowFragment {
       ...joinEdges,
     ],
   };
+}
+
+function lowerParallel(parallel: ValidatedParallel): LoweredFlowFragment {
+  return lowerParallelFragments(
+    parallel,
+    parallel.children.map(child => {
+      if (child.kind !== 'step') {
+        throw new Error('Legacy parallel lowering cannot contain a durable wait.');
+      }
+      return lowerStep(child);
+    })
+  );
 }
 
 function approvalRouteEdge(
@@ -6085,13 +6108,17 @@ function lowerParallelV13(
   visibleBefore: ReadonlySet<string>,
   state: V13LoweringState
 ): LoweredV13FlowFragment {
-  for (const child of parallel.children) {
-    state.contextVisibility.push({
-      nodeId: child.id,
-      stepIds: [...visibleBefore],
-    });
-  }
-  const fragment = lowerParallel(parallel);
+  const childFragments = parallel.children.map(child => {
+    if (child.kind === 'step') {
+      state.contextVisibility.push({
+        nodeId: child.id,
+        stepIds: [...visibleBefore],
+      });
+      return lowerStep(child);
+    }
+    return lowerWaitV17(child, visibleBefore, state);
+  });
+  const fragment = lowerParallelFragments(parallel, childFragments);
   return {
     ...fragment,
     visibleAfter: new Set([
@@ -7912,23 +7939,6 @@ function compileValidatedWoml(
     usesModelV14 ||
     flow.firstFork !== undefined ||
     flow.firstControlChoice !== undefined;
-  if (modules.length > 0 && moduleRuntime === undefined) {
-    failCompile(
-      document,
-      'WOML_MODULE_EXECUTION_UNAVAILABLE',
-      'The MS2 frontend can compile imported modules, but runtime module loading begins in MS3.',
-      modules[0].element.openTagSpan,
-      'Use `woml check <file>` to inspect the immutable module graph without running it.'
-    );
-  }
-  if (modules.length === 0 && moduleRuntime !== undefined) {
-    failCompile(
-      document,
-      'WOML_MODULE_RUNTIME_UNEXPECTED',
-      'A module runtime profile cannot be attached to a workflow with no <module> declarations.',
-      workflow.openTagSpan
-    );
-  }
   if (triggers.length === 0 && flow.firstApproval !== undefined) {
     failCompile(
       document,
@@ -7945,6 +7955,23 @@ function compileValidatedWoml(
       'A call-only workflow cannot contain a durable wait until suspended synchronous workflow calls are implemented in DW6.',
       flow.firstWait.openTagSpan,
       'Add a trigger and start this workflow asynchronously, or keep the called workflow terminal until DW6.'
+    );
+  }
+  if (modules.length > 0 && moduleRuntime === undefined) {
+    failCompile(
+      document,
+      'WOML_MODULE_EXECUTION_UNAVAILABLE',
+      'The MS2 frontend can compile imported modules, but runtime module loading begins in MS3.',
+      modules[0].element.openTagSpan,
+      'Use `woml check <file>` to inspect the immutable module graph without running it.'
+    );
+  }
+  if (modules.length === 0 && moduleRuntime !== undefined) {
+    failCompile(
+      document,
+      'WOML_MODULE_RUNTIME_UNEXPECTED',
+      'A module runtime profile cannot be attached to a workflow with no <module> declarations.',
+      workflow.openTagSpan
     );
   }
   if (moduleRuntime !== undefined) {

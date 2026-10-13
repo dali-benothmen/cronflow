@@ -72,6 +72,7 @@ import {
   cancelRunWithRust,
   inspectRunPresentationWithRust,
   inspectRunV2WithRust,
+  inspectWaitsV1WithRust,
   listRunPresentationsWithRust,
   listRunsWithRust,
   observeRuntimeWithRust,
@@ -95,6 +96,7 @@ import {
   type PublicRunStatus,
   type RustRunCancellationResultV1,
   type RustRunInspectionV2,
+  type RustWaitInspectionV1,
   type RustRunListV1,
   type ScheduleProgressV1,
   type TriggerProgressV1,
@@ -1044,7 +1046,8 @@ function formatArtifactInspection(
 function formatRunInspection(
   inspection: RustRunInspectionV2,
   artifacts?: readonly RustArtifactInspectionV1[],
-  artifactsTruncated = false
+  artifactsTruncated = false,
+  waitInspection?: RustWaitInspectionV1
 ): string {
   const lines = [
     `Run: ${inspection.runId}`,
@@ -1080,6 +1083,26 @@ function formatRunInspection(
       lines.push(
         `  ${loop.forEachId}: ${loop.status} (${progress}, concurrency ${loop.concurrency}${failure})`
       );
+    }
+  }
+  if (waitInspection !== undefined && waitInspection.waits.length > 0) {
+    lines.push('Durable waits:');
+    for (const wait of waitInspection.waits) {
+      const signals =
+        wait.signals === undefined || wait.signals.length === 0
+          ? ''
+          : ` · accepts ${wait.signals.join(', ')}`;
+      const deadline =
+        wait.deadline === undefined ? '' : ` · deadline ${wait.deadline}`;
+      lines.push(
+        `  ${wait.waitId}: ${wait.status} · ${wait.name}${signals}${deadline}`
+      );
+    }
+    if (waitInspection.pendingWaits > 0) {
+      lines.push(
+        `Pending waits: ${waitInspection.pendingWaits}${waitInspection.oldestPendingWaitAgeMs === undefined ? '' : ` · oldest ${waitInspection.oldestPendingWaitAgeMs} ms`}`
+      );
+      lines.push(`Cancel safely: woml cancel ${inspection.runId}`);
     }
   }
   if (inspection.hooks.length > 0) {
@@ -5502,6 +5525,19 @@ async function activateWorkflows(
       foregroundPresentation.verbose(
         `Deployment activation ${currentActivationId.slice(7, 19)} is ready with ${productionSources.length} workflow(s).`
       );
+      if (signalIngressToken !== undefined) {
+        const signalBaseUrl = `http://${args.host}:${args.port}`;
+        io.stderr(
+          [
+            '',
+            'Durable signal ingress is enabled.',
+            `Endpoint: POST ${signalBaseUrl}/v1/signals/<signal>`,
+            'Use the stored WOML_SIGNAL_TOKEN without printing it:',
+            `curl -X POST "${signalBaseUrl}/v1/signals/<signal>" -H "Authorization: Bearer \$WOML_SIGNAL_TOKEN" -H "Content-Type: application/json" -d '{"runId":"<run-id>","waitId":"<wait-id>","correlation":"<correlation>","idempotencyKey":"<unique-key>","payload":{}}'`,
+            '',
+          ].join('\n')
+        );
+      }
       const automaticArtifactAuthority =
         args.runtimeCapabilities?.artifacts === undefined
           ? undefined
@@ -6703,10 +6739,20 @@ async function runCliUnprofiled(
         get.runId,
         { nativeCorePath: dependencies.nativeCorePath }
       );
-      const publicResult = {
+      const waitInspection = inspectWaitsV1WithRust(
+        get.statePath,
+        get.runId,
+        { nativeCorePath: dependencies.nativeCorePath }
+      );
+      const publicResult = waitInspection.waits.length === 0 ? {
         ...result,
         profile: 'woml.run-inspection/v7' as const,
         artifacts: artifactInspection,
+      } : {
+        ...result,
+        profile: 'woml.run-inspection/v8' as const,
+        artifacts: artifactInspection,
+        durableWaits: waitInspection,
       };
       io.stdout(
         get.json
@@ -6714,7 +6760,8 @@ async function runCliUnprofiled(
           : formatRunInspection(
               result,
               artifactInspection.artifacts,
-              artifactInspection.truncated
+              artifactInspection.truncated,
+              waitInspection
             )
       );
       return 0;

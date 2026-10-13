@@ -6,10 +6,10 @@ use sha2::{Digest, Sha256};
 use thiserror::Error;
 
 use crate::event::{
-  is_definition_hash, ApprovalTimeoutPolicy, AttemptFailureKind, ForkBranchOutcome,
-  ForkJoinOutcome, ParallelFailurePolicy, ParallelGroupOutcome, RunEventPayload, RunFailedData,
-  RunFailedDataV2, RunFailedDataV3, RunFailedDataV4, RunFailedDataV5, RunOutcomeDecidedData,
-  RunStartedData,
+  is_definition_hash, ApprovalTimeoutPolicy, AttemptFailureKind, DurableWaitTimeoutBehavior,
+  ForkBranchOutcome, ForkJoinOutcome, ParallelFailurePolicy, ParallelGroupOutcome, RunEventPayload,
+  RunFailedData, RunFailedDataV2, RunFailedDataV3, RunFailedDataV4, RunFailedDataV5,
+  RunOutcomeDecidedData, RunStartedData,
 };
 use crate::{
   model::{EdgeCondition, ValueExpression},
@@ -2254,11 +2254,48 @@ pub(crate) fn validate_event_history_against_definition(
             data.wait_id
           ));
         }
+        if workflow.parallel_group_for_child(&data.node_id).is_some() {
+          child_states.insert(data.node_id.clone(), ParallelChildState::Active);
+        }
       }
-      RunEventPayload::ExternalSignalReceived(_)
-      | RunEventPayload::WaitSatisfied(_)
-      | RunEventPayload::WaitTimedOut(_)
-      | RunEventPayload::WaitCancelled(_) => {}
+      RunEventPayload::WaitSatisfied(data) => {
+        if let Some(node_id) = workflow
+          .durable_wait(&data.wait_id)
+          .map(|wait| wait.node_id())
+          .filter(|node_id| workflow.parallel_group_for_child(node_id).is_some())
+        {
+          child_states.insert(node_id.to_string(), ParallelChildState::Succeeded);
+        }
+      }
+      RunEventPayload::WaitTimedOut(data) => {
+        if let Some(node_id) = workflow
+          .durable_wait(&data.wait_id)
+          .map(|wait| wait.node_id())
+          .filter(|node_id| workflow.parallel_group_for_child(node_id).is_some())
+        {
+          child_states.insert(
+            node_id.to_string(),
+            if data.behavior == DurableWaitTimeoutBehavior::Continue {
+              ParallelChildState::Succeeded
+            } else {
+              ParallelChildState::Failed(AttemptFailureKind::ServiceFailed)
+            },
+          );
+        }
+      }
+      RunEventPayload::WaitCancelled(data) => {
+        if let Some(node_id) = workflow
+          .durable_wait(&data.wait_id)
+          .map(|wait| wait.node_id())
+          .filter(|node_id| workflow.parallel_group_for_child(node_id).is_some())
+        {
+          child_states.insert(
+            node_id.to_string(),
+            ParallelChildState::Failed(AttemptFailureKind::InvocationCancelled),
+          );
+        }
+      }
+      RunEventPayload::ExternalSignalReceived(_) => {}
       RunEventPayload::RunSucceeded(_) => {
         let projection =
           crate::fold_events(&events[..=index]).map_err(|error| error.to_string())?;
