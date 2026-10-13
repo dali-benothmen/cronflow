@@ -32,11 +32,22 @@ use woml_engine::{
   RetentionError, RetentionPolicyV1, RunFailure, RunPresentationError, RunStatus,
   RuntimeExecutionError, RuntimeExecutionOptions, RuntimeModuleArtifact, RuntimePolicyProgress,
   RuntimePolicyProgressReporter, ScheduleProgress, ScheduleProgressReporter,
-  ScriptHostProcessOptions, SystemEngineClock, TriggerAdmissionRequest, TriggerProgress,
-  TriggerProgressReporter, WebhookDefinitionRegistration, WebhookRuntimeError, WomlWebhookServer,
-  WomlWebhookServerConfig, WorkflowCallProgress, WorkflowCallProgressReporter,
+  ScriptHostProcessOptions, SystemEngineClock, TimerWaitSettlement, TriggerAdmissionRequest,
+  TriggerProgress, TriggerProgressReporter, WebhookDefinitionRegistration, WebhookRuntimeError,
+  WomlWebhookServer, WomlWebhookServerConfig, WorkflowCallProgress, WorkflowCallProgressReporter,
   WorkflowCallRunRelations,
 };
+
+#[derive(Serialize)]
+#[serde(tag = "status", rename_all = "snake_case")]
+enum NativeTimerWaitSettlement {
+  Resolved,
+  AlreadyResolved,
+  NotDue {
+    #[serde(rename = "deadline")]
+    deadline: DateTime<Utc>,
+  },
+}
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -2593,6 +2604,27 @@ pub fn recover_woml_runs(event_store_path: String) -> napi::Result<String> {
     .map_err(|error| napi::Error::from_reason(error.to_string()))?;
   serde_json::to_string(&report)
     .map_err(|error| napi::Error::from_reason(format!("Could not encode recovery report: {error}")))
+}
+
+#[napi]
+pub fn settle_woml_timer_wait(
+  event_store_path: String,
+  run_id: String,
+  wait_id: String,
+) -> napi::Result<String> {
+  let mut store = DurableEventStore::open(PathBuf::from(event_store_path))
+    .map_err(|error| native_execution_error(RuntimeExecutionError::DurableStore(error)))?;
+  let settlement = match store
+    .settle_timer_wait(&run_id, &wait_id, Utc::now())
+    .map_err(|error| native_execution_error(RuntimeExecutionError::DurableStore(error)))?
+  {
+    TimerWaitSettlement::Resolved { .. } => NativeTimerWaitSettlement::Resolved,
+    TimerWaitSettlement::AlreadyResolved { .. } => NativeTimerWaitSettlement::AlreadyResolved,
+    TimerWaitSettlement::NotDue { deadline } => NativeTimerWaitSettlement::NotDue { deadline },
+  };
+  serde_json::to_string(&settlement).map_err(|error| {
+    napi::Error::from_reason(format!("Could not encode WOML timer settlement: {error}"))
+  })
 }
 
 #[napi(ts_return_type = "Promise<string>")]

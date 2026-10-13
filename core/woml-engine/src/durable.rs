@@ -59,7 +59,7 @@ use crate::{
   RUN_EVENT_SCHEMA_VERSION_V8, RUN_EVENT_SCHEMA_VERSION_V9,
 };
 
-pub const DURABLE_STORE_SCHEMA_VERSION: u32 = 14;
+pub const DURABLE_STORE_SCHEMA_VERSION: u32 = 15;
 const STORE_SCHEMA_VERSION_V1: &str = "1";
 const STORE_SCHEMA_VERSION_V2: &str = "2";
 const STORE_SCHEMA_VERSION_V3: &str = "3";
@@ -74,6 +74,7 @@ const STORE_SCHEMA_VERSION_V11: &str = "11";
 const STORE_SCHEMA_VERSION_V12: &str = "12";
 const STORE_SCHEMA_VERSION_V13: &str = "13";
 const STORE_SCHEMA_VERSION_V14: &str = "14";
+const STORE_SCHEMA_VERSION_V15: &str = "15";
 const DEFAULT_APPROVAL_CREDENTIAL_LIFETIME_HOURS: i64 = 24;
 
 const CREATE_RUN_SUMMARY_SCHEMA_V11: &str = r#"
@@ -244,6 +245,64 @@ CREATE TABLE IF NOT EXISTS woml_last_verified_backup (
   backup_id TEXT NOT NULL,
   completed_at TEXT NOT NULL,
   verified INTEGER NOT NULL CHECK (verified = 1)
+);
+"#;
+
+const CREATE_DURABLE_WAIT_SCHEMA_V15: &str = r#"
+CREATE TABLE IF NOT EXISTS woml_durable_waits (
+  run_id TEXT NOT NULL,
+  wait_id TEXT NOT NULL,
+  iteration_identity TEXT NOT NULL DEFAULT '',
+  node_id TEXT NOT NULL,
+  kind TEXT NOT NULL CHECK (kind IN ('duration', 'until', 'signal')),
+  registered_at TEXT NOT NULL,
+  deadline TEXT,
+  signals_json TEXT,
+  correlation_digest TEXT,
+  state TEXT NOT NULL CHECK (state IN ('registered', 'satisfied', 'timed_out', 'cancelled')),
+  resolution_event_id TEXT UNIQUE,
+  resolved_at TEXT,
+  PRIMARY KEY (run_id, wait_id, iteration_identity),
+  FOREIGN KEY (run_id) REFERENCES woml_runs(run_id),
+  CHECK (
+    (state = 'registered' AND resolution_event_id IS NULL AND resolved_at IS NULL)
+    OR
+    (state != 'registered' AND resolution_event_id IS NOT NULL AND resolved_at IS NOT NULL)
+  )
+);
+
+CREATE INDEX IF NOT EXISTS woml_durable_waits_due
+  ON woml_durable_waits(state, deadline, run_id, wait_id, iteration_identity);
+
+CREATE INDEX IF NOT EXISTS woml_durable_waits_active_target
+  ON woml_durable_waits(run_id, wait_id, state, iteration_identity);
+
+CREATE TABLE IF NOT EXISTS woml_external_signals (
+  signal_id TEXT PRIMARY KEY,
+  run_id TEXT NOT NULL,
+  wait_id TEXT NOT NULL,
+  iteration_identity TEXT NOT NULL DEFAULT '',
+  signal TEXT NOT NULL,
+  received_at TEXT NOT NULL,
+  idempotency_digest TEXT NOT NULL,
+  request_digest TEXT NOT NULL,
+  correlation_digest TEXT NOT NULL,
+  payload_json TEXT NOT NULL,
+  authentication_class TEXT NOT NULL,
+  consumed_at TEXT,
+  UNIQUE (run_id, wait_id, iteration_identity, signal_id),
+  FOREIGN KEY (run_id) REFERENCES woml_runs(run_id)
+);
+
+CREATE INDEX IF NOT EXISTS woml_external_signals_target
+  ON woml_external_signals(run_id, wait_id, iteration_identity, received_at, signal_id);
+
+CREATE TABLE IF NOT EXISTS woml_signal_idempotency (
+  idempotency_digest TEXT PRIMARY KEY,
+  request_digest TEXT NOT NULL,
+  signal_id TEXT NOT NULL UNIQUE,
+  created_at TEXT NOT NULL,
+  FOREIGN KEY (signal_id) REFERENCES woml_external_signals(signal_id)
 );
 "#;
 
@@ -1277,6 +1336,28 @@ pub struct SchedulerClaimV1 {
   pub expires_at: DateTime<Utc>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DurableWaitRecordV1 {
+  pub run_id: String,
+  pub wait_id: String,
+  pub node_id: String,
+  pub kind: crate::DurableWaitKind,
+  pub registered_at: DateTime<Utc>,
+  #[serde(skip_serializing_if = "Option::is_none")]
+  pub deadline: Option<DateTime<Utc>>,
+  pub state: String,
+  #[serde(skip_serializing_if = "Option::is_none")]
+  pub resolved_at: Option<DateTime<Utc>>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum TimerWaitSettlement {
+  NotDue { deadline: DateTime<Utc> },
+  Resolved { projection: RunProjection },
+  AlreadyResolved { projection: RunProjection },
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum PolicyClaimWaitReason {
@@ -1893,6 +1974,23 @@ fn migrate_store_v13_to_v14(connection: &mut Connection) -> Result<(), DurableSt
   Ok(())
 }
 
+fn migrate_store_v14_to_v15(connection: &mut Connection) -> Result<(), DurableStoreError> {
+  let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+  transaction.execute_batch(CREATE_DURABLE_WAIT_SCHEMA_V15)?;
+  validate_store_v15_schema(&transaction)?;
+  let changed = transaction.execute(
+    "UPDATE woml_store_metadata SET value = ?1 WHERE key = 'schema_version' AND value = ?2",
+    [STORE_SCHEMA_VERSION_V15, STORE_SCHEMA_VERSION_V14],
+  )?;
+  if changed != 1 {
+    return Err(DurableStoreError::Contract(
+      "Store v14-to-v15 migration could not update the schema version atomically.".to_string(),
+    ));
+  }
+  transaction.commit()?;
+  Ok(())
+}
+
 fn validate_store_v2_schema(connection: &Connection) -> Result<(), DurableStoreError> {
   for (object_type, name) in [
     ("table", "woml_approval_tokens"),
@@ -2295,6 +2393,92 @@ fn validate_store_v14_schema(connection: &Connection) -> Result<(), DurableStore
   Ok(())
 }
 
+fn validate_store_v15_schema(connection: &Connection) -> Result<(), DurableStoreError> {
+  validate_store_v14_schema(connection)?;
+  for (name, expected_columns) in [
+    (
+      "woml_durable_waits",
+      &[
+        "run_id",
+        "wait_id",
+        "iteration_identity",
+        "node_id",
+        "kind",
+        "registered_at",
+        "deadline",
+        "signals_json",
+        "correlation_digest",
+        "state",
+        "resolution_event_id",
+        "resolved_at",
+      ][..],
+    ),
+    (
+      "woml_external_signals",
+      &[
+        "signal_id",
+        "run_id",
+        "wait_id",
+        "iteration_identity",
+        "signal",
+        "received_at",
+        "idempotency_digest",
+        "request_digest",
+        "correlation_digest",
+        "payload_json",
+        "authentication_class",
+        "consumed_at",
+      ][..],
+    ),
+    (
+      "woml_signal_idempotency",
+      &[
+        "idempotency_digest",
+        "request_digest",
+        "signal_id",
+        "created_at",
+      ][..],
+    ),
+  ] {
+    let exists: bool = connection.query_row(
+      "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?1)",
+      [name],
+      |row| row.get(0),
+    )?;
+    if !exists {
+      return Err(DurableStoreError::Contract(format!(
+        "Store v15 is missing required table {name:?}."
+      )));
+    }
+    let mut statement = connection.prepare(&format!("PRAGMA table_info({name})"))?;
+    let columns = statement
+      .query_map([], |row| row.get::<_, String>(1))?
+      .collect::<Result<Vec<_>, _>>()?;
+    if columns != expected_columns {
+      return Err(DurableStoreError::Contract(format!(
+        "Store v15 {name} columns do not match the frozen schema: expected {expected_columns:?}, found {columns:?}."
+      )));
+    }
+  }
+  for name in [
+    "woml_durable_waits_due",
+    "woml_durable_waits_active_target",
+    "woml_external_signals_target",
+  ] {
+    let exists: bool = connection.query_row(
+      "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type = 'index' AND name = ?1)",
+      [name],
+      |row| row.get(0),
+    )?;
+    if !exists {
+      return Err(DurableStoreError::Contract(format!(
+        "Store v15 is missing required index {name:?}."
+      )));
+    }
+  }
+  Ok(())
+}
+
 fn runtime_policy_indexes_need_rebuild(connection: &Connection) -> Result<bool, DurableStoreError> {
   let count = |sql: &str| -> Result<i64, DurableStoreError> {
     Ok(connection.query_row(sql, [], |row| row.get(0))?)
@@ -2350,7 +2534,7 @@ impl DurableEventStore {
       [],
       |row| row.get(0),
     )?;
-    if version != STORE_SCHEMA_VERSION_V14 {
+    if version != STORE_SCHEMA_VERSION_V15 {
       return Err(DurableStoreError::UnsupportedStoreVersion(version));
     }
     if let Ok(metadata) = std::fs::metadata(path) {
@@ -2383,6 +2567,7 @@ impl DurableEventStore {
       )
       .optional()?;
     match version.as_deref() {
+      Some(STORE_SCHEMA_VERSION_V15) => validate_store_v15_schema(&connection)?,
       Some(STORE_SCHEMA_VERSION_V14) => validate_store_v14_schema(&connection)?,
       Some(STORE_SCHEMA_VERSION_V13) => validate_store_v13_schema(&connection)?,
       Some(STORE_SCHEMA_VERSION_V12) => validate_store_v12_schema(&connection)?,
@@ -2510,7 +2695,15 @@ impl DurableEventStore {
     if current_version == STORE_SCHEMA_VERSION_V13 {
       migrate_store_v13_to_v14(&mut connection)?;
     }
-    validate_store_v14_schema(&connection)?;
+    let current_version: String = connection.query_row(
+      "SELECT value FROM woml_store_metadata WHERE key = 'schema_version'",
+      [],
+      |row| row.get(0),
+    )?;
+    if current_version == STORE_SCHEMA_VERSION_V14 {
+      migrate_store_v14_to_v15(&mut connection)?;
+    }
+    validate_store_v15_schema(&connection)?;
     if runtime_policy_indexes_need_rebuild(&connection)? {
       let recovery = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
       rebuild_runtime_policy_indexes(&recovery)?;
@@ -2804,7 +2997,7 @@ impl DurableEventStore {
         "The durable WOML store failed its integrity audit: {result}."
       )));
     }
-    validate_store_v14_schema(&self.connection)
+    validate_store_v15_schema(&self.connection)
   }
 
   pub fn runtime_owner(&self) -> Result<Option<RuntimeOwnerLease>, DurableStoreError> {
@@ -4145,6 +4338,7 @@ impl DurableEventStore {
         | crate::RUN_EVENT_SCHEMA_VERSION_V13
         | crate::RUN_EVENT_SCHEMA_VERSION_V14
         | crate::RUN_EVENT_SCHEMA_VERSION_V15
+        | crate::RUN_EVENT_SCHEMA_VERSION_V16
     ) {
       expand_model_v11_payload(&workflow, &run_id, payload)?
     } else {
@@ -4253,6 +4447,7 @@ impl DurableEventStore {
           | crate::RUN_EVENT_SCHEMA_VERSION_V13
           | crate::RUN_EVENT_SCHEMA_VERSION_V14
           | crate::RUN_EVENT_SCHEMA_VERSION_V15
+          | crate::RUN_EVENT_SCHEMA_VERSION_V16
       ) {
         expand_model_v11_payload(&workflow, run_id, payload)?
       } else {
@@ -5664,6 +5859,7 @@ impl DurableEventStore {
         | crate::COMPILED_MODEL_SCHEMA_VERSION_V14
         | crate::COMPILED_MODEL_SCHEMA_VERSION_V15
         | crate::COMPILED_MODEL_SCHEMA_VERSION_V16
+        | crate::COMPILED_MODEL_SCHEMA_VERSION_V17
     ) {
       return Ok(result(
         RunCancellationStatus::Rejected,
@@ -5760,6 +5956,7 @@ impl DurableEventStore {
         | crate::COMPILED_MODEL_SCHEMA_VERSION_V14
         | crate::COMPILED_MODEL_SCHEMA_VERSION_V15
         | crate::COMPILED_MODEL_SCHEMA_VERSION_V16
+        | crate::COMPILED_MODEL_SCHEMA_VERSION_V17
     ) {
       return Err(DurableStoreError::Contract(
         "Business-outcome authority requires compiled Model v11+.".to_string(),
@@ -6082,6 +6279,7 @@ impl DurableEventStore {
         | crate::COMPILED_MODEL_SCHEMA_VERSION_V14
         | crate::COMPILED_MODEL_SCHEMA_VERSION_V15
         | crate::COMPILED_MODEL_SCHEMA_VERSION_V16
+        | crate::COMPILED_MODEL_SCHEMA_VERSION_V17
     ) {
       return Err(DurableStoreError::Contract(
         "Run finalization authority requires compiled Model v11+.".to_string(),
@@ -6978,6 +7176,299 @@ impl DurableEventStore {
     ))
   }
 
+  pub fn register_durable_wait_atomically(
+    &mut self,
+    run_id: &str,
+    event_id: impl Into<String>,
+    occurred_at: DateTime<Utc>,
+    registration: crate::WaitRegisteredData,
+  ) -> Result<RunProjection, DurableStoreError> {
+    let transaction = self
+      .connection
+      .transaction_with_behavior(TransactionBehavior::Immediate)?;
+    ensure_run_exists(&transaction, run_id)?;
+    let mut events = load_events(&transaction, run_id)?;
+    let event_schema_version = events
+      .first()
+      .map(|event| event.event_schema_version)
+      .ok_or_else(|| {
+        DurableStoreError::Contract(
+          "A durable wait cannot be registered before run_started.".to_string(),
+        )
+      })?;
+    if event_schema_version != crate::RUN_EVENT_SCHEMA_VERSION_V16 {
+      return Err(DurableStoreError::Contract(
+        "Durable wait registration requires Event v16.".to_string(),
+      ));
+    }
+    let workflow = definition_for_run(&transaction, run_id)?;
+    let binding = run_binding_in_transaction(&transaction, run_id)?;
+    let payload = RunEventPayload::WaitRegistered(registration.clone());
+    validate_payload_against_definition(&workflow, &binding.definition_hash, &payload)
+      .map_err(DurableStoreError::Contract)?;
+    let event_id = event_id.into();
+    append_to_history(
+      &transaction,
+      &mut events,
+      run_id,
+      event_id,
+      occurred_at,
+      event_schema_version,
+      payload,
+    )?;
+    validate_event_history_against_definition(&workflow, &binding.definition_hash, &events)
+      .map_err(DurableStoreError::Contract)?;
+    let projection = fold_events(&events)?;
+    if projection.status != RunStatus::Waiting
+      || !matches!(
+        projection.durable_waits.get(&registration.wait_id),
+        Some(wait) if wait.status == crate::DurableWaitStatus::Registered
+      )
+    {
+      return Err(DurableStoreError::Contract(
+        "The wait registration did not produce the matching durable waiting state.".to_string(),
+      ));
+    }
+    let kind = match registration.kind {
+      crate::DurableWaitKind::Duration => "duration",
+      crate::DurableWaitKind::Until => "until",
+      crate::DurableWaitKind::Signal => "signal",
+    };
+    let signals_json = registration
+      .signals
+      .as_ref()
+      .map(serde_json::to_string)
+      .transpose()?;
+    transaction.execute(
+      "INSERT INTO woml_durable_waits(
+         run_id, wait_id, iteration_identity, node_id, kind, registered_at,
+         deadline, signals_json, correlation_digest, state
+       ) VALUES (?1, ?2, '', ?3, ?4, ?5, ?6, ?7, ?8, 'registered')",
+      params![
+        run_id,
+        registration.wait_id,
+        registration.node_id,
+        kind,
+        registration.registered_at.to_rfc3339(),
+        registration.deadline.map(|value| value.to_rfc3339()),
+        signals_json,
+        registration.correlation_digest,
+      ],
+    )?;
+    transaction.commit()?;
+    Ok(projection)
+  }
+
+  pub fn due_timer_waits(
+    &self,
+    now: DateTime<Utc>,
+    limit: usize,
+  ) -> Result<Vec<DurableWaitRecordV1>, DurableStoreError> {
+    self.query_due_timer_waits(now, limit, None)
+  }
+
+  pub(crate) fn due_timer_waits_for_workflows(
+    &self,
+    now: DateTime<Utc>,
+    limit: usize,
+    workflow_ids: &HashSet<String>,
+  ) -> Result<Vec<DurableWaitRecordV1>, DurableStoreError> {
+    if workflow_ids.is_empty() {
+      return Ok(Vec::new());
+    }
+    self.query_due_timer_waits(now, limit, Some(workflow_ids))
+  }
+
+  fn query_due_timer_waits(
+    &self,
+    now: DateTime<Utc>,
+    limit: usize,
+    workflow_ids: Option<&HashSet<String>>,
+  ) -> Result<Vec<DurableWaitRecordV1>, DurableStoreError> {
+    if limit == 0 || limit > 1_000 {
+      return Err(DurableStoreError::Contract(
+        "Due-wait scans require a limit between 1 and 1000.".to_string(),
+      ));
+    }
+    let mut parameters = vec![rusqlite::types::Value::Text(now.to_rfc3339())];
+    let workflow_filter = workflow_ids.map(|workflow_ids| {
+      let mut workflow_ids = workflow_ids.iter().cloned().collect::<Vec<_>>();
+      workflow_ids.sort();
+      let placeholders = workflow_ids
+        .iter()
+        .map(|workflow_id| {
+          parameters.push(rusqlite::types::Value::Text(workflow_id.clone()));
+          format!("?{}", parameters.len())
+        })
+        .collect::<Vec<_>>()
+        .join(", ");
+      format!(
+        " AND EXISTS (
+           SELECT 1 FROM woml_runs r
+           WHERE r.run_id = w.run_id AND r.workflow_id IN ({placeholders})
+         )"
+      )
+    });
+    parameters.push(rusqlite::types::Value::Integer(
+      i64::try_from(limit).unwrap_or(1_000),
+    ));
+    let limit_parameter = parameters.len();
+    let query = format!(
+      "SELECT w.run_id, w.wait_id, w.node_id, w.kind, w.registered_at,
+              w.deadline, w.state, w.resolved_at
+       FROM woml_durable_waits w
+       WHERE w.state = 'registered'
+         AND w.kind IN ('duration', 'until')
+         AND w.deadline <= ?1{}
+       ORDER BY w.deadline, w.run_id, w.wait_id
+       LIMIT ?{limit_parameter}",
+      workflow_filter.as_deref().unwrap_or_default()
+    );
+    let mut statement = self.connection.prepare(&query)?;
+    let records = statement
+      .query_map(rusqlite::params_from_iter(parameters.iter()), |row| {
+        let kind: String = row.get(3)?;
+        let registered_at: String = row.get(4)?;
+        let deadline: Option<String> = row.get(5)?;
+        let resolved_at: Option<String> = row.get(7)?;
+        Ok((
+          row.get::<_, String>(0)?,
+          row.get::<_, String>(1)?,
+          row.get::<_, String>(2)?,
+          kind,
+          registered_at,
+          deadline,
+          row.get::<_, String>(6)?,
+          resolved_at,
+        ))
+      })?
+      .map(|row| {
+        let (run_id, wait_id, node_id, kind, registered_at, deadline, state, resolved_at) = row?;
+        Ok(DurableWaitRecordV1 {
+          run_id,
+          wait_id,
+          node_id,
+          kind: match kind.as_str() {
+            "duration" => crate::DurableWaitKind::Duration,
+            "until" => crate::DurableWaitKind::Until,
+            "signal" => crate::DurableWaitKind::Signal,
+            _ => {
+              return Err(DurableStoreError::Contract(
+                "Stored durable wait has an invalid kind.".to_string(),
+              ))
+            }
+          },
+          registered_at: parse_stored_timestamp(&registered_at)?,
+          deadline: deadline
+            .as_deref()
+            .map(parse_stored_timestamp)
+            .transpose()?,
+          state,
+          resolved_at: resolved_at
+            .as_deref()
+            .map(parse_stored_timestamp)
+            .transpose()?,
+        })
+      })
+      .collect();
+    records
+  }
+
+  pub fn settle_timer_wait(
+    &mut self,
+    run_id: &str,
+    wait_id: &str,
+    now: DateTime<Utc>,
+  ) -> Result<TimerWaitSettlement, DurableStoreError> {
+    let transaction = self
+      .connection
+      .transaction_with_behavior(TransactionBehavior::Immediate)?;
+    ensure_run_exists(&transaction, run_id)?;
+    let row: Option<(String, String, Option<String>, String)> = transaction
+      .query_row(
+        "SELECT node_id, kind, deadline, state FROM woml_durable_waits
+         WHERE run_id = ?1 AND wait_id = ?2 AND iteration_identity = ''",
+        params![run_id, wait_id],
+        |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+      )
+      .optional()?;
+    let Some((node_id, kind, deadline, state)) = row else {
+      return Err(DurableStoreError::Contract(
+        "Timer settlement references an unknown durable wait.".to_string(),
+      ));
+    };
+    let events = load_events(&transaction, run_id)?;
+    if state != "registered" {
+      return Ok(TimerWaitSettlement::AlreadyResolved {
+        projection: fold_events(&events)?,
+      });
+    }
+    if !matches!(kind.as_str(), "duration" | "until") {
+      return Err(DurableStoreError::Contract(
+        "Timer settlement requires a duration or until wait.".to_string(),
+      ));
+    }
+    let deadline = deadline
+      .as_deref()
+      .map(parse_stored_timestamp)
+      .transpose()?
+      .ok_or_else(|| DurableStoreError::Contract("Timer wait has no deadline.".to_string()))?;
+    if now < deadline {
+      return Ok(TimerWaitSettlement::NotDue { deadline });
+    }
+    let workflow = definition_for_run(&transaction, run_id)?;
+    let binding = run_binding_in_transaction(&transaction, run_id)?;
+    let mut events = events;
+    let event_schema_version = events
+      .first()
+      .map(|event| event.event_schema_version)
+      .ok_or_else(|| DurableStoreError::Contract("Timer wait has no run history.".to_string()))?;
+    let event_id = generated_event_id();
+    let result = serde_json::json!({
+      "status": "elapsed",
+      "scheduledAt": deadline.to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
+      "resumedAt": now.to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
+    });
+    let payload = RunEventPayload::WaitSatisfied(crate::WaitSatisfiedData {
+      wait_id: wait_id.to_string(),
+      winner: crate::DurableWaitWinner::Timer,
+      result,
+      resolved_at: now,
+    });
+    validate_payload_against_definition(&workflow, &binding.definition_hash, &payload)
+      .map_err(DurableStoreError::Contract)?;
+    append_to_history(
+      &transaction,
+      &mut events,
+      run_id,
+      event_id.clone(),
+      now,
+      event_schema_version,
+      payload,
+    )?;
+    validate_event_history_against_definition(&workflow, &binding.definition_hash, &events)
+      .map_err(DurableStoreError::Contract)?;
+    let changed = transaction.execute(
+      "UPDATE woml_durable_waits
+       SET state = 'satisfied', resolution_event_id = ?1, resolved_at = ?2
+       WHERE run_id = ?3 AND wait_id = ?4 AND iteration_identity = '' AND state = 'registered'",
+      params![event_id, now.to_rfc3339(), run_id, wait_id],
+    )?;
+    if changed != 1 {
+      return Ok(TimerWaitSettlement::AlreadyResolved {
+        projection: fold_events(&load_events(&transaction, run_id)?)?,
+      });
+    }
+    let projection = fold_events(&events)?;
+    if projection.status != RunStatus::Running || !projection.context.steps.contains_key(&node_id) {
+      return Err(DurableStoreError::Contract(
+        "Timer settlement did not publish the wait result into context.".to_string(),
+      ));
+    }
+    transaction.commit()?;
+    Ok(TimerWaitSettlement::Resolved { projection })
+  }
+
   pub fn resolve_human_approval(
     &mut self,
     token: &str,
@@ -7604,6 +8095,7 @@ impl DurableEventStore {
         | crate::RUN_EVENT_SCHEMA_VERSION_V13
         | crate::RUN_EVENT_SCHEMA_VERSION_V14
         | crate::RUN_EVENT_SCHEMA_VERSION_V15
+        | crate::RUN_EVENT_SCHEMA_VERSION_V16
     ) {
       let ambiguous_actions = projection
         .lifecycle_hooks
@@ -7973,6 +8465,7 @@ impl DurableEventStore {
             | crate::RUN_EVENT_SCHEMA_VERSION_V13
             | crate::RUN_EVENT_SCHEMA_VERSION_V14
             | crate::RUN_EVENT_SCHEMA_VERSION_V15
+            | crate::RUN_EVENT_SCHEMA_VERSION_V16
         ) {
           expand_model_v11_payload(&workflow, run_id, payload)?
         } else {
@@ -8026,6 +8519,7 @@ impl DurableEventStore {
           | crate::RUN_EVENT_SCHEMA_VERSION_V13
           | crate::RUN_EVENT_SCHEMA_VERSION_V14
           | crate::RUN_EVENT_SCHEMA_VERSION_V15
+          | crate::RUN_EVENT_SCHEMA_VERSION_V16
       ) {
         expand_model_v11_payload(&workflow, run_id, run_failure)?
       } else {
@@ -8243,6 +8737,7 @@ impl DurableEventStore {
           | crate::RUN_EVENT_SCHEMA_VERSION_V13
           | crate::RUN_EVENT_SCHEMA_VERSION_V14
           | crate::RUN_EVENT_SCHEMA_VERSION_V15
+          | crate::RUN_EVENT_SCHEMA_VERSION_V16
       ) {
         expand_model_v11_payload(&workflow, run_id, run_failure)?
       } else {
@@ -9678,6 +10173,7 @@ fn validate_trigger_occurrence_history(
           | RUN_EVENT_SCHEMA_VERSION_V13
           | RUN_EVENT_SCHEMA_VERSION_V14
           | crate::RUN_EVENT_SCHEMA_VERSION_V15
+          | crate::RUN_EVENT_SCHEMA_VERSION_V16
       ) && admission.definition_hash == occurrence.definition_hash
         && admission.trigger.id == occurrence.trigger_id
         && admission.trigger.handler == occurrence.trigger_handler
@@ -10268,6 +10764,7 @@ fn append_to_history_scoped_incremental(
       | crate::RUN_EVENT_SCHEMA_VERSION_V13
       | crate::RUN_EVENT_SCHEMA_VERSION_V14
       | crate::RUN_EVENT_SCHEMA_VERSION_V15
+      | crate::RUN_EVENT_SCHEMA_VERSION_V16
   ) && matches!(
     payload,
     RunEventPayload::RunSucceeded(_) | RunEventPayload::RunFailed(_)
@@ -10399,6 +10896,7 @@ fn append_to_history_scoped(
       | crate::RUN_EVENT_SCHEMA_VERSION_V13
       | crate::RUN_EVENT_SCHEMA_VERSION_V14
       | crate::RUN_EVENT_SCHEMA_VERSION_V15
+      | crate::RUN_EVENT_SCHEMA_VERSION_V16
   ) && matches!(
     payload,
     RunEventPayload::RunSucceeded(_) | RunEventPayload::RunFailed(_)
@@ -10558,8 +11056,10 @@ fn recover_open_for_each_failure(
   forced_failure: Option<AttemptFailure>,
 ) -> Result<Option<(usize, AttemptFailure)>, DurableStoreError> {
   let projection = fold_events(events)?;
-  if event_schema_version != crate::RUN_EVENT_SCHEMA_VERSION_V15
-    || projection.status == RunStatus::Cancelling
+  if !matches!(
+    event_schema_version,
+    crate::RUN_EVENT_SCHEMA_VERSION_V15 | crate::RUN_EVENT_SCHEMA_VERSION_V16
+  ) || projection.status == RunStatus::Cancelling
   {
     return Ok(None);
   }
@@ -11023,7 +11523,8 @@ fn attempt_run_failed_data(
     | crate::RUN_EVENT_SCHEMA_VERSION_V12
     | crate::RUN_EVENT_SCHEMA_VERSION_V13
     | crate::RUN_EVENT_SCHEMA_VERSION_V14
-    | crate::RUN_EVENT_SCHEMA_VERSION_V15 => RunFailedData::V2(RunFailedDataV2::Attempt {
+    | crate::RUN_EVENT_SCHEMA_VERSION_V15
+    | crate::RUN_EVENT_SCHEMA_VERSION_V16 => RunFailedData::V2(RunFailedDataV2::Attempt {
       node_id,
       attempt,
       invocation_id,
@@ -11180,6 +11681,7 @@ impl DurableDagEngine {
         | crate::RUN_EVENT_SCHEMA_VERSION_V13
         | crate::RUN_EVENT_SCHEMA_VERSION_V14
         | crate::RUN_EVENT_SCHEMA_VERSION_V15
+        | crate::RUN_EVENT_SCHEMA_VERSION_V16
     ) && matches!(
       &payload,
       RunEventPayload::RunSucceeded(_) | RunEventPayload::RunFailed(_)
@@ -11453,6 +11955,36 @@ impl DurableDagEngine {
         .store
         .request_approval_atomically(run_id, generated_event_id(), occurred_at, request)?;
     Ok(token)
+  }
+
+  pub fn register_durable_wait(
+    &mut self,
+    run_id: &str,
+    occurred_at: DateTime<Utc>,
+    registration: crate::WaitRegisteredData,
+  ) -> Result<RunProjection, DurableEngineError> {
+    let ready = self.ready_node_ids(run_id)?;
+    if !ready.iter().any(|node_id| node_id == &registration.node_id) {
+      return Err(DurableEngineError::Contract(format!(
+        "Durable wait {:?} is not ready to enter waiting state.",
+        registration.wait_id
+      )));
+    }
+    Ok(self.store.register_durable_wait_atomically(
+      run_id,
+      generated_event_id(),
+      occurred_at,
+      registration,
+    )?)
+  }
+
+  pub fn settle_timer_wait(
+    &mut self,
+    run_id: &str,
+    wait_id: &str,
+    now: DateTime<Utc>,
+  ) -> Result<TimerWaitSettlement, DurableEngineError> {
+    Ok(self.store.settle_timer_wait(run_id, wait_id, now)?)
   }
 
   pub fn reissue_waiting_approval_token(

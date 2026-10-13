@@ -266,6 +266,31 @@ pub struct ApprovalRequestProjection {
   pub status: ApprovalRequestStatus,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DurableWaitStatus {
+  Registered,
+  Satisfied {
+    winner: crate::DurableWaitWinner,
+  },
+  TimedOut {
+    behavior: crate::DurableWaitTimeoutBehavior,
+  },
+  Cancelled,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct DurableWaitProjection {
+  pub wait_id: String,
+  pub node_id: String,
+  pub kind: crate::DurableWaitKind,
+  pub registered_at: DateTime<Utc>,
+  pub deadline: Option<DateTime<Utc>>,
+  pub signals: Vec<String>,
+  pub correlation_digest: Option<String>,
+  pub status: DurableWaitStatus,
+  pub resolved_at: Option<DateTime<Utc>>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum NotificationDeliveryStatus {
   Requested,
@@ -387,6 +412,8 @@ pub struct RunProjection {
   pub forks: BTreeMap<String, ForkProjection>,
   pub for_each: BTreeMap<String, ForEachProjection>,
   pub approval_requests: BTreeMap<String, ApprovalRequestProjection>,
+  pub durable_waits: BTreeMap<String, DurableWaitProjection>,
+  pub external_signals: Vec<crate::ExternalSignalReceivedData>,
   pub notification_deliveries: BTreeMap<String, NotificationDeliveryProjection>,
   pub notification_updates: BTreeMap<String, NotificationMessageUpdateProjection>,
   pub notification_decisions: Vec<crate::event::NotificationDecisionAcceptedData>,
@@ -1781,6 +1808,149 @@ impl ProjectionFoldState {
           failed_node_ids: data.failed_node_ids.clone(),
           cancelled_node_ids: data.cancelled_node_ids.clone(),
         };
+      }
+      RunEventPayload::WaitRegistered(data) => {
+        require_running(projection)?;
+        if projection.durable_waits.contains_key(&data.wait_id) {
+          return Err(FoldError::InvalidHistory(format!(
+            "Durable wait {:?} was registered more than once.",
+            data.wait_id
+          )));
+        }
+        projection.durable_waits.insert(
+          data.wait_id.clone(),
+          DurableWaitProjection {
+            wait_id: data.wait_id.clone(),
+            node_id: data.node_id.clone(),
+            kind: data.kind,
+            registered_at: data.registered_at,
+            deadline: data.deadline,
+            signals: data.signals.clone().unwrap_or_default(),
+            correlation_digest: data.correlation_digest.clone(),
+            status: DurableWaitStatus::Registered,
+            resolved_at: None,
+          },
+        );
+        projection.status = RunStatus::Waiting;
+      }
+      RunEventPayload::ExternalSignalReceived(data) => {
+        if projection.status != RunStatus::Waiting {
+          return Err(FoldError::InvalidHistory(
+            "external_signal_received requires a waiting run.".to_string(),
+          ));
+        }
+        let wait = projection.durable_waits.get(&data.wait_id).ok_or_else(|| {
+          FoldError::InvalidHistory(
+            "External signal references an unregistered durable wait.".to_string(),
+          )
+        })?;
+        if wait.status != DurableWaitStatus::Registered
+          || !wait.signals.iter().any(|signal| signal == &data.signal)
+          || projection.external_signals.iter().any(|signal| {
+            signal.idempotency_digest == data.idempotency_digest
+              || signal.signal_id == data.signal_id
+          })
+        {
+          return Err(FoldError::InvalidHistory(
+            "External signal does not match one unresolved durable wait.".to_string(),
+          ));
+        }
+        projection.external_signals.push(data.clone());
+      }
+      RunEventPayload::WaitSatisfied(data) => {
+        if projection.status != RunStatus::Waiting {
+          return Err(FoldError::InvalidHistory(
+            "wait_satisfied requires a waiting run.".to_string(),
+          ));
+        }
+        let wait = projection
+          .durable_waits
+          .get_mut(&data.wait_id)
+          .ok_or_else(|| {
+            FoldError::InvalidHistory("wait_satisfied has no registered wait.".to_string())
+          })?;
+        if wait.status != DurableWaitStatus::Registered
+          || matches!(data.winner, crate::DurableWaitWinner::Timer)
+            && (!matches!(
+              wait.kind,
+              crate::DurableWaitKind::Duration | crate::DurableWaitKind::Until
+            ) || wait
+              .deadline
+              .is_none_or(|deadline| data.resolved_at < deadline))
+          || matches!(data.winner, crate::DurableWaitWinner::Signal)
+            && !projection.external_signals.iter().any(|signal| {
+              signal.wait_id == data.wait_id && signal.received_at <= data.resolved_at
+            })
+        {
+          return Err(FoldError::InvalidHistory(
+            "wait_satisfied does not resolve the active wait exactly once.".to_string(),
+          ));
+        }
+        wait.status = DurableWaitStatus::Satisfied {
+          winner: data.winner,
+        };
+        wait.resolved_at = Some(data.resolved_at);
+        projection
+          .context
+          .steps
+          .insert(data.wait_id.clone(), data.result.clone());
+        projection.status = RunStatus::Running;
+      }
+      RunEventPayload::WaitTimedOut(data) => {
+        if projection.status != RunStatus::Waiting {
+          return Err(FoldError::InvalidHistory(
+            "wait_timed_out requires a waiting run.".to_string(),
+          ));
+        }
+        let wait = projection
+          .durable_waits
+          .get_mut(&data.wait_id)
+          .ok_or_else(|| {
+            FoldError::InvalidHistory("wait_timed_out has no registered wait.".to_string())
+          })?;
+        if wait.status != DurableWaitStatus::Registered
+          || wait.kind != crate::DurableWaitKind::Signal
+          || wait.deadline != Some(data.deadline)
+        {
+          return Err(FoldError::InvalidHistory(
+            "wait_timed_out does not close the active signal wait.".to_string(),
+          ));
+        }
+        wait.status = DurableWaitStatus::TimedOut {
+          behavior: data.behavior,
+        };
+        wait.resolved_at = Some(data.resolved_at);
+        if data.behavior == crate::DurableWaitTimeoutBehavior::Continue {
+          projection.context.steps.insert(
+            data.wait_id.clone(),
+            json!({
+              "status": "timed_out",
+              "deadline": data.deadline.to_rfc3339_opts(SecondsFormat::Millis, true),
+              "resumedAt": data.resolved_at.to_rfc3339_opts(SecondsFormat::Millis, true),
+            }),
+          );
+        }
+        projection.status = RunStatus::Running;
+      }
+      RunEventPayload::WaitCancelled(data) => {
+        let wait = projection
+          .durable_waits
+          .get_mut(&data.wait_id)
+          .ok_or_else(|| {
+            FoldError::InvalidHistory("wait_cancelled has no registered wait.".to_string())
+          })?;
+        if wait.status != DurableWaitStatus::Registered
+          || !matches!(
+            projection.status,
+            RunStatus::Waiting | RunStatus::Cancelling
+          )
+        {
+          return Err(FoldError::InvalidHistory(
+            "wait_cancelled does not close one active wait.".to_string(),
+          ));
+        }
+        wait.status = DurableWaitStatus::Cancelled;
+        wait.resolved_at = Some(data.cancelled_at);
       }
       RunEventPayload::ApprovalRequested(data) => {
         require_running(projection)?;

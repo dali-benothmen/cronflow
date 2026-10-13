@@ -792,6 +792,7 @@ pub(crate) fn validate_payload_against_definition(
           | crate::COMPILED_MODEL_SCHEMA_VERSION_V14
           | crate::COMPILED_MODEL_SCHEMA_VERSION_V15
           | crate::COMPILED_MODEL_SCHEMA_VERSION_V16
+          | crate::COMPILED_MODEL_SCHEMA_VERSION_V17
       ) || data.definition_hash != definition_hash
         || workflow.runtime_policy_hash().as_deref() != Some(data.policy_hash.as_str())
         || workflow.runtime_policy_queue_name().as_deref() != Some(data.queue.name.as_str())
@@ -823,6 +824,7 @@ pub(crate) fn validate_payload_against_definition(
           | crate::COMPILED_MODEL_SCHEMA_VERSION_V14
           | crate::COMPILED_MODEL_SCHEMA_VERSION_V15
           | crate::COMPILED_MODEL_SCHEMA_VERSION_V16
+          | crate::COMPILED_MODEL_SCHEMA_VERSION_V17
       ) {
         return Err("Event v11+ runtime-policy events require compiled Model v12+.".to_string());
       }
@@ -849,6 +851,7 @@ pub(crate) fn validate_payload_against_definition(
           | crate::COMPILED_MODEL_SCHEMA_VERSION_V14
           | crate::COMPILED_MODEL_SCHEMA_VERSION_V15
           | crate::COMPILED_MODEL_SCHEMA_VERSION_V16
+          | crate::COMPILED_MODEL_SCHEMA_VERSION_V17
       ) {
         return Err("Event v11+ runtime-policy events require compiled Model v12+.".to_string());
       }
@@ -1260,6 +1263,65 @@ pub(crate) fn validate_payload_against_definition(
         );
       }
     }
+    RunEventPayload::WaitRegistered(data) => {
+      let wait = workflow
+        .durable_wait(&data.wait_id)
+        .ok_or_else(|| "wait_registered references an unknown durable wait.".to_string())?;
+      let kind_matches = matches!(
+        (wait, data.kind),
+        (
+          crate::CompiledWait::Duration { .. },
+          crate::DurableWaitKind::Duration
+        ) | (
+          crate::CompiledWait::Until { .. },
+          crate::DurableWaitKind::Until
+        ) | (
+          crate::CompiledWait::Signal { .. },
+          crate::DurableWaitKind::Signal
+        )
+      );
+      if data.node_id != wait.node_id() || !kind_matches {
+        return Err(
+          "wait_registered does not match its compiled Model v17 descriptor.".to_string(),
+        );
+      }
+    }
+    RunEventPayload::ExternalSignalReceived(data) => {
+      let Some(crate::CompiledWait::Signal { signals, .. }) = workflow.durable_wait(&data.wait_id)
+      else {
+        return Err("external_signal_received references an unknown signal wait.".to_string());
+      };
+      if !signals.iter().any(|signal| signal.signal == data.signal) {
+        return Err(
+          "external_signal_received names a signal not accepted by the wait.".to_string(),
+        );
+      }
+    }
+    RunEventPayload::WaitSatisfied(data) => {
+      if workflow.durable_wait(&data.wait_id).is_none() {
+        return Err("wait_satisfied references an unknown durable wait.".to_string());
+      }
+    }
+    RunEventPayload::WaitTimedOut(data) => {
+      let Some(crate::CompiledWait::Signal { on_timeout, .. }) =
+        workflow.durable_wait(&data.wait_id)
+      else {
+        return Err("wait_timed_out references an unknown signal wait.".to_string());
+      };
+      let behavior_matches = matches!(
+        (on_timeout.as_str(), data.behavior),
+        ("fail", crate::DurableWaitTimeoutBehavior::Fail)
+          | ("continue", crate::DurableWaitTimeoutBehavior::Continue)
+      );
+      if !behavior_matches {
+        return Err("wait_timed_out behavior differs from the compiled wait policy.".to_string());
+      }
+    }
+    RunEventPayload::WaitCancelled(data) => {
+      if workflow.durable_wait(&data.wait_id).is_none() {
+        return Err("wait_cancelled references an unknown durable wait.".to_string());
+      }
+    }
     RunEventPayload::RunSucceeded(data) => {
       if workflow.schema_version >= crate::COMPILED_MODEL_SCHEMA_VERSION_V11 {
         return Err("Model v11+ finalizes with run_outcome_decided and run_finalized.".to_string());
@@ -1291,6 +1353,7 @@ pub(crate) fn validate_payload_against_definition(
           | crate::COMPILED_MODEL_SCHEMA_VERSION_V14
           | crate::COMPILED_MODEL_SCHEMA_VERSION_V15
           | crate::COMPILED_MODEL_SCHEMA_VERSION_V16
+          | crate::COMPILED_MODEL_SCHEMA_VERSION_V17
       ) {
         return Err("Lifecycle and run-control events require compiled Model v11+.".to_string());
       }
@@ -1304,6 +1367,7 @@ pub(crate) fn validate_payload_against_definition(
           | crate::COMPILED_MODEL_SCHEMA_VERSION_V14
           | crate::COMPILED_MODEL_SCHEMA_VERSION_V15
           | crate::COMPILED_MODEL_SCHEMA_VERSION_V16
+          | crate::COMPILED_MODEL_SCHEMA_VERSION_V17
       ) {
         return Err("Lifecycle hook events require compiled Model v11+.".to_string());
       }
@@ -1341,6 +1405,7 @@ pub(crate) fn validate_payload_against_definition(
           | crate::COMPILED_MODEL_SCHEMA_VERSION_V14
           | crate::COMPILED_MODEL_SCHEMA_VERSION_V15
           | crate::COMPILED_MODEL_SCHEMA_VERSION_V16
+          | crate::COMPILED_MODEL_SCHEMA_VERSION_V17
       ) || !action_exists
       {
         return Err("Lifecycle action event references an unknown Model v11+ action.".to_string());
@@ -1362,6 +1427,7 @@ pub(crate) fn validate_payload_against_definition(
           | crate::COMPILED_MODEL_SCHEMA_VERSION_V14
           | crate::COMPILED_MODEL_SCHEMA_VERSION_V15
           | crate::COMPILED_MODEL_SCHEMA_VERSION_V16
+          | crate::COMPILED_MODEL_SCHEMA_VERSION_V17
       ) || !action_exists
       {
         return Err(
@@ -1378,6 +1444,7 @@ pub(crate) fn validate_payload_against_definition(
           | crate::COMPILED_MODEL_SCHEMA_VERSION_V14
           | crate::COMPILED_MODEL_SCHEMA_VERSION_V15
           | crate::COMPILED_MODEL_SCHEMA_VERSION_V16
+          | crate::COMPILED_MODEL_SCHEMA_VERSION_V17
       ) || workflow.lifecycle.is_none()
         || !crate::event::is_definition_hash(&data.hook_invocation_id)
       {
@@ -2177,6 +2244,21 @@ pub(crate) fn validate_event_history_against_definition(
         }
       }
       RunEventPayload::ApprovalResolved(_) => {}
+      RunEventPayload::WaitRegistered(data) => {
+        let prefix = crate::fold_events(&events[..index]).map_err(|error| error.to_string())?;
+        let ready =
+          ready_node_ids_for_projection_at(workflow, definition_hash, &prefix, event.occurred_at)?;
+        if !ready.iter().any(|node_id| node_id == &data.node_id) {
+          return Err(format!(
+            "Durable wait {:?} was registered before its node was ready.",
+            data.wait_id
+          ));
+        }
+      }
+      RunEventPayload::ExternalSignalReceived(_)
+      | RunEventPayload::WaitSatisfied(_)
+      | RunEventPayload::WaitTimedOut(_)
+      | RunEventPayload::WaitCancelled(_) => {}
       RunEventPayload::RunSucceeded(_) => {
         let projection =
           crate::fold_events(&events[..=index]).map_err(|error| error.to_string())?;
@@ -2364,6 +2446,7 @@ fn validate_reusable_lifecycle_binding(
     crate::COMPILED_MODEL_SCHEMA_VERSION_V14
       | crate::COMPILED_MODEL_SCHEMA_VERSION_V15
       | crate::COMPILED_MODEL_SCHEMA_VERSION_V16
+      | crate::COMPILED_MODEL_SCHEMA_VERSION_V17
   ) {
     return Err("Reusable lifecycle events require compiled Model v14 or later.".to_string());
   }

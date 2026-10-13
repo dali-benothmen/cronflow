@@ -87,7 +87,7 @@ fn started_store() -> DurableEventStore {
 
 #[test]
 fn model_v11_maps_to_event_v10_while_current_store_is_v14() {
-  assert_eq!(DURABLE_STORE_SCHEMA_VERSION, 14);
+  assert_eq!(DURABLE_STORE_SCHEMA_VERSION, 15);
   assert_eq!(woml_engine::run_event_schema_version_for_model(11), 10);
   assert_eq!(
     started_store().events("run_lec2").unwrap()[0].event_schema_version,

@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::net::{SocketAddr, TcpListener};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
@@ -49,6 +49,8 @@ pub const TRIGGER_PROGRESS_CONTRACT_VERSION: u32 = 1;
 const WORKFLOW_RUNTIME_LEASE_SECONDS: i64 = 10;
 const WORKFLOW_RUNTIME_RENEW_SECONDS: u64 = 2;
 const WORKFLOW_PENDING_SCAN_MILLISECONDS: u64 = 250;
+const DURABLE_WAIT_SCAN_MILLISECONDS: u64 = 250;
+const DURABLE_WAIT_SCAN_LIMIT: usize = 256;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(tag = "type")]
@@ -332,6 +334,10 @@ impl WomlWebhookServer {
     tasks.push(actix_web::rt::spawn(async move {
       run_workflow_routing_maintenance(routing_state).await;
     }));
+    let wait_state = state.clone();
+    tasks.push(actix_web::rt::spawn(async move {
+      run_durable_wait_scheduler(wait_state).await;
+    }));
     if let Some(receiver) = pending.external_ingress {
       let external_state = state.clone();
       tasks.push(actix_web::rt::spawn(run_external_ingress(
@@ -598,6 +604,62 @@ async fn run_workflow_routing_maintenance(state: web::Data<WebhookRuntimeState>)
   }
 }
 
+async fn run_durable_wait_scheduler(state: web::Data<WebhookRuntimeState>) {
+  let workflow_ids = state
+    .workflow_targets
+    .targets()
+    .into_iter()
+    .map(|target| target.workflow_id)
+    .collect::<HashSet<_>>();
+  loop {
+    let due = DurableEventStore::open_ready(&state.database_path).is_ok_and(|store| {
+      store
+        .due_timer_waits_for_workflows(
+          state.execution.clock.now(),
+          DURABLE_WAIT_SCAN_LIMIT,
+          &workflow_ids,
+        )
+        .is_ok_and(|waits| !waits.is_empty())
+    });
+    if due {
+      let _active = ActiveRunGuard::acquire(&state);
+      if let Ok(outcomes) = crate::runtime::resume_due_timer_waits_for_workflows_durable(
+        state.database_path.clone(),
+        state.execution.clone(),
+        DURABLE_WAIT_SCAN_LIMIT,
+        Some(&workflow_ids),
+      )
+      .await
+      {
+        for outcome in outcomes {
+          let crate::WorkflowRuntimeOutcome::Succeeded { execution, .. } = outcome else {
+            continue;
+          };
+          let workflow_id = DurableEventStore::open_ready(&state.database_path)
+            .and_then(|store| store.run_binding(&execution.run_id))
+            .map(|binding| binding.workflow_id);
+          if let (Some(reporter), Ok(workflow_id)) = (&state.progress_reporter, workflow_id) {
+            reporter(TriggerProgress::RunTerminal {
+              contract: TRIGGER_PROGRESS_CONTRACT,
+              contract_version: TRIGGER_PROGRESS_CONTRACT_VERSION,
+              workflow_id,
+              run_id: execution.run_id,
+              status: "succeeded",
+              failure_code: None,
+              occurred_at: Utc::now(),
+            });
+          }
+        }
+      }
+      continue;
+    }
+    tokio::time::sleep(std::time::Duration::from_millis(
+      DURABLE_WAIT_SCAN_MILLISECONDS,
+    ))
+    .await;
+  }
+}
+
 #[derive(Clone)]
 struct ScheduleRuntimeRegistration {
   workflow_id: String,
@@ -634,6 +696,28 @@ struct RunProgressIdentity {
   trigger_handler: String,
   occurrence_id: String,
   run_id: String,
+}
+
+struct ActiveRunGuard {
+  active_runs: Arc<AtomicUsize>,
+  active_runs_changed: Arc<Notify>,
+}
+
+impl ActiveRunGuard {
+  fn acquire(state: &WebhookRuntimeState) -> Self {
+    state.active_runs.fetch_add(1, Ordering::AcqRel);
+    Self {
+      active_runs: Arc::clone(&state.active_runs),
+      active_runs_changed: Arc::clone(&state.active_runs_changed),
+    }
+  }
+}
+
+impl Drop for ActiveRunGuard {
+  fn drop(&mut self) {
+    self.active_runs.fetch_sub(1, Ordering::AcqRel);
+    self.active_runs_changed.notify_waiters();
+  }
 }
 
 struct StartupManualTrigger {
@@ -832,9 +916,10 @@ fn prepare_state(
         | crate::COMPILED_MODEL_SCHEMA_VERSION_V14
         | crate::COMPILED_MODEL_SCHEMA_VERSION_V15
         | crate::COMPILED_MODEL_SCHEMA_VERSION_V16
+        | crate::COMPILED_MODEL_SCHEMA_VERSION_V17
     ) {
       return Err(WebhookRuntimeError::InvalidRegistration(format!(
-        "workflow {:?} must use a supported compiled Model v7 through v16",
+        "workflow {:?} must use a supported compiled Model v7 through v17",
         registration.workflow.workflow_id
       )));
     }
@@ -3311,7 +3396,8 @@ fn dispatch_run(state: &WebhookRuntimeState, identity: RunProgressIdentity) {
         failure_code: None,
         occurred_at: Utc::now(),
       }),
-      Ok(crate::WorkflowRuntimeOutcome::Waiting { .. }) => None,
+      Ok(crate::WorkflowRuntimeOutcome::Waiting { .. })
+      | Ok(crate::WorkflowRuntimeOutcome::WaitingTime { .. }) => None,
       Err(error) => Some(TriggerProgress::RunTerminal {
         contract: TRIGGER_PROGRESS_CONTRACT,
         contract_version: TRIGGER_PROGRESS_CONTRACT_VERSION,

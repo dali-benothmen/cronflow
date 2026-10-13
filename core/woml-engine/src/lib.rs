@@ -91,13 +91,13 @@ pub use discord::ManagedDiscordHandler;
 pub use durable::{
   derive_lifecycle_hook_invocation_id, ApprovalDecisionOutcome, ApprovalDecisionOutcomeStatus,
   ApprovalTimeoutSettlement, ApprovalTimeoutSettlementStatus, ApprovalTokenBinding,
-  DurableDagEngine, DurableEngineError, DurableEventStore, DurableStoreError, ForkRecoveryBranchV1,
-  ForkRecoveryWorkV1, InspectedBusinessOutcome, InspectedForEachStatusV6, InspectedForkJoinModeV4,
-  InspectedForkStatusV4, InspectedReusableKindV5, InspectedReusableLifecycleStatusV5,
-  InspectedReusableStatusV5, InternalEventAdmissionOutcome, InternalEventAdmissionRequest,
-  IntervalCursor, IntervalCursorRegistration, IntervalCursorRegistrationOutcome,
-  IssuedApprovalToken, NotificationDeliveryWork, NotificationDispatchReport,
-  NotificationProviderAdapter, NotificationProviderDeliveryResult,
+  DurableDagEngine, DurableEngineError, DurableEventStore, DurableStoreError, DurableWaitRecordV1,
+  ForkRecoveryBranchV1, ForkRecoveryWorkV1, InspectedBusinessOutcome, InspectedForEachStatusV6,
+  InspectedForkJoinModeV4, InspectedForkStatusV4, InspectedReusableKindV5,
+  InspectedReusableLifecycleStatusV5, InspectedReusableStatusV5, InternalEventAdmissionOutcome,
+  InternalEventAdmissionRequest, IntervalCursor, IntervalCursorRegistration,
+  IntervalCursorRegistrationOutcome, IssuedApprovalToken, NotificationDeliveryWork,
+  NotificationDispatchReport, NotificationProviderAdapter, NotificationProviderDeliveryResult,
   NotificationProviderUpdateResult, NotificationUpdateWork, PolicyClaimWaitReason,
   PolicyExecutionClaimResult, PolicyWaitingFor, PublicRunStatus, RecoveryReport,
   RunCancellationCode, RunCancellationResult, RunCancellationStatus, RunDefinitionBinding,
@@ -108,8 +108,8 @@ pub use durable::{
   RunInspectionV3, RunInspectionV4, RunInspectionV5, RunInspectionV6, RunListV1, RunListV2,
   RunSummaryV1, RunSummaryV2, RunTimeoutSettlement, RuntimeObservationV1, RuntimeOwnerLease,
   ScheduleCursor, ScheduleCursorRegistration, ScheduleCursorRegistrationOutcome, SchedulerClaimV1,
-  StepFailureCommit, StepFailureDisposition, TriggerAdmissionOutcome, TriggerAdmissionRequest,
-  TriggerOccurrence, TriggerRecoveryWork, DURABLE_STORE_SCHEMA_VERSION,
+  StepFailureCommit, StepFailureDisposition, TimerWaitSettlement, TriggerAdmissionOutcome,
+  TriggerAdmissionRequest, TriggerOccurrence, TriggerRecoveryWork, DURABLE_STORE_SCHEMA_VERSION,
   RUNTIME_POLICY_QUEUE_CEILING,
 };
 pub use durable_state::{
@@ -123,7 +123,8 @@ pub use event::{
   ApprovalDecision, ApprovalDecisionSource, ApprovalFailure, ApprovalRequestedData,
   ApprovalResolution, ApprovalResolvedData, ApprovalTimeoutPolicy, AttemptFailure,
   AttemptFailureKind, BranchFailure, BranchSelectedData, BusinessOutcome, ChoiceSelectedData,
-  CommunicationProviderMessageIdentity, FailureSizeDetails, FinalLifecycleStatus,
+  CommunicationProviderMessageIdentity, DurableWaitKind, DurableWaitTimeoutBehavior,
+  DurableWaitWinner, ExternalSignalReceivedData, FailureSizeDetails, FinalLifecycleStatus,
   ForkBranchOutcome, ForkBranchSettledData, ForkJoinOutcome, ForkJoinSettledData, ForkOpenedData,
   JsonValueType, LifecycleActionFailedData, LifecycleActionIdentityData, LifecycleFailure,
   LifecycleFailureKind, LifecycleHookCompletedData, LifecycleHookCompletionStatus,
@@ -144,6 +145,7 @@ pub use event::{
   RunFailedDataV4, RunFailedDataV5, RunFinalizedData, RunIngress, RunOutcomeDecidedData,
   RunStartedData, RunSucceededData, RunTimeoutReachedData, SlackProviderMessageIdentity,
   StepAttemptFailedData, StepAttemptStartedData, StepAttemptSucceededData, StepRetryScheduledData,
+  WaitCancelledData, WaitRegisteredData, WaitSatisfiedData, WaitTimedOutData,
 };
 pub use events_service::{
   EventServiceAcceptedRun, EventServiceRunDispatcher, EventServiceSubscriber, ManagedEventsHandler,
@@ -160,9 +162,9 @@ pub use interval::{
 pub use model::{
   CompiledLifecycleAction, CompiledLifecycleDefinition, CompiledLifecycleHook,
   CompiledModuleBinding, CompiledModuleRuntime, CompiledQueuePolicy, CompiledRateLimitPolicy,
-  CompiledReusableInvocation, CompiledRuntimePolicy, CompiledWorkflowDefinition,
-  LifecycleEventName, ModelIssue, ModelIssueCode, ModelValidationError, NotificationDefinition,
-  QueueDiscipline, RateLimitAlgorithm, ScriptRuntimeBindings,
+  CompiledReusableInvocation, CompiledRuntimePolicy, CompiledWait, CompiledWaitSignal,
+  CompiledWorkflowDefinition, LifecycleEventName, ModelIssue, ModelIssueCode, ModelValidationError,
+  NotificationDefinition, QueueDiscipline, RateLimitAlgorithm, ScriptRuntimeBindings,
 };
 pub use notification_host::{
   NotificationHostClient, NotificationHostClientError, NotificationHostProcessOptions,
@@ -197,13 +199,14 @@ pub use process::{
   PROCESS_CONTRACT_VERSION, PROCESS_POLICY_CONTRACT, PROCESS_POLICY_CONTRACT_VERSION,
 };
 pub use projection::{
-  fold_events, ApprovalRequestProjection, ApprovalRequestStatus, FoldError, ForkBranchProjection,
-  ForkJoinStatus, ForkProjection, LifecycleActionProjection, LifecycleActionStatus,
-  LifecycleHookProjection, LifecycleHookStatus, LifecycleStatus, NotificationDeliveryProjection,
-  NotificationDeliveryStatus, NotificationMessageUpdateProjection, NotificationMessageUpdateStatus,
-  OperationIdentity, OperationProjection, OperationStatus, ParallelGroupProjection,
-  ParallelGroupStatus, RetryScheduleProjection, ReusableLifecycleProjection,
-  ReusableLifecycleStatus, RunFailure, RunProjection, RunStatus, WorkflowContext,
+  fold_events, ApprovalRequestProjection, ApprovalRequestStatus, DurableWaitProjection,
+  DurableWaitStatus, FoldError, ForkBranchProjection, ForkJoinStatus, ForkProjection,
+  LifecycleActionProjection, LifecycleActionStatus, LifecycleHookProjection, LifecycleHookStatus,
+  LifecycleStatus, NotificationDeliveryProjection, NotificationDeliveryStatus,
+  NotificationMessageUpdateProjection, NotificationMessageUpdateStatus, OperationIdentity,
+  OperationProjection, OperationStatus, ParallelGroupProjection, ParallelGroupStatus,
+  RetryScheduleProjection, ReusableLifecycleProjection, ReusableLifecycleStatus, RunFailure,
+  RunProjection, RunStatus, WorkflowContext,
 };
 pub use retention::{
   execute_retention, last_retention_result, plan_retention, RetentionError, RetentionExecutionV1,
@@ -212,16 +215,17 @@ pub use retention::{
 pub use runtime::{
   execute_admitted_trigger_run_durable, execute_reusable_provider_lifecycle_durable,
   execute_workflow, execute_workflow_durable, execute_workflow_durable_outcome,
-  recover_durable_runs, resolve_human_approval_durable, resume_workflow_durable,
-  resume_workflow_durable_any_outcome, resume_workflow_durable_outcome,
+  recover_durable_runs, resolve_human_approval_durable, resume_due_timer_waits_durable,
+  resume_workflow_durable, resume_workflow_durable_any_outcome, resume_workflow_durable_outcome,
   settle_approval_timeout_durable, BranchFailureSite, CancelledRunDetails, EngineClock,
   ExecutionProgress, ExecutionProgressReporter, FailedApprovalDetails, FailedNotificationDetails,
   FailedParallelDetails, FixedEngineClock, LifecycleProgress, LifecycleProgressPhase,
   LifecycleProgressReporter, RuntimeExecutionError, RuntimeExecutionOptions, RuntimeModuleArtifact,
   RuntimePolicyProgress, RuntimePolicyProgressPhase, RuntimePolicyProgressReporter,
-  SystemEngineClock, WaitingWorkflowApproval, WorkflowExecutionResult, WorkflowRuntimeOutcome,
-  EXECUTION_PROGRESS_CONTRACT, EXECUTION_PROGRESS_VERSION, LIFECYCLE_PROGRESS_PROFILE,
-  RUNTIME_OUTCOME_CONTRACT, RUNTIME_OUTCOME_VERSION, RUNTIME_POLICY_PROGRESS_PROFILE,
+  SystemEngineClock, WaitingWorkflowApproval, WaitingWorkflowTimer, WorkflowExecutionResult,
+  WorkflowRuntimeOutcome, EXECUTION_PROGRESS_CONTRACT, EXECUTION_PROGRESS_VERSION,
+  LIFECYCLE_PROGRESS_PROFILE, RUNTIME_OUTCOME_CONTRACT, RUNTIME_OUTCOME_VERSION,
+  RUNTIME_POLICY_PROGRESS_PROFILE,
 };
 pub use schedule::{
   ScheduleClock, ScheduleError, ScheduleMisfirePolicy, ScheduleProgress, ScheduleProgressReason,
@@ -267,7 +271,8 @@ pub const COMPILED_MODEL_SCHEMA_VERSION_V13: u32 = 13;
 pub const COMPILED_MODEL_SCHEMA_VERSION_V14: u32 = 14;
 pub const COMPILED_MODEL_SCHEMA_VERSION_V15: u32 = 15;
 pub const COMPILED_MODEL_SCHEMA_VERSION_V16: u32 = 16;
-pub const COMPILED_MODEL_SCHEMA_VERSION: u32 = COMPILED_MODEL_SCHEMA_VERSION_V16;
+pub const COMPILED_MODEL_SCHEMA_VERSION_V17: u32 = 17;
+pub const COMPILED_MODEL_SCHEMA_VERSION: u32 = COMPILED_MODEL_SCHEMA_VERSION_V17;
 pub const RUN_EVENT_SCHEMA_VERSION_V1: u32 = 1;
 pub const RUN_EVENT_SCHEMA_VERSION_V2: u32 = 2;
 pub const RUN_EVENT_SCHEMA_VERSION_V3: u32 = 3;
@@ -283,10 +288,13 @@ pub const RUN_EVENT_SCHEMA_VERSION_V12: u32 = 12;
 pub const RUN_EVENT_SCHEMA_VERSION_V13: u32 = 13;
 pub const RUN_EVENT_SCHEMA_VERSION_V14: u32 = 14;
 pub const RUN_EVENT_SCHEMA_VERSION_V15: u32 = 15;
-pub const RUN_EVENT_SCHEMA_VERSION: u32 = RUN_EVENT_SCHEMA_VERSION_V15;
+pub const RUN_EVENT_SCHEMA_VERSION_V16: u32 = 16;
+pub const RUN_EVENT_SCHEMA_VERSION: u32 = RUN_EVENT_SCHEMA_VERSION_V16;
 
 pub const fn run_event_schema_version_for_model(model_schema_version: u32) -> u32 {
-  if model_schema_version >= COMPILED_MODEL_SCHEMA_VERSION_V16 {
+  if model_schema_version >= COMPILED_MODEL_SCHEMA_VERSION_V17 {
+    RUN_EVENT_SCHEMA_VERSION_V16
+  } else if model_schema_version >= COMPILED_MODEL_SCHEMA_VERSION_V16 {
     RUN_EVENT_SCHEMA_VERSION_V15
   } else if model_schema_version >= COMPILED_MODEL_SCHEMA_VERSION_V15 {
     RUN_EVENT_SCHEMA_VERSION_V14

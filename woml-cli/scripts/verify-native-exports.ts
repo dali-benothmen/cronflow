@@ -43,6 +43,7 @@ export const expectedNativeExports = [
   'resumeWomlWorkflowDurableWithProgress',
   'runWomlNotificationProviderJourney',
   'settleWomlApprovalTimeout',
+  'settleWomlTimerWait',
   'startWomlWebhookRuntime',
   'stopWomlWebhookRuntime',
   'submitWomlManualTrigger',

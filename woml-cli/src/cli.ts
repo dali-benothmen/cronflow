@@ -81,6 +81,7 @@ import {
   RunManagementError,
   RunInspectionError,
   settleApprovalTimeoutWithRust,
+  settleTimerWaitWithRust,
   inspectStoredRunRequirementsWithRust,
   resumeStoredRunWithRust,
   activateWebhookRuntimeWithRust,
@@ -1645,7 +1646,8 @@ function promoteForLifecycleAuthority(
     workflow.schemaVersion === 13 ||
     workflow.schemaVersion === 14 ||
     workflow.schemaVersion === 15 ||
-    workflow.schemaVersion === 16
+    workflow.schemaVersion === 16 ||
+    workflow.schemaVersion === 17
   ) {
     return workflow;
   }
@@ -1751,7 +1753,8 @@ function runtimeModulesFromPackage(
   if (
     definitionPackage.schemaVersion !== 9 &&
     definitionPackage.schemaVersion !== 10 &&
-    definitionPackage.schemaVersion !== 11
+    definitionPackage.schemaVersion !== 11 &&
+    definitionPackage.schemaVersion !== 12
   )
     return modules;
   const seen = new Set<string>();
@@ -2662,6 +2665,9 @@ async function runSingleCheckCommand(
           'Durable waits did not lower to the frozen compiled Model v17 contract.'
         );
       }
+      const timersExecutable = compiled.graph.waits.every(
+        wait => wait.kind === 'duration' || wait.kind === 'until'
+      );
       const workflowElement = document.root.children.find(
         (child): child is WomlSourceElement =>
           child.kind === 'element' && child.name === 'workflow'
@@ -2677,9 +2683,9 @@ async function runSingleCheckCommand(
               valid: true,
               workflowId: workflowElement?.attributes.id?.value,
               feature: 'durable-waits',
-              executable: false,
+              executable: timersExecutable,
               modelVersion: compiled.schemaVersion,
-              runtimePhase: 'DW2',
+              runtimePhase: timersExecutable ? 'DW3' : 'DW4',
             },
             null,
             2
@@ -2691,7 +2697,9 @@ async function runSingleCheckCommand(
         `WOML check passed for workflow "${workflowElement?.attributes.id?.value ?? filePath}".\n`
       );
       io.stdout(
-        'Compiled Model v17 passed frontend validation. Durable Rust execution begins in DW2.\n'
+        timersExecutable
+          ? 'Compiled Model v17 passed frontend and durable Rust timer validation.\n'
+          : 'Compiled Model v17 passed frontend validation. External signal admission begins in DW4.\n'
       );
       return 0;
     }
@@ -3232,6 +3240,35 @@ function printWaitingApproval(
   );
 }
 
+async function waitForDurableTimer(
+  io: CliIo,
+  outcome: Extract<RustApprovalRuntimeOutcome, { status: 'waiting_time' }>,
+  statePath: string,
+  nativeCorePath: string | undefined
+): Promise<void> {
+  io.stderr(
+    `\nWOML run ${outcome.runId} is durably waiting until ${outcome.wait.deadline}.\n`
+  );
+  let deadline = outcome.wait.deadline;
+  for (;;) {
+    const remaining = Date.parse(deadline) - Date.now();
+    if (remaining > 0) {
+      await new Promise<void>(resolve =>
+        setTimeout(resolve, Math.min(remaining, 60_000))
+      );
+      continue;
+    }
+    const settlement = settleTimerWaitWithRust(
+      statePath,
+      outcome.runId,
+      outcome.wait.waitId,
+      nativeCorePath === undefined ? {} : { nativeCorePath }
+    );
+    if (settlement.status !== 'not_due') return;
+    deadline = settlement.deadline;
+  }
+}
+
 async function runApprovalWorkflow(
   workflow: ReturnType<typeof compileWoml>,
   args: RunArguments,
@@ -3266,7 +3303,23 @@ async function runApprovalWorkflow(
           runtimeOptions
         );
 
-  while (outcome.status === 'waiting') {
+  while (outcome.status !== 'succeeded') {
+    if (outcome.status === 'waiting_time') {
+      const waiting = outcome;
+      await waitForDurableTimer(
+        io,
+        waiting,
+        args.statePath,
+        dependencies.nativeCorePath
+      );
+      outcome = await resumeApprovalWorkflowWithRust(
+        workflow,
+        args.statePath,
+        waiting.runId,
+        runtimeOptions
+      );
+      continue;
+    }
     const waiting = outcome;
     await serveApprovalAndWait({
       outcome: waiting,
@@ -3326,7 +3379,7 @@ function workflowSecretReferences(
       references.push({ kind: 'secretReference', name });
     }
   }
-  if (workflow.schemaVersion === 16) {
+  if (workflow.schemaVersion === 16 || workflow.schemaVersion === 17) {
     for (const descriptor of workflow.graph.forEach) {
       for (const node of descriptor.body.nodes) {
         collectSecretReferences(node.inputs, references);
@@ -3338,7 +3391,8 @@ function workflowSecretReferences(
   }
   for (const definition of workflow.schemaVersion === 14 ||
   workflow.schemaVersion === 15 ||
-  workflow.schemaVersion === 16
+  workflow.schemaVersion === 16 ||
+  workflow.schemaVersion === 17
     ? (workflow.reusableDefinitions ?? [])
     : []) {
     for (const prop of definition.props) {
@@ -3356,6 +3410,12 @@ function workflowSecretReferences(
 function workflowHasApproval(workflow: CompiledWorkflowDefinition): boolean {
   return workflow.graph.nodes.some(
     node => node.handler === 'engine.approval-wait'
+  );
+}
+
+function workflowHasDurableWait(workflow: CompiledWorkflowDefinition): boolean {
+  return workflow.graph.nodes.some(
+    node => node.handler === 'engine.durable-wait'
   );
 }
 
@@ -3439,7 +3499,29 @@ async function runNotificationWorkflow(
             runtimeCapabilities: args.runtimeCapabilities,
           }
         );
-  while (outcome.status === 'waiting') {
+  while (outcome.status !== 'succeeded') {
+    if (outcome.status === 'waiting_time') {
+      const waiting = outcome;
+      await waitForDurableTimer(
+        io,
+        waiting,
+        args.statePath,
+        dependencies.nativeCorePath
+      );
+      outcome = await resumeApprovalWorkflowWithRust(
+        workflow,
+        args.statePath,
+        waiting.runId,
+        {
+          nativeCorePath: dependencies.nativeCorePath,
+          onProgress: runtimeProgress,
+          resolvedSecrets: secrets,
+          runtimeModules,
+          runtimeCapabilities: args.runtimeCapabilities,
+        }
+      );
+      continue;
+    }
     const waiting = outcome;
     printNotificationApproval(io, waiting, args.filePath, args.statePath);
     const hasCustomProvider =
@@ -3575,7 +3657,22 @@ async function resumeStoredRun(
     runId,
     runtimeOptions
   );
-  while (outcome.status === 'waiting') {
+  while (outcome.status !== 'succeeded') {
+    if (outcome.status === 'waiting_time') {
+      const waiting = outcome;
+      await waitForDurableTimer(
+        io,
+        waiting,
+        args.statePath,
+        dependencies.nativeCorePath
+      );
+      outcome = await resumeStoredRunWithRust(
+        args.statePath,
+        waiting.runId,
+        runtimeOptions
+      );
+      continue;
+    }
     const waiting = outcome;
     if (requirements.hasNotifications) {
       printNotificationApproval(io, waiting, args.filePath, args.statePath);
@@ -3745,6 +3842,7 @@ async function executeOneShot(
     }
   }
   const hasApproval = workflowHasApproval(workflow);
+  const hasDurableWait = workflowHasDurableWait(workflow);
   const hasNotifications = workflowHasNotifications(workflow);
   if (
     args.resumeRunId !== undefined &&
@@ -3758,7 +3856,8 @@ async function executeOneShot(
     workflow.schemaVersion !== 13 &&
     workflow.schemaVersion !== 14 &&
     workflow.schemaVersion !== 15 &&
-    workflow.schemaVersion !== 16
+    workflow.schemaVersion !== 16 &&
+    workflow.schemaVersion !== 17
   ) {
     throw new CliInputError(
       'WOML_RESUME_REQUIRES_DURABLE_WORKFLOW',
@@ -3775,7 +3874,7 @@ async function executeOneShot(
     );
     return;
   }
-  if (hasApproval) {
+  if (hasApproval || hasDurableWait) {
     await runApprovalWorkflow(workflow, args, io, dependencies, runtimeModules);
     return;
   }
@@ -3789,7 +3888,8 @@ async function executeOneShot(
     workflow.schemaVersion === 13 ||
     workflow.schemaVersion === 14 ||
     workflow.schemaVersion === 15 ||
-    workflow.schemaVersion === 16
+    workflow.schemaVersion === 16 ||
+    workflow.schemaVersion === 17
   ) {
     await mkdir(dirname(args.statePath), { recursive: true });
     const onProgress = durableRetryProgress(io, args);

@@ -960,6 +960,11 @@ interface NativeCore {
     runtimeCapabilitiesJson?: string
   ) => Promise<string>;
   readonly recoverWomlRuns: (eventStorePath: string) => string;
+  readonly settleWomlTimerWait?: (
+    eventStorePath: string,
+    runId: string,
+    waitId: string
+  ) => string;
   readonly startWomlWebhookRuntime: (
     registrationsJson: string,
     startupManualTriggersJson: string,
@@ -1207,6 +1212,14 @@ export interface WaitingApproval {
   readonly credentialExpiresAt: string;
 }
 
+export interface WaitingTimer {
+  readonly waitId: string;
+  readonly nodeId: string;
+  readonly kind: 'duration' | 'until';
+  readonly registeredAt: string;
+  readonly deadline: string;
+}
+
 export type RustApprovalRuntimeOutcome =
   | {
       readonly contract: 'woml.runtime-outcome';
@@ -1221,7 +1234,19 @@ export type RustApprovalRuntimeOutcome =
       readonly workflowId: string;
       readonly runId: string;
       readonly approval: WaitingApproval;
+    }
+  | {
+      readonly contract: 'woml.runtime-outcome';
+      readonly version: 1;
+      readonly status: 'waiting_time';
+      readonly workflowId: string;
+      readonly runId: string;
+      readonly wait: WaitingTimer;
     };
+
+export type TimerWaitSettlement =
+  | { readonly status: 'resolved' | 'already_resolved' }
+  | { readonly status: 'not_due'; readonly deadline: string };
 
 export interface ApprovalDecisionResult {
   readonly contract: 'woml.approval-http';
@@ -1963,7 +1988,7 @@ function executionResult(value: unknown): value is RustWorkflowExecutionResult {
       ]) &&
       Number.isSafeInteger(event.eventSchemaVersion) &&
       Number(event.eventSchemaVersion) >= 1 &&
-      Number(event.eventSchemaVersion) <= 13 &&
+      Number(event.eventSchemaVersion) <= 16 &&
       typeof event.eventId === 'string' &&
       typeof event.runId === 'string' &&
       Number.isSafeInteger(event.sequence) &&
@@ -1992,6 +2017,24 @@ function waitingApproval(value: unknown): value is WaitingApproval {
     (value.onTimeout === 'reject' || value.onTimeout === 'fail') &&
     /^apr_[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+$/.test(String(value.token)) &&
     dateTime(value.credentialExpiresAt)
+  );
+}
+
+function waitingTimer(value: unknown): value is WaitingTimer {
+  if (!record(value)) return false;
+  return (
+    exactKeys(value, [
+      'waitId',
+      'nodeId',
+      'kind',
+      'registeredAt',
+      'deadline',
+    ]) &&
+    /^[a-z][A-Za-z0-9]*$/.test(String(value.waitId)) &&
+    /^[A-Za-z_][A-Za-z0-9_.:-]*$/.test(String(value.nodeId)) &&
+    (value.kind === 'duration' || value.kind === 'until') &&
+    dateTime(value.registeredAt) &&
+    dateTime(value.deadline)
   );
 }
 
@@ -2029,7 +2072,55 @@ function parseApprovalRuntimeOutcome(json: string): RustApprovalRuntimeOutcome {
   ) {
     return value as unknown as RustApprovalRuntimeOutcome;
   }
+  if (
+    value.status === 'waiting_time' &&
+    exactKeys(value, [
+      'contract',
+      'version',
+      'status',
+      'workflowId',
+      'runId',
+      'wait',
+    ]) &&
+    typeof value.workflowId === 'string' &&
+    value.workflowId.length > 0 &&
+    typeof value.runId === 'string' &&
+    value.runId.length > 0 &&
+    waitingTimer(value.wait)
+  ) {
+    return value as unknown as RustApprovalRuntimeOutcome;
+  }
   throw new Error('The native core returned an invalid approval outcome.');
+}
+
+export function settleTimerWaitWithRust(
+  eventStorePath: string,
+  runId: string,
+  waitId: string,
+  options: Pick<RustExecutorOptions, 'nativeCorePath'> = {}
+): TimerWaitSettlement {
+  const nativePath = options.nativeCorePath ?? defaultNativeCorePath();
+  const native = loadNativeCore(nativePath);
+  if (typeof native.settleWomlTimerWait !== 'function') {
+    throw new Error(
+      `Native core at "${nativePath}" does not expose settleWomlTimerWait; rebuild the Rust addon.`
+    );
+  }
+  const value: unknown = JSON.parse(
+    native.settleWomlTimerWait(eventStorePath, runId, waitId)
+  );
+  if (
+    !record(value) ||
+    (value.status !== 'resolved' &&
+      value.status !== 'already_resolved' &&
+      value.status !== 'not_due') ||
+    (value.status === 'not_due'
+      ? !exactKeys(value, ['status', 'deadline']) || !dateTime(value.deadline)
+      : !exactKeys(value, ['status']))
+  ) {
+    throw new Error('The native core returned an invalid timer settlement.');
+  }
+  return value as TimerWaitSettlement;
 }
 
 function parseApprovalDecisionResult(json: string): ApprovalDecisionResult {

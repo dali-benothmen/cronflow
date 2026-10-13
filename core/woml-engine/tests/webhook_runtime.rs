@@ -30,6 +30,10 @@ const RETRY_MODEL: &str = include_str!("../../../woml/tests/fixtures/retry.compi
 const APPROVAL_MODEL: &str = include_str!("../../../woml/tests/fixtures/approval.compiled.v4.json");
 const NOTIFICATION_MODEL: &str =
   include_str!("../../../woml/tests/fixtures/approval-slack.compiled.v5.json");
+const DURABLE_WAIT_MODEL: &str =
+  include_str!("../../../woml/tests/fixtures/durable-waits/model.v17.reviewed.json");
+const DURABLE_WAIT_HASH: &str =
+  "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
 
 fn model() -> CompiledWorkflowDefinition {
   serde_json::from_str(WEBHOOK_MODEL).unwrap()
@@ -418,6 +422,92 @@ async fn selected_manual_trigger_fires_once_at_long_lived_runtime_startup() {
     Some("trigger.manual")
   );
   assert!(projection.context.trigger.is_empty());
+  server.stop().await;
+}
+
+#[actix_web::test]
+async fn production_runtime_scheduler_resumes_a_due_timer_without_a_script_worker() {
+  let database = TemporaryDatabase::new("durable-wait-scheduler");
+  let progress = Arc::new(Mutex::new(Vec::<TriggerProgress>::new()));
+  let captured = progress.clone();
+  let workflow: CompiledWorkflowDefinition = serde_json::from_str(DURABLE_WAIT_MODEL).unwrap();
+  let server = WomlWebhookServer::start(WomlWebhookServerConfig {
+    bind_address: "127.0.0.1:0".parse().unwrap(),
+    database_path: database.path().to_path_buf(),
+    registrations: vec![WebhookDefinitionRegistration::new(
+      workflow,
+      DURABLE_WAIT_HASH,
+    )],
+    startup_manual_triggers: BTreeMap::from([(
+      "durable-wait-model".to_string(),
+      "start".to_string(),
+    )]),
+    execution: RuntimeExecutionOptions::new(placeholder_host(), 2_000),
+    progress_reporter: Some(Arc::new(move |message| {
+      captured.lock().unwrap().push(message);
+    })),
+  })
+  .await
+  .unwrap();
+
+  let deadline = Instant::now() + Duration::from_secs(5);
+  let run_id = loop {
+    let selected = progress.lock().unwrap().iter().find_map(|message| {
+      if let TriggerProgress::OccurrenceAccepted { run_id, .. } = message {
+        Some(run_id.clone())
+      } else {
+        None
+      }
+    });
+    if let Some(run_id) = selected {
+      break run_id;
+    }
+    assert!(Instant::now() < deadline, "timer workflow was not admitted");
+    actix_web::rt::time::sleep(Duration::from_millis(10)).await;
+  };
+  wait_for_status(&database, &run_id, RunStatus::Succeeded).await;
+
+  let terminal_deadline = Instant::now() + Duration::from_secs(2);
+  loop {
+    let reported = progress.lock().unwrap().iter().any(|message| {
+      matches!(
+        message,
+        TriggerProgress::RunTerminal {
+          run_id: reported_run_id,
+          status: "succeeded",
+          ..
+        } if reported_run_id == &run_id
+      )
+    });
+    if reported {
+      break;
+    }
+    assert!(
+      Instant::now() < terminal_deadline,
+      "timer completion was not reported to the terminal presentation channel"
+    );
+    actix_web::rt::time::sleep(Duration::from_millis(10)).await;
+  }
+
+  let store = DurableEventStore::open(database.path()).unwrap();
+  let events = store.events(&run_id).unwrap();
+  assert_eq!(
+    events
+      .iter()
+      .filter(|event| matches!(event.payload, RunEventPayload::WaitRegistered(_)))
+      .count(),
+    1
+  );
+  assert_eq!(
+    events
+      .iter()
+      .filter(|event| matches!(event.payload, RunEventPayload::WaitSatisfied(_)))
+      .count(),
+    1
+  );
+  assert!(!events
+    .iter()
+    .any(|event| matches!(event.payload, RunEventPayload::StepAttemptStarted(_))));
   server.stop().await;
 }
 
