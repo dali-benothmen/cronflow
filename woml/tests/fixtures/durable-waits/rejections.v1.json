@@ -1,0 +1,21 @@
+{
+  "profile": "woml.durable-waits-rejections/v1",
+  "cases": [
+    { "id": "duration-missing", "code": "WOML_REQUIRED_ATTRIBUTE" },
+    { "id": "duration-invalid", "code": "WOML_WAIT_DURATION_INVALID" },
+    { "id": "until-invalid", "code": "WOML_WAIT_TIME_INVALID" },
+    { "id": "signal-missing", "code": "WOML_WAIT_SIGNAL_REQUIRED" },
+    { "id": "signal-form-conflict", "code": "WOML_WAIT_SIGNAL_FORM_CONFLICT" },
+    { "id": "signal-duplicate", "code": "WOML_WAIT_SIGNAL_DUPLICATE" },
+    { "id": "correlation-invalid", "code": "WOML_SIGNAL_CORRELATION_INVALID" },
+    { "id": "schema-invalid", "code": "WOML_SIGNAL_SCHEMA_INVALID" },
+    {
+      "id": "timeout-policy-invalid",
+      "code": "WOML_WAIT_TIMEOUT_POLICY_INVALID"
+    },
+    {
+      "id": "reference-not-dominating",
+      "code": "WOML_REFERENCE_NOT_DOMINATING"
+    }
+  ]
+}

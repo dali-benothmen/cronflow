@@ -143,20 +143,23 @@ theme:
 
 Provider and workflow snippets are available:
 
-| Prefix          | Creates                                                  |
-| --------------- | -------------------------------------------------------- |
-| `woml-workflow` | A complete workflow with a manual trigger and first step |
-| `woml-step`     | A named script step with an optional description         |
-| `woml-for-each` | A durable bounded item loop with ordered results          |
-| `woml-telegram-trigger` | A Telegram message trigger |
-| `woml-telegram-send` | A supervised Telegram reply |
-| `woml-telegram-notify` | A Telegram notification destination |
-| `woml-discord-trigger` | A Discord mention/direct-message trigger |
-| `woml-discord-send` | A supervised Discord reply |
-| `woml-discord-notify` | A Discord notification destination |
-| `woml-whatsapp-trigger` | A signed WhatsApp message trigger |
-| `woml-whatsapp-send` | An approved WhatsApp template send |
-| `woml-whatsapp-notify` | A WhatsApp notification destination |
+| Prefix                  | Creates                                                  |
+| ----------------------- | -------------------------------------------------------- |
+| `woml-workflow`         | A complete workflow with a manual trigger and first step |
+| `woml-step`             | A named script step with an optional description         |
+| `woml-for-each`         | A durable bounded item loop with ordered results         |
+| `woml-wait`             | A durable fixed-duration wait                            |
+| `woml-wait-until`       | A durable wait for an RFC 3339 instant                   |
+| `woml-wait-for`         | A durable wait for an authenticated external signal      |
+| `woml-telegram-trigger` | A Telegram message trigger                               |
+| `woml-telegram-send`    | A supervised Telegram reply                              |
+| `woml-telegram-notify`  | A Telegram notification destination                      |
+| `woml-discord-trigger`  | A Discord mention/direct-message trigger                 |
+| `woml-discord-send`     | A supervised Discord reply                               |
+| `woml-discord-notify`   | A Discord notification destination                       |
+| `woml-whatsapp-trigger` | A signed WhatsApp message trigger                        |
+| `woml-whatsapp-send`    | An approved WhatsApp template send                       |
+| `woml-whatsapp-notify`  | A WhatsApp notification destination                      |
 
 ## Documentation
 

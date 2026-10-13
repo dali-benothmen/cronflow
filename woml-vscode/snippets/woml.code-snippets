@@ -46,6 +46,38 @@
       "</for-each>"
     ]
   },
+  "WOML durable duration wait": {
+    "prefix": "woml-wait",
+    "description": "Pause the current run durably for a fixed duration.",
+    "body": [
+      "<wait id=\"${1:pause}\" name=\"${2:Wait before continuing}\" duration=\"${3:10m}\" />"
+    ]
+  },
+  "WOML durable wait until": {
+    "prefix": "woml-wait-until",
+    "description": "Pause the current run durably until an RFC 3339 instant.",
+    "body": [
+      "<wait-until id=\"${1:maintenanceWindow}\" name=\"${2:Wait for maintenance}\" at=\"{{context.${3:payload.windowStart}}}\" />"
+    ]
+  },
+  "WOML external signal wait": {
+    "prefix": "woml-wait-for",
+    "description": "Pause the current run until one authenticated external signal arrives.",
+    "body": [
+      "<wait-for",
+      "  id=\"${1:jobResult}\"",
+      "  name=\"${2:Wait for external job}\"",
+      "  signal=\"${3:job.completed}\"",
+      "  correlation=\"{{context.steps.${4:startJob}.${5:jobId}}}\"",
+      "  timeout=\"${6:1h}\"",
+      "  on-timeout=\"${7:fail}\"",
+      ">",
+      "  <schema>",
+      "    { \"type\": \"object\" }",
+      "  </schema>",
+      "</wait-for>"
+    ]
+  },
   "WOML Telegram trigger": {
     "prefix": "woml-telegram-trigger",
     "description": "Create a Telegram message trigger.",

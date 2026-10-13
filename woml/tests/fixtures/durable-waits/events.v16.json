@@ -1,0 +1,43 @@
+{
+  "schemaVersion": 16,
+  "profile": "woml.run-events/v16",
+  "events": {
+    "wait_registered": {
+      "required": ["waitId", "nodeId", "kind", "registeredAt"],
+      "optional": [
+        "deadline",
+        "signals",
+        "correlationDigest",
+        "iterationIdentity"
+      ]
+    },
+    "external_signal_received": {
+      "required": [
+        "signalId",
+        "waitId",
+        "signal",
+        "receivedAt",
+        "idempotencyDigest",
+        "payload"
+      ],
+      "optional": ["correlation", "iterationIdentity", "authenticationClass"]
+    },
+    "wait_satisfied": {
+      "required": ["waitId", "winner", "result", "resolvedAt"],
+      "winner": ["timer", "signal"]
+    },
+    "wait_timed_out": {
+      "required": ["waitId", "deadline", "resolvedAt", "behavior"],
+      "behavior": ["fail", "continue"]
+    },
+    "wait_cancelled": {
+      "required": ["waitId", "cancelledAt", "cancellationId"]
+    }
+  },
+  "rules": {
+    "oneTerminalEventPerWait": true,
+    "terminalEvents": ["wait_satisfied", "wait_timed_out", "wait_cancelled"],
+    "credentialsPersisted": false,
+    "rejectedPayloadsPersisted": false
+  }
+}

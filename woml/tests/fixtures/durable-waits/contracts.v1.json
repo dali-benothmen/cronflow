@@ -1,0 +1,94 @@
+{
+  "profile": "woml.durable-waits-contract/v1",
+  "modelVersion": 17,
+  "eventVersion": 16,
+  "storeVersion": 15,
+  "admissionConcurrency": "waiting-runs-do-not-consume-execution-capacity",
+  "signalTarget": ["runId", "waitId", "signal", "correlation"],
+  "authoring": {
+    "duration": "<wait id duration>",
+    "until": "<wait-until id at>",
+    "signal": "<wait-for id correlation signal?>",
+    "signalForms": ["signal-attribute", "one-or-more-accept-children"],
+    "signalFormsAreMutuallyExclusive": true,
+    "timeoutDefault": "unbounded",
+    "onTimeoutDefault": "fail",
+    "correlationRequired": true,
+    "dynamicValues": "one-exact-context-reference"
+  },
+  "resolution": {
+    "winners": ["signaled", "timed_out", "cancelled"],
+    "cardinality": "exactly-one",
+    "authority": "rust-sqlite-transaction"
+  },
+  "limits": {
+    "waitDurationMinimumMs": 1000,
+    "waitDurationMaximumMs": 31536000000,
+    "acceptedSignalsPerWait": 16,
+    "signalNameBytes": 128,
+    "correlationBytes": 256,
+    "idempotencyKeyBytes": 256,
+    "payloadBytes": 1048576,
+    "payloadDepth": 32,
+    "earlySignalsPerRun": 64,
+    "requestsPerCredentialPerMinute": 120
+  },
+  "security": {
+    "httpIngressDefault": "disabled",
+    "credential": "dedicated-signal-ingress",
+    "runtimeAdminCredentialReuse": false,
+    "rejectedPayloadPersistence": false
+  },
+  "recovery": {
+    "earlySignals": "durable-for-known-run-and-wait",
+    "completedPredecessorReplay": false,
+    "inMemoryTimerAuthority": false
+  },
+  "events": {
+    "schemaVersion": 16,
+    "types": [
+      "wait_registered",
+      "external_signal_received",
+      "wait_satisfied",
+      "wait_timed_out",
+      "wait_cancelled"
+    ],
+    "rejectedIngressCreatesRunEvent": false
+  },
+  "store": {
+    "schemaVersion": 15,
+    "authoritativeTables": [
+      "durable_waits",
+      "external_signals",
+      "signal_idempotency"
+    ],
+    "eventLogRemainsContextAuthority": true,
+    "terminalResolutionUniqueBy": ["runId", "waitId", "iterationIdentity"]
+  },
+  "admission": {
+    "profile": "woml.external-signal-admission/v1",
+    "required": [
+      "signal",
+      "runId",
+      "waitId",
+      "correlation",
+      "idempotencyKey",
+      "payload"
+    ],
+    "statuses": [
+      "accepted",
+      "duplicate",
+      "identity_conflict",
+      "already_resolved",
+      "target_not_found",
+      "rejected"
+    ]
+  },
+  "interfaces": {
+    "cliProfile": "woml.signal-result/v1",
+    "inspectionProfile": "woml.wait-inspection/v1",
+    "httpProfile": "woml.signal-http/v1",
+    "httpPath": "/v1/signals/:name",
+    "httpIdempotencyHeader": "Idempotency-Key"
+  }
+}

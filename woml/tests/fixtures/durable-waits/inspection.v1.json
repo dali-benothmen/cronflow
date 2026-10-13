@@ -1,0 +1,24 @@
+{
+  "profile": "woml.wait-inspection/v1",
+  "required": ["runId", "waitId", "name", "kind", "status", "registeredAt"],
+  "status": ["pending", "signaled", "elapsed", "timed_out", "cancelled"],
+  "optional": [
+    "signals",
+    "correlation",
+    "correlationDigest",
+    "deadline",
+    "resolvedAt",
+    "winningSignal"
+  ],
+  "forbidden": ["payload", "credential", "authorizationHeader", "rawToken"],
+  "metrics": [
+    "pendingWaits",
+    "oldestPendingWaitAgeMs",
+    "schedulerLagMs",
+    "acceptedSignals",
+    "duplicateSignals",
+    "lateSignals",
+    "rejectedSignals",
+    "timedOutWaits"
+  ]
+}
