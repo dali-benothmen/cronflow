@@ -74,9 +74,11 @@ import {
   inspectRunPresentationWithRust,
   inspectRunV2WithRust,
   inspectWaitsV1WithRust,
+  inspectLocksV1WithRust,
   listRunPresentationsWithRust,
   listRunsWithRust,
   observeRuntimeWithRust,
+  observeLocksV1WithRust,
   BackupOperationError,
   ArtifactOperationError,
   RetentionOperationError,
@@ -98,6 +100,7 @@ import {
   type RustRunCancellationResultV1,
   type RustRunInspectionV2,
   type RustWaitInspectionV1,
+  type RustLockInspectionV1,
   type RustRunListV1,
   type ScheduleProgressV1,
   type TriggerProgressV1,
@@ -1048,7 +1051,8 @@ function formatRunInspection(
   inspection: RustRunInspectionV2,
   artifacts?: readonly RustArtifactInspectionV1[],
   artifactsTruncated = false,
-  waitInspection?: RustWaitInspectionV1
+  waitInspection?: RustWaitInspectionV1,
+  locks: readonly RustLockInspectionV1[] = []
 ): string {
   const lines = [
     `Run: ${inspection.runId}`,
@@ -1104,6 +1108,38 @@ function formatRunInspection(
         `Pending waits: ${waitInspection.pendingWaits}${waitInspection.oldestPendingWaitAgeMs === undefined ? '' : ` · oldest ${waitInspection.oldestPendingWaitAgeMs} ms`}`
       );
       lines.push(`Cancel safely: woml cancel ${inspection.runId}`);
+    }
+  }
+  if (locks.length > 0) {
+    lines.push('Locks:');
+    for (const lock of locks) {
+      const timing =
+        lock.status === 'waiting'
+          ? lock.waitedMs === undefined
+            ? ''
+            : ` · waiting ${lock.waitedMs} ms`
+          : lock.heldMs === undefined
+            ? ''
+            : ` · held ${lock.heldMs} ms`;
+      const fence =
+        lock.fencingToken === undefined
+          ? ''
+          : ` · fence ${lock.fencingToken}`;
+      lines.push(`  ${lock.lockId}: ${lock.status}${timing}${fence}`);
+      lines.push(`    Resource: ${lock.key}`);
+      if (lock.deadline !== undefined && lock.status === 'waiting') {
+        lines.push(`    Acquisition deadline: ${lock.deadline}`);
+      }
+      if (lock.expiresAt !== undefined && lock.status === 'held') {
+        lines.push(`    Lease expires: ${lock.expiresAt}`);
+      }
+      if (lock.failureCode !== undefined) {
+        lines.push(`    Failure: ${lock.failureCode}`);
+      }
+    }
+    if (locks.some(lock => lock.status === 'waiting' || lock.status === 'held')) {
+      lines.push(`Cancel safely: woml cancel ${inspection.runId}`);
+      lines.push('WOML intentionally provides no force-unlock command.');
     }
   }
   if (inspection.hooks.length > 0) {
@@ -5252,6 +5288,10 @@ async function activateWorkflows(
               observeRuntimeWithRust(args.statePath, {
                 nativeCorePath: dependencies.nativeCorePath,
               }),
+            observeLocks: () =>
+              observeLocksV1WithRust(args.statePath, {
+                nativeCorePath: dependencies.nativeCorePath,
+              }),
             ...(artifactAuthority === undefined ||
             artifactObservationSecrets === undefined
               ? {}
@@ -6823,7 +6863,20 @@ async function runCliUnprofiled(
         get.runId,
         { nativeCorePath: dependencies.nativeCorePath }
       );
-      const publicResult = waitInspection.waits.length === 0 ? {
+      const lockInspection = inspectLocksV1WithRust(
+        get.statePath,
+        get.runId,
+        { nativeCorePath: dependencies.nativeCorePath }
+      );
+      const publicResult = lockInspection.length > 0 ? {
+        ...result,
+        profile: 'woml.run-inspection/v9' as const,
+        artifacts: artifactInspection,
+        ...(waitInspection.waits.length === 0
+          ? {}
+          : { durableWaits: waitInspection }),
+        locks: lockInspection,
+      } : waitInspection.waits.length === 0 ? {
         ...result,
         profile: 'woml.run-inspection/v7' as const,
         artifacts: artifactInspection,
@@ -6840,7 +6893,8 @@ async function runCliUnprofiled(
               result,
               artifactInspection.artifacts,
               artifactInspection.truncated,
-              waitInspection
+              waitInspection,
+              lockInspection
             )
       );
       return 0;

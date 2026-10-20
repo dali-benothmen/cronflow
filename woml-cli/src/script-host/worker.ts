@@ -2000,6 +2000,55 @@ function workflowCallTimeoutMilliseconds(value: unknown): number {
   return Number(match[1]) * multiplier;
 }
 
+function lockDurationMilliseconds(value: unknown, label: string): number {
+  if (typeof value === 'number' && Number.isSafeInteger(value)) return value;
+  if (typeof value !== 'string') {
+    throw new TypeError(`${label} must be milliseconds or a duration string.`);
+  }
+  const match = value.match(/^(\d+)(ms|s|m|h|d)$/);
+  if (match === null) {
+    throw new TypeError(`${label} must look like 10s, 2m, 1h, or 1d.`);
+  }
+  const multiplier =
+    match[2] === 'ms'
+      ? 1
+      : match[2] === 's'
+        ? 1_000
+        : match[2] === 'm'
+          ? 60_000
+          : match[2] === 'h'
+            ? 3_600_000
+            : 86_400_000;
+  return Number(match[1]) * multiplier;
+}
+
+function publicLeaseAcquisition(result: JsonValue): {
+  readonly sessionId: string;
+  readonly key: string;
+  readonly fencingToken: string;
+  readonly acquiredAt: string;
+} {
+  const value = plainObject(result);
+  if (
+    value?.contract !== 'woml.locks-capability' ||
+    value.contractVersion !== 1 ||
+    value.kind !== 'acquired' ||
+    typeof value.sessionId !== 'string' ||
+    typeof value.key !== 'string' ||
+    typeof value.fencingToken !== 'string' ||
+    typeof value.acquiredAt !== 'string' ||
+    !Number.isFinite(Date.parse(value.acquiredAt))
+  ) {
+    throw new TypeError('Rust returned an invalid Locks Capability v1 acquisition.');
+  }
+  return {
+    sessionId: value.sessionId,
+    key: value.key,
+    fencingToken: value.fencingToken,
+    acquiredAt: value.acquiredAt,
+  };
+}
+
 function normalizeWorkflowOperation(
   operation: 'call' | 'start',
   args: readonly unknown[],
@@ -2146,7 +2195,11 @@ function deeplyReadonlyServiceFacade(
     capability: string,
     operation: string,
     input: JsonValue,
-    callOptions?: JsonValue
+    callOptions?: JsonValue,
+    identityOverride?: {
+      readonly mode: 'automatic' | 'named';
+      readonly name: string;
+    }
   ): Promise<JsonValue> => {
     const managedHttp = capability === 'http' && operation === 'request';
     const managedDatabase =
@@ -2168,6 +2221,11 @@ function deeplyReadonlyServiceFacade(
     const managedDiscord = capability === 'discord' && operation === 'send';
     const managedWhatsApp = capability === 'whatsapp' && operation === 'send';
     const managedProcess = capability === 'process' && operation === 'run';
+    const managedLocks =
+      capability === 'locks' &&
+      (operation === 'acquire' ||
+        operation === 'assert-current' ||
+        operation === 'release');
     if (
       !managedHttp &&
       !managedDatabase &&
@@ -2181,6 +2239,7 @@ function deeplyReadonlyServiceFacade(
       !managedDiscord &&
       !managedWhatsApp &&
       !managedProcess &&
+      !managedLocks &&
       callOptions !== undefined
     ) {
       throw new TypeError(
@@ -2208,7 +2267,7 @@ function deeplyReadonlyServiceFacade(
       ? plainObject(plainObject(input)?.input)
       : undefined;
     const identity = artifactPutInput === undefined
-      ? namedOperation(capability, operation, callOptions)
+      ? identityOverride ?? namedOperation(capability, operation, callOptions)
       : {
           mode: 'named' as const,
           name: String(artifactPutInput.name),
@@ -2235,6 +2294,7 @@ function deeplyReadonlyServiceFacade(
         managedDiscord ||
         managedWhatsApp ||
         managedProcess ||
+        (managedLocks && operation === 'acquire') ||
         (managedArtifacts && operation === 'put')) &&
       identity.mode === 'automatic'
     ) {
@@ -2269,6 +2329,12 @@ function deeplyReadonlyServiceFacade(
               Number((input as JsonObject).timeoutMs) + 1_000,
               Math.max(1, Math.floor(executionDeadline - performance.now()))
             )
+          : managedLocks && operation === 'acquire'
+            ? Math.min(
+                86_400_000,
+                Number((input as JsonObject).acquireTimeoutMs) + 1_000,
+                Math.max(1, Math.floor(executionDeadline - performance.now()))
+              )
           : managedArtifacts
             ? Math.min(
                 3_601_000,
@@ -2611,6 +2677,125 @@ function deeplyReadonlyServiceFacade(
         const artifacts = Object.freeze({ put, head, materialize });
         capabilityCache.set(capabilityProperty, artifacts);
         return artifacts;
+      }
+      if (capabilityProperty === 'locks') {
+        const withLease = async (...args: unknown[]): Promise<JsonValue> => {
+          if (args.length !== 3) {
+            throw new TypeError(
+              'services.locks.withLease() requires a key, options, and callback.'
+            );
+          }
+          const [key, rawOptions, callback] = args;
+          const options = plainObject(rawOptions);
+          if (
+            typeof key !== 'string' ||
+            Buffer.byteLength(key, 'utf8') < 1 ||
+            Buffer.byteLength(key, 'utf8') > 256 ||
+            key.trim() !== key ||
+            /[\u0000-\u001f\u007f]/u.test(key) ||
+            key.split('/').some(segment => segment.length === 0)
+          ) {
+            throw new TypeError('Lease key must be a safe 1-256 byte public identifier.');
+          }
+          if (options === undefined || typeof callback !== 'function') {
+            throw new TypeError(
+              'services.locks.withLease() requires an options object and async callback.'
+            );
+          }
+          const unknown = Object.keys(options).find(
+            property =>
+              property !== 'acquireTimeout' &&
+              property !== 'lease' &&
+              property !== 'name'
+          );
+          if (unknown !== undefined || options.acquireTimeout === undefined) {
+            throw new TypeError(
+              'Lease options accept acquireTimeout, optional lease, and optional name only.'
+            );
+          }
+          const acquireTimeoutMs = lockDurationMilliseconds(
+            options.acquireTimeout,
+            'Lease acquireTimeout'
+          );
+          const leaseMs = lockDurationMilliseconds(
+            options.lease ?? '30s',
+            'Lease duration'
+          );
+          if (acquireTimeoutMs < 1_000 || acquireTimeoutMs > 604_800_000) {
+            throw new TypeError('Lease acquireTimeout must be between 1 second and 7 days.');
+          }
+          if (leaseMs < 5_000 || leaseMs > 600_000) {
+            throw new TypeError('Lease duration must be between 5 seconds and 10 minutes.');
+          }
+          const callOptions =
+            options.name === undefined
+              ? undefined
+              : ({ name: options.name } as JsonObject);
+          const identity = namedOperation('locks', 'acquire', callOptions);
+          const acquired = publicLeaseAcquisition(
+            await invokeCapability(
+              'locks',
+              'acquire',
+              {
+                key,
+                acquireTimeoutMs,
+                leaseMs,
+                operationIdentity: identity.name,
+              },
+              callOptions,
+              identity
+            )
+          );
+          const assertCurrent = async (): Promise<void> => {
+            await invokeCapability('locks', 'assert-current', {
+              sessionId: acquired.sessionId,
+            });
+          };
+          Object.freeze(assertCurrent);
+          const lease = Object.freeze({
+            key: acquired.key,
+            fencingToken: acquired.fencingToken,
+            acquiredAt: acquired.acquiredAt,
+            assertCurrent,
+          });
+          let callbackResult: unknown;
+          let callbackFailure: unknown;
+          let callbackThrew = false;
+          try {
+            callbackResult = await Reflect.apply(callback, undefined, [lease]);
+            const violation = findJsonViolation(callbackResult);
+            if (violation !== undefined) {
+              throw new TypeError(
+                `services.locks.withLease() callback result ${violation.path}: ${violation.reason}`
+              );
+            }
+            const resultBytes = Buffer.byteLength(
+              JSON.stringify(callbackResult),
+              'utf8'
+            );
+            if (resultBytes > 4_194_304) {
+              throw new TypeError(
+                'services.locks.withLease() callback result exceeds 4 MiB.'
+              );
+            }
+          } catch (error) {
+            callbackThrew = true;
+            callbackFailure = error;
+          }
+          try {
+            await invokeCapability('locks', 'release', {
+              sessionId: acquired.sessionId,
+            });
+          } catch (releaseError) {
+            throw releaseError;
+          }
+          if (callbackThrew) throw callbackFailure;
+          return callbackResult as JsonValue;
+        };
+        Object.freeze(withLease);
+        const locks = Object.freeze({ withLease });
+        capabilityCache.set(capabilityProperty, locks);
+        return locks;
       }
       const operationCache = new Map<string, unknown>();
       const capability = new Proxy(Object.freeze({}), {

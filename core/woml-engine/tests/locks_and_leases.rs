@@ -146,6 +146,102 @@ fn admitted_runs(count: usize, now: chrono::DateTime<Utc>) -> (DurableDagEngine,
 }
 
 #[test]
+fn programmatic_lease_is_fenced_renewable_releasable_and_publicly_inspectable() {
+  let now = Utc::now();
+  let workflow = model();
+  let mut store = DurableEventStore::open_in_memory().unwrap();
+  store.register_definition(&workflow, HASH).unwrap();
+  let run_id = store
+    .admit_trigger_occurrence(TriggerAdmissionRequest {
+      workflow_id: workflow.workflow_id.clone(),
+      definition_hash: HASH.to_string(),
+      trigger_id: "start".to_string(),
+      trigger_handler: "trigger.manual".to_string(),
+      source_identity: "programmatic-lock-test".to_string(),
+      payload: Map::new(),
+      received_at: now,
+    })
+    .unwrap()
+    .run_id;
+  store
+    .claim_policy_run(
+      &run_id,
+      "programmatic-owner",
+      now,
+      std::time::Duration::from_secs(30),
+    )
+    .unwrap();
+  let mut engine = DurableDagEngine::resume(store, &run_id).unwrap();
+  engine
+    .start_step_attempt(&run_id, "prepare", 1, "inv-programmatic", now)
+    .unwrap();
+  let mut store = engine.into_store();
+  let acquired = store
+    .acquire_programmatic_lock_atomically(
+      &run_id,
+      "prepare",
+      "inv-programmatic",
+      "session_one",
+      "cache/customer-42",
+      10_000,
+      5_000,
+      now,
+    )
+    .unwrap();
+  assert_eq!(
+    acquired.state,
+    woml_engine::ProgrammaticLockAcquireState::Held
+  );
+  assert_eq!(acquired.lease.as_ref().unwrap().fencing_token, "1");
+  assert_eq!(
+    store
+      .renew_programmatic_lock_atomically(
+        &run_id,
+        "session_one",
+        5_000,
+        now + Duration::seconds(1),
+      )
+      .unwrap(),
+    woml_engine::LockLeaseMaintenance::Renewed
+  );
+
+  let held = store.inspect_locks_v1(&run_id).unwrap();
+  assert_eq!(held.len(), 1);
+  assert_eq!(held[0].lock_id, "services.locks.withLease");
+  assert_eq!(held[0].status, woml_engine::InspectedLockStatusV1::Held);
+  let public = serde_json::to_string(&held).unwrap();
+  for forbidden in [
+    "leaseCredential",
+    "renewalNonce",
+    "ownerRuntimeId",
+    "inputDigest",
+    "session_one",
+    "inv-programmatic",
+  ] {
+    assert!(!public.contains(forbidden));
+  }
+
+  assert!(
+    store
+      .release_programmatic_lock_atomically(
+        &run_id,
+        "session_one",
+        5_000,
+        now + Duration::seconds(2),
+      )
+      .unwrap()
+  );
+  let released = store.inspect_locks_v1(&run_id).unwrap();
+  assert_eq!(
+    released[0].status,
+    woml_engine::InspectedLockStatusV1::Released
+  );
+  let metrics = store.lock_observation_v1().unwrap();
+  assert_eq!(metrics.held_locks, 0);
+  assert_eq!(metrics.waiting_acquisitions, 0);
+}
+
+#[test]
 fn store_v16_serializes_fifo_owners_and_increments_fencing_tokens() {
   let now = Utc::now();
   let (mut engine, runs) = admitted_runs(3, now);

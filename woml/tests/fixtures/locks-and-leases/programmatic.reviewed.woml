@@ -1,0 +1,36 @@
+<woml>
+  <workflow
+    id="programmatic-lease"
+    name="Programmatic lease"
+    description="Protect one short script-local critical section."
+    version="1.0.0"
+  >
+    <triggers>
+      <manual id="start" />
+    </triggers>
+
+    <steps>
+      <step id="critical" name="Protected callback">
+        <script>
+          return await services.locks.withLease(
+            "inventory/customer-42",
+            {
+              name: "reserve-customer",
+              acquireTimeout: "5s",
+              lease: "5s"
+            },
+            async lease => {
+              await lease.assertCurrent();
+
+              return {
+                key: lease.key,
+                fencingToken: lease.fencingToken,
+                acquiredAt: lease.acquiredAt
+              };
+            }
+          );
+        </script>
+      </step>
+    </steps>
+  </workflow>
+</woml>

@@ -21,6 +21,7 @@ pub mod events_service;
 pub mod host;
 pub mod http;
 pub mod interval;
+pub mod locks;
 pub mod model;
 pub mod notification_host;
 pub mod notification_protocol;
@@ -94,26 +95,27 @@ pub use durable::{
   DurableDagEngine, DurableEngineError, DurableEventStore, DurableStoreError, DurableWaitRecordV1,
   ExternalSignalAdmissionOutcome, ExternalSignalAdmissionRequest, ExternalSignalAdmissionStatus,
   ExternalSignalResolution, ForkRecoveryBranchV1, ForkRecoveryWorkV1, InspectedBusinessOutcome,
-  InspectedForEachStatusV6, InspectedForkJoinModeV4, InspectedForkStatusV4,
+  InspectedForEachStatusV6, InspectedForkJoinModeV4, InspectedForkStatusV4, InspectedLockStatusV1,
   InspectedReusableKindV5, InspectedReusableLifecycleStatusV5, InspectedReusableStatusV5,
   InspectedWaitStatusV1, InspectedWaitV1, InternalEventAdmissionOutcome,
   InternalEventAdmissionRequest, IntervalCursor, IntervalCursorRegistration,
-  IntervalCursorRegistrationOutcome, IssuedApprovalToken, LockLeaseMaintenance,
-  NotificationDeliveryWork, NotificationDispatchReport, NotificationProviderAdapter,
-  NotificationProviderDeliveryResult, NotificationProviderUpdateResult, NotificationUpdateWork,
-  PolicyClaimWaitReason, PolicyExecutionClaimResult, PolicyWaitingFor, PublicRunStatus,
-  RecoveryReport, RunCancellationCode, RunCancellationResult, RunCancellationStatus,
-  RunDefinitionBinding, RunInspectionCancellationV2, RunInspectionForEachCountsV6,
-  RunInspectionForEachItemV6, RunInspectionForEachV6, RunInspectionForkCountsV4,
-  RunInspectionForkJoinV4, RunInspectionForkV4, RunInspectionForksV4, RunInspectionHookV2,
-  RunInspectionPolicyV3, RunInspectionReusableCountsV5, RunInspectionReusableDefinitionsV5,
-  RunInspectionReusableItemV5, RunInspectionV2, RunInspectionV3, RunInspectionV4, RunInspectionV5,
-  RunInspectionV6, RunListV1, RunListV2, RunSummaryV1, RunSummaryV2, RunTimeoutSettlement,
-  RuntimeObservationV1, RuntimeOwnerLease, ScheduleCursor, ScheduleCursorRegistration,
-  ScheduleCursorRegistrationOutcome, SchedulerClaimV1, SignalWaitTimeoutSettlement,
-  StepFailureCommit, StepFailureDisposition, TimerWaitSettlement, TriggerAdmissionOutcome,
-  TriggerAdmissionRequest, TriggerOccurrence, TriggerRecoveryWork, WaitInspectionV1,
-  DURABLE_STORE_SCHEMA_VERSION, EXTERNAL_SIGNAL_ADMISSION_PROFILE,
+  IntervalCursorRegistrationOutcome, IssuedApprovalToken, LockInspectionV1, LockLeaseMaintenance,
+  LockObservationV1, NotificationDeliveryWork, NotificationDispatchReport,
+  NotificationProviderAdapter, NotificationProviderDeliveryResult,
+  NotificationProviderUpdateResult, NotificationUpdateWork, PolicyClaimWaitReason,
+  PolicyExecutionClaimResult, PolicyWaitingFor, ProgrammaticLockAcquire,
+  ProgrammaticLockAcquireState, ProgrammaticLockLease, PublicRunStatus, RecoveryReport,
+  RunCancellationCode, RunCancellationResult, RunCancellationStatus, RunDefinitionBinding,
+  RunInspectionCancellationV2, RunInspectionForEachCountsV6, RunInspectionForEachItemV6,
+  RunInspectionForEachV6, RunInspectionForkCountsV4, RunInspectionForkJoinV4, RunInspectionForkV4,
+  RunInspectionForksV4, RunInspectionHookV2, RunInspectionPolicyV3, RunInspectionReusableCountsV5,
+  RunInspectionReusableDefinitionsV5, RunInspectionReusableItemV5, RunInspectionV2,
+  RunInspectionV3, RunInspectionV4, RunInspectionV5, RunInspectionV6, RunListV1, RunListV2,
+  RunSummaryV1, RunSummaryV2, RunTimeoutSettlement, RuntimeObservationV1, RuntimeOwnerLease,
+  ScheduleCursor, ScheduleCursorRegistration, ScheduleCursorRegistrationOutcome, SchedulerClaimV1,
+  SignalWaitTimeoutSettlement, StepFailureCommit, StepFailureDisposition, TimerWaitSettlement,
+  TriggerAdmissionOutcome, TriggerAdmissionRequest, TriggerOccurrence, TriggerRecoveryWork,
+  WaitInspectionV1, DURABLE_STORE_SCHEMA_VERSION, EXTERNAL_SIGNAL_ADMISSION_PROFILE,
   EXTERNAL_SIGNAL_MAX_EARLY_PER_RUN, EXTERNAL_SIGNAL_MAX_PAYLOAD_BYTES,
   EXTERNAL_SIGNAL_MAX_PAYLOAD_DEPTH, EXTERNAL_SIGNAL_RESULT_PROFILE, RUNTIME_POLICY_QUEUE_CEILING,
 };
@@ -164,6 +166,10 @@ pub use http::ManagedHttpHandler;
 pub use interval::{
   IntervalError, IntervalProgress, IntervalProgressReason, IntervalProgressReporter, WomlInterval,
   INTERVAL_PROGRESS_CONTRACT, INTERVAL_PROGRESS_CONTRACT_VERSION, MAX_INTERVAL_MS, MIN_INTERVAL_MS,
+};
+pub use locks::{
+  ManagedLocksHandler, ManagedLocksService, LOCKS_CAPABILITY_CONTRACT,
+  LOCKS_CAPABILITY_CONTRACT_VERSION,
 };
 pub use model::{
   CompiledLifecycleAction, CompiledLifecycleDefinition, CompiledLifecycleHook, CompiledLock,

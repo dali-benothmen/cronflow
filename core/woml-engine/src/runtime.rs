@@ -268,6 +268,7 @@ pub struct RuntimeExecutionOptions {
   managed_storage_store: Option<Arc<crate::ManagedStorageStore>>,
   managed_cache_store: Option<Arc<crate::ManagedCacheStore>>,
   managed_durable_state_store: Option<Arc<crate::ManagedDurableStateStore>>,
+  managed_locks_service: Option<Arc<crate::ManagedLocksService>>,
   managed_artifact_store: Option<Arc<crate::ManagedArtifactStore>>,
   artifact_policy: Option<Arc<crate::artifacts::PreparedArtifactPolicy>>,
   policy_execution: Option<Arc<PolicyExecutionCoordinator>>,
@@ -445,6 +446,12 @@ impl RuntimeExecutionOptions {
         .register(handler)
         .expect("each production durable state operation is registered exactly once");
     }
+    let managed_locks_service = Arc::new(crate::ManagedLocksService::default());
+    for handler in crate::ManagedLocksService::handlers(Arc::clone(&managed_locks_service)) {
+      capability_registry
+        .register(handler)
+        .expect("each production lock operation is registered exactly once");
+    }
     Self {
       script_host,
       notification_host,
@@ -469,6 +476,7 @@ impl RuntimeExecutionOptions {
       managed_storage_store: Some(managed_storage_store),
       managed_cache_store: Some(managed_cache_store),
       managed_durable_state_store: Some(managed_durable_state_store),
+      managed_locks_service: Some(managed_locks_service),
       managed_artifact_store: None,
       artifact_policy: None,
       policy_execution: None,
@@ -605,6 +613,7 @@ impl RuntimeExecutionOptions {
     self.managed_storage_store = None;
     self.managed_cache_store = None;
     self.managed_durable_state_store = None;
+    self.managed_locks_service = None;
     self.managed_artifact_store = None;
     self.artifact_policy = None;
     self
@@ -1975,6 +1984,11 @@ fn attach_durable_capability_authority(
       .configure_for_state(database_path)
       .map_err(|failure| RuntimeExecutionError::InvalidConfiguration(failure.message))?;
   }
+  if let Some(locks) = &options.managed_locks_service {
+    locks
+      .configure_for_state(database_path)
+      .map_err(|failure| RuntimeExecutionError::InvalidConfiguration(failure.message))?;
+  }
   if let (Some(artifacts), Some(policy)) =
     (&options.managed_artifact_store, &options.artifact_policy)
   {
@@ -1995,9 +2009,14 @@ fn attach_durable_capability_authority(
       .protect_path(database_path)
       .map_err(|failure| RuntimeExecutionError::InvalidConfiguration(failure.message))?;
   }
-  options.capability_authority = Some(Arc::new(DurableCapabilityAuthority::new(
+  let locks = options
+    .managed_locks_service
+    .clone()
+    .unwrap_or_else(|| Arc::new(crate::ManagedLocksService::default()));
+  options.capability_authority = Some(Arc::new(DurableCapabilityAuthority::new_with_locks(
     Arc::clone(&options.capability_registry),
     Arc::new(tokio::sync::Mutex::new(store)),
+    locks,
   )));
   Ok(options)
 }

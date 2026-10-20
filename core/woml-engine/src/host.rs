@@ -483,6 +483,7 @@ async fn host_message_reader<R: AsyncRead + Unpin + Send + 'static>(
           return;
         };
         if let Some(authority) = &authority {
+          authority.close_programmatic_lock_sessions(&identity.invocation_id);
           if authority
             .close_active_native_fetches(&identity, completion_fetch_failure(&message.outcome))
             .await
@@ -735,6 +736,9 @@ async fn fail_all(shared: &Arc<Mutex<SharedState>>, error: ScriptHostClientError
     call.cancel();
   }
   for (_, pending) in pending {
+    if let Some(authority) = &pending.authority {
+      authority.close_programmatic_lock_sessions(&pending.identity.invocation_id);
+    }
     let _ = pending.sender.send(Err(error.clone()));
   }
 }

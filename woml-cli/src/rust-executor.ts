@@ -785,6 +785,39 @@ export interface RustWaitInspectionV1 {
   }[];
 }
 
+export interface RustLockInspectionV1 {
+  readonly profile: 'woml.lock-inspection/v1';
+  readonly runId: string;
+  readonly lockId: string;
+  readonly key: string;
+  readonly status:
+    | 'waiting'
+    | 'held'
+    | 'released'
+    | 'timed_out'
+    | 'cancelled'
+    | 'lost';
+  readonly registeredAt: string;
+  readonly acquiredAt?: string;
+  readonly releasedAt?: string;
+  readonly deadline?: string;
+  readonly expiresAt?: string;
+  readonly fencingToken?: string;
+  readonly waitedMs?: number;
+  readonly heldMs?: number;
+  readonly failureCode?: string;
+}
+
+export interface RustLockObservationV1 {
+  readonly profile: 'woml.lock-observation/v1';
+  readonly heldLocks: number;
+  readonly waitingAcquisitions: number;
+  readonly oldestWaiterAgeMs?: number;
+  readonly renewalFailures: number;
+  readonly expiredTakeovers: number;
+  readonly acquisitionTimeouts: number;
+}
+
 export interface RustRunCancellationResultV1 {
   readonly profile: 'woml.run-control.result/v1';
   readonly commandId: string;
@@ -1157,6 +1190,8 @@ interface NativeCore {
   ) => string;
   readonly inspectWomlRunV2: (eventStorePath: string, runId: string) => string;
   readonly inspectWomlWaitsV1: (eventStorePath: string, runId: string) => string;
+  readonly inspectWomlLocksV1?: (eventStorePath: string, runId: string) => string;
+  readonly observeWomlLocksV1?: (eventStorePath: string) => string;
   readonly cancelWomlRun: (
     eventStorePath: string,
     runId: string,
@@ -4548,6 +4583,113 @@ export function inspectWaitsV1WithRust(
     throw new Error('The native core returned invalid durable-wait inspection data.');
   }
   return value as unknown as RustWaitInspectionV1;
+}
+
+export function inspectLocksV1WithRust(
+  eventStorePath: string,
+  runId: string,
+  options: Pick<RustExecutorOptions, 'nativeCorePath'> = {}
+): readonly RustLockInspectionV1[] {
+  const nativePath = options.nativeCorePath ?? defaultNativeCorePath();
+  const native = loadNativeCore(nativePath);
+  if (typeof native.inspectWomlLocksV1 !== 'function') {
+    throw new Error(
+      `Native core at "${nativePath}" does not expose lock inspection; rebuild the Rust addon.`
+    );
+  }
+  const value = callRunManagementNative(() =>
+    native.inspectWomlLocksV1!(eventStorePath, runId)
+  );
+  const validInteger = (candidate: unknown) =>
+    Number.isSafeInteger(candidate) && Number(candidate) >= 0;
+  const lock = (candidate: unknown): boolean =>
+    record(candidate) &&
+    exactKeys(
+      candidate,
+      ['profile', 'runId', 'lockId', 'key', 'status', 'registeredAt'],
+      [
+        'acquiredAt',
+        'releasedAt',
+        'deadline',
+        'expiresAt',
+        'fencingToken',
+        'waitedMs',
+        'heldMs',
+        'failureCode',
+      ]
+    ) &&
+    candidate.profile === 'woml.lock-inspection/v1' &&
+    candidate.runId === runId &&
+    typeof candidate.lockId === 'string' &&
+    candidate.lockId.length > 0 &&
+    typeof candidate.key === 'string' &&
+    Buffer.byteLength(candidate.key, 'utf8') <= 256 &&
+    ['waiting', 'held', 'released', 'timed_out', 'cancelled', 'lost'].includes(
+      String(candidate.status)
+    ) &&
+    dateTime(candidate.registeredAt) &&
+    (candidate.acquiredAt === undefined || dateTime(candidate.acquiredAt)) &&
+    (candidate.releasedAt === undefined || dateTime(candidate.releasedAt)) &&
+    (candidate.deadline === undefined || dateTime(candidate.deadline)) &&
+    (candidate.expiresAt === undefined || dateTime(candidate.expiresAt)) &&
+    (candidate.fencingToken === undefined ||
+      /^(0|[1-9][0-9]*)$/.test(String(candidate.fencingToken))) &&
+    (candidate.waitedMs === undefined || validInteger(candidate.waitedMs)) &&
+    (candidate.heldMs === undefined || validInteger(candidate.heldMs)) &&
+    (candidate.failureCode === undefined ||
+      (typeof candidate.failureCode === 'string' &&
+        /^WOML_[A-Z0-9_]+$/.test(candidate.failureCode)));
+  if (
+    !Array.isArray(value) ||
+    value.length > 100 ||
+    !value.every(lock)
+  ) {
+    throw new Error('The native core returned invalid Lock Inspection v1 data.');
+  }
+  return value as unknown as readonly RustLockInspectionV1[];
+}
+
+export function observeLocksV1WithRust(
+  eventStorePath: string,
+  options: Pick<RustExecutorOptions, 'nativeCorePath'> = {}
+): RustLockObservationV1 {
+  const nativePath = options.nativeCorePath ?? defaultNativeCorePath();
+  const native = loadNativeCore(nativePath);
+  if (typeof native.observeWomlLocksV1 !== 'function') {
+    throw new Error(
+      `Native core at "${nativePath}" does not expose lock observation; rebuild the Rust addon.`
+    );
+  }
+  const value = callRunManagementNative(() =>
+    native.observeWomlLocksV1!(eventStorePath)
+  );
+  const count = (candidate: unknown) =>
+    Number.isSafeInteger(candidate) && Number(candidate) >= 0;
+  if (
+    !record(value) ||
+    !exactKeys(
+      value,
+      [
+        'profile',
+        'heldLocks',
+        'waitingAcquisitions',
+        'renewalFailures',
+        'expiredTakeovers',
+        'acquisitionTimeouts',
+      ],
+      ['oldestWaiterAgeMs']
+    ) ||
+    value.profile !== 'woml.lock-observation/v1' ||
+    !count(value.heldLocks) ||
+    !count(value.waitingAcquisitions) ||
+    !count(value.renewalFailures) ||
+    !count(value.expiredTakeovers) ||
+    !count(value.acquisitionTimeouts) ||
+    (value.oldestWaiterAgeMs !== undefined && !count(value.oldestWaiterAgeMs))
+  ) {
+    throw new Error('The native core returned invalid Lock Observation v1 data.');
+  }
+  return value as unknown as RustLockObservationV1;
 }
 
 export function cancelRunWithRust(
