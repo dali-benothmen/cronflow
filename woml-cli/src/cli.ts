@@ -1794,7 +1794,8 @@ function promoteForLifecycleAuthority(
     workflow.schemaVersion === 15 ||
     workflow.schemaVersion === 16 ||
     workflow.schemaVersion === 17 ||
-    workflow.schemaVersion === 18
+    workflow.schemaVersion === 18 ||
+    workflow.schemaVersion === 19
   ) {
     return workflow;
   }
@@ -2311,12 +2312,6 @@ async function compileWorkflowSourcesUnprofiled(
         }
         return lowered;
       });
-    if (frontendWorkflow.schemaVersion === 19) {
-      throw new CliInputError(
-        'WOML_FEATURE_NOT_EXECUTABLE',
-        'Compensation and cleanup authoring is valid, but Model v19 execution begins in CC2–CC4. Use `woml check` to validate this workflow for now.'
-      );
-    }
     const workflow = profileSync('compiler', 'compiler.promote_model', () =>
       promoteForLifecycleAuthority(frontendWorkflow)
     );
@@ -3664,7 +3659,8 @@ function workflowSecretReferences(
   if (
     workflow.schemaVersion === 16 ||
     workflow.schemaVersion === 17 ||
-    workflow.schemaVersion === 18
+    workflow.schemaVersion === 18 ||
+    workflow.schemaVersion === 19
   ) {
     for (const descriptor of workflow.graph.forEach) {
       for (const node of descriptor.body.nodes) {
@@ -3675,11 +3671,22 @@ function workflowSecretReferences(
       }
     }
   }
+  if (workflow.schemaVersion === 19) {
+    for (const saga of workflow.graph.sagas) {
+      for (const action of [...saga.compensations, ...saga.cleanup]) {
+        collectSecretReferences(action.node.inputs, references);
+        for (const name of action.node.scriptRuntime?.requiredSecrets ?? []) {
+          references.push({ kind: 'secretReference', name });
+        }
+      }
+    }
+  }
   for (const definition of workflow.schemaVersion === 14 ||
   workflow.schemaVersion === 15 ||
   workflow.schemaVersion === 16 ||
   workflow.schemaVersion === 17 ||
-  workflow.schemaVersion === 18
+  workflow.schemaVersion === 18 ||
+  workflow.schemaVersion === 19
     ? (workflow.reusableDefinitions ?? [])
     : []) {
     for (const prop of definition.props) {
@@ -4164,7 +4171,8 @@ async function executeOneShot(
     workflow.schemaVersion !== 15 &&
     workflow.schemaVersion !== 16 &&
     workflow.schemaVersion !== 17 &&
-    workflow.schemaVersion !== 18
+    workflow.schemaVersion !== 18 &&
+    workflow.schemaVersion !== 19
   ) {
     throw new CliInputError(
       'WOML_RESUME_REQUIRES_DURABLE_WORKFLOW',
@@ -4197,7 +4205,8 @@ async function executeOneShot(
     workflow.schemaVersion === 15 ||
     workflow.schemaVersion === 16 ||
     workflow.schemaVersion === 17 ||
-    workflow.schemaVersion === 18
+    workflow.schemaVersion === 18 ||
+    workflow.schemaVersion === 19
   ) {
     await mkdir(dirname(args.statePath), { recursive: true });
     const onProgress = durableRetryProgress(io, args);

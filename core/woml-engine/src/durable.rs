@@ -60,7 +60,7 @@ use crate::{
   RUN_EVENT_SCHEMA_VERSION_V8, RUN_EVENT_SCHEMA_VERSION_V9,
 };
 
-pub const DURABLE_STORE_SCHEMA_VERSION: u32 = 16;
+pub const DURABLE_STORE_SCHEMA_VERSION: u32 = 17;
 const STORE_SCHEMA_VERSION_V1: &str = "1";
 const STORE_SCHEMA_VERSION_V2: &str = "2";
 const STORE_SCHEMA_VERSION_V3: &str = "3";
@@ -77,6 +77,7 @@ const STORE_SCHEMA_VERSION_V13: &str = "13";
 const STORE_SCHEMA_VERSION_V14: &str = "14";
 const STORE_SCHEMA_VERSION_V15: &str = "15";
 const STORE_SCHEMA_VERSION_V16: &str = "16";
+const STORE_SCHEMA_VERSION_V17: &str = "17";
 const DEFAULT_APPROVAL_CREDENTIAL_LIFETIME_HOURS: i64 = 24;
 
 const CREATE_RUN_SUMMARY_SCHEMA_V11: &str = r#"
@@ -350,6 +351,69 @@ CREATE INDEX IF NOT EXISTS woml_lock_waiters_fair_queue
   ON woml_lock_waiters(key, status, sequence, waiter_id);
 CREATE INDEX IF NOT EXISTS woml_lock_waiters_recovery
   ON woml_lock_waiters(status, deadline, run_id, node_execution_id);
+"#;
+
+const CREATE_CORRECTION_SCHEMA_V17: &str = r#"
+CREATE TABLE IF NOT EXISTS woml_saga_scopes (
+  run_id TEXT NOT NULL,
+  saga_id TEXT NOT NULL,
+  phase TEXT NOT NULL CHECK (phase IN ('forward', 'forward_succeeded', 'correcting', 'correction_completed', 'manual_recovery')),
+  original_outcome TEXT CHECK (original_outcome IS NULL OR original_outcome IN ('success', 'failure', 'cancel')),
+  started_sequence INTEGER NOT NULL CHECK (started_sequence >= 1),
+  committed_sequence INTEGER,
+  updated_at TEXT NOT NULL,
+  model_digest TEXT NOT NULL,
+  PRIMARY KEY (run_id, saga_id),
+  FOREIGN KEY (run_id) REFERENCES woml_runs(run_id)
+);
+
+CREATE TABLE IF NOT EXISTS woml_correction_actions (
+  run_id TEXT NOT NULL,
+  saga_id TEXT NOT NULL,
+  action_id TEXT NOT NULL,
+  action_kind TEXT NOT NULL CHECK (action_kind IN ('compensation', 'cleanup')),
+  for_step_execution_id TEXT,
+  completion_sequence INTEGER,
+  status TEXT NOT NULL CHECK (status IN ('registered', 'started', 'retry_scheduled', 'succeeded', 'failed', 'interrupted', 'manual_recovery')),
+  attempts INTEGER NOT NULL CHECK (attempts BETWEEN 0 AND 10),
+  next_attempt_at TEXT,
+  updated_at TEXT NOT NULL,
+  PRIMARY KEY (run_id, saga_id, action_id),
+  FOREIGN KEY (run_id, saga_id) REFERENCES woml_saga_scopes(run_id, saga_id)
+);
+
+CREATE TABLE IF NOT EXISTS woml_correction_attempts (
+  run_id TEXT NOT NULL,
+  saga_id TEXT NOT NULL,
+  action_id TEXT NOT NULL,
+  attempt INTEGER NOT NULL CHECK (attempt BETWEEN 1 AND 10),
+  invocation_id TEXT NOT NULL UNIQUE,
+  status TEXT NOT NULL CHECK (status IN ('started', 'succeeded', 'failed', 'interrupted')),
+  started_at TEXT NOT NULL,
+  finished_at TEXT,
+  failure_code TEXT,
+  PRIMARY KEY (run_id, saga_id, action_id, attempt),
+  FOREIGN KEY (run_id, saga_id, action_id) REFERENCES woml_correction_actions(run_id, saga_id, action_id)
+);
+
+CREATE TABLE IF NOT EXISTS woml_correction_manual_recovery (
+  run_id TEXT NOT NULL,
+  saga_id TEXT NOT NULL,
+  action_id TEXT NOT NULL,
+  status TEXT NOT NULL CHECK (status IN ('required', 'externally_resolved')),
+  reason_code TEXT NOT NULL,
+  created_at TEXT NOT NULL,
+  resolved_at TEXT,
+  PRIMARY KEY (run_id, saga_id, action_id),
+  FOREIGN KEY (run_id, saga_id, action_id) REFERENCES woml_correction_actions(run_id, saga_id, action_id)
+);
+
+CREATE INDEX IF NOT EXISTS woml_correction_actions_pending
+  ON woml_correction_actions(status, next_attempt_at, run_id, saga_id);
+CREATE INDEX IF NOT EXISTS woml_correction_attempts_active
+  ON woml_correction_attempts(status, run_id, saga_id, action_id);
+CREATE INDEX IF NOT EXISTS woml_correction_manual_recovery_pending
+  ON woml_correction_manual_recovery(status, created_at, run_id, saga_id);
 "#;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -1439,6 +1503,40 @@ pub struct WaitInspectionV1 {
   pub oldest_pending_wait_age_ms: Option<u64>,
 }
 
+pub const CORRECTION_INSPECTION_PROFILE: &str = "woml.correction-inspection/v1";
+const MAX_CORRECTION_INSPECTION_ROWS: usize = 100;
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CorrectionSagaInspectionV1 {
+  pub saga_id: String,
+  pub status: String,
+  pub registered_compensations: u32,
+  pub completed_compensations: u32,
+  pub completed_cleanup: u32,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UnresolvedCorrectionActionV1 {
+  pub action_id: String,
+  pub kind: crate::CorrectiveActionKind,
+  pub code: String,
+  pub ambiguous: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CorrectionInspectionV1 {
+  pub profile: &'static str,
+  pub run_id: String,
+  pub phase: String,
+  pub original_outcome: String,
+  pub sagas: Vec<CorrectionSagaInspectionV1>,
+  pub unresolved_actions: Vec<UnresolvedCorrectionActionV1>,
+  pub truncated: bool,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum InspectedLockStatusV1 {
@@ -2284,6 +2382,24 @@ fn migrate_store_v15_to_v16(connection: &mut Connection) -> Result<(), DurableSt
   Ok(())
 }
 
+fn migrate_store_v16_to_v17(connection: &mut Connection) -> Result<(), DurableStoreError> {
+  let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+  transaction.execute_batch(CREATE_CORRECTION_SCHEMA_V17)?;
+  validate_store_v17_schema(&transaction)?;
+  rebuild_correction_indexes(&transaction)?;
+  let changed = transaction.execute(
+    "UPDATE woml_store_metadata SET value = ?1 WHERE key = 'schema_version' AND value = ?2",
+    [STORE_SCHEMA_VERSION_V17, STORE_SCHEMA_VERSION_V16],
+  )?;
+  if changed != 1 {
+    return Err(DurableStoreError::Contract(
+      "Store v16-to-v17 migration could not update the schema version atomically.".to_string(),
+    ));
+  }
+  transaction.commit()?;
+  Ok(())
+}
+
 fn validate_store_v2_schema(connection: &Connection) -> Result<(), DurableStoreError> {
   for (object_type, name) in [
     ("table", "woml_approval_tokens"),
@@ -2841,6 +2957,103 @@ fn validate_store_v16_schema(connection: &Connection) -> Result<(), DurableStore
   Ok(())
 }
 
+fn validate_store_v17_schema(connection: &Connection) -> Result<(), DurableStoreError> {
+  validate_store_v16_schema(connection)?;
+  for (name, expected_columns) in [
+    (
+      "woml_saga_scopes",
+      &[
+        "run_id",
+        "saga_id",
+        "phase",
+        "original_outcome",
+        "started_sequence",
+        "committed_sequence",
+        "updated_at",
+        "model_digest",
+      ][..],
+    ),
+    (
+      "woml_correction_actions",
+      &[
+        "run_id",
+        "saga_id",
+        "action_id",
+        "action_kind",
+        "for_step_execution_id",
+        "completion_sequence",
+        "status",
+        "attempts",
+        "next_attempt_at",
+        "updated_at",
+      ][..],
+    ),
+    (
+      "woml_correction_attempts",
+      &[
+        "run_id",
+        "saga_id",
+        "action_id",
+        "attempt",
+        "invocation_id",
+        "status",
+        "started_at",
+        "finished_at",
+        "failure_code",
+      ][..],
+    ),
+    (
+      "woml_correction_manual_recovery",
+      &[
+        "run_id",
+        "saga_id",
+        "action_id",
+        "status",
+        "reason_code",
+        "created_at",
+        "resolved_at",
+      ][..],
+    ),
+  ] {
+    let exists: bool = connection.query_row(
+      "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?1)",
+      [name],
+      |row| row.get(0),
+    )?;
+    if !exists {
+      return Err(DurableStoreError::Contract(format!(
+        "Store v17 is missing required table {name:?}."
+      )));
+    }
+    let mut statement = connection.prepare(&format!("PRAGMA table_info({name})"))?;
+    let columns = statement
+      .query_map([], |row| row.get::<_, String>(1))?
+      .collect::<Result<Vec<_>, _>>()?;
+    if columns != expected_columns {
+      return Err(DurableStoreError::Contract(format!(
+        "Store v17 {name} columns do not match the frozen schema: expected {expected_columns:?}, found {columns:?}."
+      )));
+    }
+  }
+  for name in [
+    "woml_correction_actions_pending",
+    "woml_correction_attempts_active",
+    "woml_correction_manual_recovery_pending",
+  ] {
+    let exists: bool = connection.query_row(
+      "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type = 'index' AND name = ?1)",
+      [name],
+      |row| row.get(0),
+    )?;
+    if !exists {
+      return Err(DurableStoreError::Contract(format!(
+        "Store v17 is missing required index {name:?}."
+      )));
+    }
+  }
+  Ok(())
+}
+
 fn runtime_policy_indexes_need_rebuild(connection: &Connection) -> Result<bool, DurableStoreError> {
   let count = |sql: &str| -> Result<i64, DurableStoreError> {
     Ok(connection.query_row(sql, [], |row| row.get(0))?)
@@ -2896,7 +3109,7 @@ impl DurableEventStore {
       [],
       |row| row.get(0),
     )?;
-    if version != STORE_SCHEMA_VERSION_V16 {
+    if version != STORE_SCHEMA_VERSION_V17 {
       return Err(DurableStoreError::UnsupportedStoreVersion(version));
     }
     if let Ok(metadata) = std::fs::metadata(path) {
@@ -2929,6 +3142,7 @@ impl DurableEventStore {
       )
       .optional()?;
     match version.as_deref() {
+      Some(STORE_SCHEMA_VERSION_V17) => validate_store_v17_schema(&connection)?,
       Some(STORE_SCHEMA_VERSION_V16) => validate_store_v16_schema(&connection)?,
       Some(STORE_SCHEMA_VERSION_V15) => validate_store_v15_schema(&connection)?,
       Some(STORE_SCHEMA_VERSION_V14) => validate_store_v14_schema(&connection)?,
@@ -3074,7 +3288,20 @@ impl DurableEventStore {
     if current_version == STORE_SCHEMA_VERSION_V15 {
       migrate_store_v15_to_v16(&mut connection)?;
     }
-    validate_store_v16_schema(&connection)?;
+    let current_version: String = connection.query_row(
+      "SELECT value FROM woml_store_metadata WHERE key = 'schema_version'",
+      [],
+      |row| row.get(0),
+    )?;
+    if current_version == STORE_SCHEMA_VERSION_V16 {
+      migrate_store_v16_to_v17(&mut connection)?;
+    }
+    validate_store_v17_schema(&connection)?;
+    {
+      let recovery = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+      rebuild_correction_indexes(&recovery)?;
+      recovery.commit()?;
+    }
     if runtime_policy_indexes_need_rebuild(&connection)? {
       let recovery = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
       rebuild_runtime_policy_indexes(&recovery)?;
@@ -4711,6 +4938,7 @@ impl DurableEventStore {
         | crate::RUN_EVENT_SCHEMA_VERSION_V15
         | crate::RUN_EVENT_SCHEMA_VERSION_V16
         | crate::RUN_EVENT_SCHEMA_VERSION_V17
+        | crate::RUN_EVENT_SCHEMA_VERSION_V18
     ) {
       expand_model_v11_payload(&workflow, &run_id, payload)?
     } else {
@@ -4772,6 +5000,15 @@ impl DurableEventStore {
     validate_event_history_against_definition(&workflow, &binding.definition_hash, &events)
       .map_err(DurableStoreError::Contract)?;
     let projection = projection_state.projection().clone();
+    if event_schema_version == crate::RUN_EVENT_SCHEMA_VERSION_V18 {
+      write_correction_indexes_from_projection(
+        &transaction,
+        &run_id,
+        &binding.definition_hash,
+        &events,
+        &projection,
+      )?;
+    }
     transaction.commit()?;
     cache_projection_state(&self.projection_cache, &run_id, projection_state);
     span.count("events", events.len().saturating_sub(existing_event_count));
@@ -4821,6 +5058,7 @@ impl DurableEventStore {
           | crate::RUN_EVENT_SCHEMA_VERSION_V15
           | crate::RUN_EVENT_SCHEMA_VERSION_V16
           | crate::RUN_EVENT_SCHEMA_VERSION_V17
+          | crate::RUN_EVENT_SCHEMA_VERSION_V18
       ) {
         expand_model_v11_payload(&workflow, run_id, payload)?
       } else {
@@ -4868,6 +5106,15 @@ impl DurableEventStore {
       .payload
     {
       write_runtime_policy_indexes_from_projection(&transaction, run_id, admission, &projection)?;
+    }
+    if event_schema_version == crate::RUN_EVENT_SCHEMA_VERSION_V18 {
+      write_correction_indexes_from_projection(
+        &transaction,
+        run_id,
+        &binding.definition_hash,
+        &events,
+        &projection,
+      )?;
     }
     transaction.commit()?;
     cache_projection_state(&self.projection_cache, run_id, projection_state);
@@ -5714,6 +5961,144 @@ impl DurableEventStore {
       pending_waits: u32::try_from(pending.len()).unwrap_or(u32::MAX),
       oldest_pending_wait_age_ms,
       waits,
+    })
+  }
+
+  /// Builds the bounded public correction view exclusively from immutable run
+  /// events. Store v17 tables remain disposable acceleration indexes.
+  pub fn inspect_correction_v1(
+    &self,
+    run_id: &str,
+  ) -> Result<CorrectionInspectionV1, DurableStoreError> {
+    let binding = self.run_binding(run_id)?;
+    let workflow = self.definition(&binding.definition_hash)?;
+    if workflow.schema_version != crate::COMPILED_MODEL_SCHEMA_VERSION_V19 {
+      return Err(DurableStoreError::Contract(
+        "Correction Inspection v1 is available only for compiled Model v19 runs.".to_string(),
+      ));
+    }
+    let projection = self.projection(run_id)?;
+    let phase = if projection
+      .sagas
+      .values()
+      .any(|saga| saga.phase == crate::SagaPhase::ManualRecovery)
+    {
+      "manual_recovery"
+    } else if projection
+      .sagas
+      .values()
+      .any(|saga| saga.phase == crate::SagaPhase::Correcting)
+    {
+      "correcting"
+    } else if projection
+      .sagas
+      .values()
+      .any(|saga| saga.phase == crate::SagaPhase::Forward)
+    {
+      "forward"
+    } else if projection
+      .sagas
+      .values()
+      .all(|saga| saga.phase == crate::SagaPhase::CorrectionCompleted)
+    {
+      "completed"
+    } else {
+      "forward_succeeded"
+    };
+    let original_outcome = projection
+      .sagas
+      .values()
+      .find_map(|saga| saga.reason)
+      .map_or("pending", |reason| match reason {
+        crate::SagaCorrectionReason::Failure => "failed",
+        crate::SagaCorrectionReason::Cancel => "cancelled",
+        crate::SagaCorrectionReason::Success => "succeeded",
+      });
+    let mut sagas = Vec::new();
+    let mut unresolved = Vec::new();
+    for saga in projection.sagas.values() {
+      let status = match saga.phase {
+        crate::SagaPhase::Forward => "forward",
+        crate::SagaPhase::ForwardSucceeded => "forward_succeeded",
+        crate::SagaPhase::Correcting => "correcting",
+        crate::SagaPhase::CorrectionCompleted => {
+          if saga.actions.values().any(|action| {
+            matches!(
+              action.status,
+              crate::CorrectionActionStatus::Failed | crate::CorrectionActionStatus::Interrupted
+            )
+          }) {
+            "correction_incomplete"
+          } else {
+            "corrected"
+          }
+        }
+        crate::SagaPhase::ManualRecovery => "correction_incomplete",
+      };
+      sagas.push(CorrectionSagaInspectionV1 {
+        saga_id: saga.saga_id.clone(),
+        status: status.to_string(),
+        registered_compensations: u32::try_from(
+          saga
+            .actions
+            .values()
+            .filter(|action| action.action_kind == crate::CorrectiveActionKind::Compensation)
+            .count(),
+        )
+        .unwrap_or(u32::MAX),
+        completed_compensations: u32::try_from(
+          saga
+            .actions
+            .values()
+            .filter(|action| {
+              action.action_kind == crate::CorrectiveActionKind::Compensation
+                && action.status == crate::CorrectionActionStatus::Succeeded
+            })
+            .count(),
+        )
+        .unwrap_or(u32::MAX),
+        completed_cleanup: u32::try_from(
+          saga
+            .actions
+            .values()
+            .filter(|action| {
+              action.action_kind == crate::CorrectiveActionKind::Cleanup
+                && action.status == crate::CorrectionActionStatus::Succeeded
+            })
+            .count(),
+        )
+        .unwrap_or(u32::MAX),
+      });
+      unresolved.extend(saga.actions.values().filter_map(|action| {
+        matches!(
+          action.status,
+          crate::CorrectionActionStatus::Failed
+            | crate::CorrectionActionStatus::Interrupted
+            | crate::CorrectionActionStatus::ManualRecovery
+        )
+        .then(|| UnresolvedCorrectionActionV1 {
+          action_id: action.action_id.clone(),
+          kind: action.action_kind,
+          code: action
+            .failure_code
+            .clone()
+            .unwrap_or_else(|| "WOML_CORRECTION_INCOMPLETE".to_string()),
+          ambiguous: action.ambiguous,
+        })
+      }));
+    }
+    sagas.sort_by(|left, right| left.saga_id.cmp(&right.saga_id));
+    unresolved.sort_by(|left, right| left.action_id.cmp(&right.action_id));
+    let truncated = unresolved.len() > MAX_CORRECTION_INSPECTION_ROWS;
+    unresolved.truncate(MAX_CORRECTION_INSPECTION_ROWS);
+    Ok(CorrectionInspectionV1 {
+      profile: CORRECTION_INSPECTION_PROFILE,
+      run_id: run_id.to_string(),
+      phase: phase.to_string(),
+      original_outcome: original_outcome.to_string(),
+      sagas,
+      unresolved_actions: unresolved,
+      truncated,
     })
   }
 
@@ -6645,6 +7030,7 @@ impl DurableEventStore {
         | crate::COMPILED_MODEL_SCHEMA_VERSION_V16
         | crate::COMPILED_MODEL_SCHEMA_VERSION_V17
         | crate::COMPILED_MODEL_SCHEMA_VERSION_V18
+        | crate::COMPILED_MODEL_SCHEMA_VERSION_V19
     ) {
       return Ok(result(
         RunCancellationStatus::Rejected,
@@ -8238,7 +8624,10 @@ impl DurableEventStore {
       .ok_or_else(|| {
         DurableStoreError::Contract("A lock cannot be registered before run_started.".to_string())
       })?;
-    if event_schema_version != crate::RUN_EVENT_SCHEMA_VERSION_V17 {
+    if !matches!(
+      event_schema_version,
+      crate::RUN_EVENT_SCHEMA_VERSION_V17 | crate::RUN_EVENT_SCHEMA_VERSION_V18
+    ) {
       return Err(DurableStoreError::Contract(
         "Durable locks require Event v17.".to_string(),
       ));
@@ -10330,6 +10719,7 @@ impl DurableEventStore {
         | crate::RUN_EVENT_SCHEMA_VERSION_V15
         | crate::RUN_EVENT_SCHEMA_VERSION_V16
         | crate::RUN_EVENT_SCHEMA_VERSION_V17
+        | crate::RUN_EVENT_SCHEMA_VERSION_V18
     ) {
       let ambiguous_actions = projection
         .lifecycle_hooks
@@ -10701,6 +11091,7 @@ impl DurableEventStore {
             | crate::RUN_EVENT_SCHEMA_VERSION_V15
             | crate::RUN_EVENT_SCHEMA_VERSION_V16
             | crate::RUN_EVENT_SCHEMA_VERSION_V17
+            | crate::RUN_EVENT_SCHEMA_VERSION_V18
         ) {
           expand_model_v11_payload(&workflow, run_id, payload)?
         } else {
@@ -10756,6 +11147,7 @@ impl DurableEventStore {
           | crate::RUN_EVENT_SCHEMA_VERSION_V15
           | crate::RUN_EVENT_SCHEMA_VERSION_V16
           | crate::RUN_EVENT_SCHEMA_VERSION_V17
+          | crate::RUN_EVENT_SCHEMA_VERSION_V18
       ) {
         expand_model_v11_payload(&workflow, run_id, run_failure)?
       } else {
@@ -10975,6 +11367,7 @@ impl DurableEventStore {
           | crate::RUN_EVENT_SCHEMA_VERSION_V15
           | crate::RUN_EVENT_SCHEMA_VERSION_V16
           | crate::RUN_EVENT_SCHEMA_VERSION_V17
+          | crate::RUN_EVENT_SCHEMA_VERSION_V18
       ) {
         expand_model_v11_payload(&workflow, run_id, run_failure)?
       } else {
@@ -12575,6 +12968,7 @@ fn validate_trigger_occurrence_history(
           | crate::RUN_EVENT_SCHEMA_VERSION_V15
           | crate::RUN_EVENT_SCHEMA_VERSION_V16
           | crate::RUN_EVENT_SCHEMA_VERSION_V17
+          | crate::RUN_EVENT_SCHEMA_VERSION_V18
       ) && admission.definition_hash == occurrence.definition_hash
         && admission.trigger.id == occurrence.trigger_id
         && admission.trigger.handler == occurrence.trigger_handler
@@ -13106,6 +13500,236 @@ fn rebuild_run_summary_index(connection: &Connection) -> Result<(), DurableStore
   Ok(())
 }
 
+pub fn correction_invocation_id(
+  run_id: &str,
+  saga_id: &str,
+  action_id: &str,
+  attempt: u32,
+) -> String {
+  let mut digest = Sha256::new();
+  digest.update(b"woml:correction-invocation:v1\0");
+  for value in [run_id, saga_id, action_id] {
+    digest.update(value.as_bytes());
+    digest.update([0]);
+  }
+  digest.update(attempt.to_be_bytes());
+  format!("corr_{}", hex::encode(digest.finalize()))
+}
+
+fn correction_action_kind_name(kind: crate::CorrectiveActionKind) -> &'static str {
+  match kind {
+    crate::CorrectiveActionKind::Compensation => "compensation",
+    crate::CorrectiveActionKind::Cleanup => "cleanup",
+  }
+}
+
+fn write_correction_indexes_from_projection(
+  connection: &Connection,
+  run_id: &str,
+  definition_hash: &str,
+  events: &[RunEvent],
+  projection: &RunProjection,
+) -> Result<(), DurableStoreError> {
+  connection.execute(
+    "DELETE FROM woml_correction_manual_recovery WHERE run_id = ?1",
+    [run_id],
+  )?;
+  connection.execute(
+    "DELETE FROM woml_correction_attempts WHERE run_id = ?1",
+    [run_id],
+  )?;
+  connection.execute(
+    "DELETE FROM woml_correction_actions WHERE run_id = ?1",
+    [run_id],
+  )?;
+  connection.execute("DELETE FROM woml_saga_scopes WHERE run_id = ?1", [run_id])?;
+  let updated_at = events
+    .last()
+    .map(|event| event.occurred_at)
+    .unwrap_or_else(Utc::now)
+    .to_rfc3339();
+  for saga in projection.sagas.values() {
+    let phase = match saga.phase {
+      crate::SagaPhase::Forward => "forward",
+      crate::SagaPhase::ForwardSucceeded => "forward_succeeded",
+      crate::SagaPhase::Correcting => "correcting",
+      crate::SagaPhase::CorrectionCompleted => "correction_completed",
+      crate::SagaPhase::ManualRecovery => "manual_recovery",
+    };
+    let original_outcome = saga.reason.map(|reason| match reason {
+      crate::SagaCorrectionReason::Success => "success",
+      crate::SagaCorrectionReason::Failure => "failure",
+      crate::SagaCorrectionReason::Cancel => "cancel",
+    });
+    connection.execute(
+      "INSERT INTO woml_saga_scopes(
+         run_id, saga_id, phase, original_outcome, started_sequence,
+         committed_sequence, updated_at, model_digest
+       ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+      params![
+        run_id,
+        saga.saga_id,
+        phase,
+        original_outcome,
+        i64::try_from(saga.started_sequence).map_err(|_| DurableStoreError::Contract(
+          "Saga sequence exceeds SQLite integer range.".to_string()
+        ))?,
+        saga
+          .correction_completed_sequence
+          .map(i64::try_from)
+          .transpose()
+          .map_err(|_| {
+            DurableStoreError::Contract("Saga sequence exceeds SQLite integer range.".to_string())
+          })?,
+        updated_at,
+        definition_hash,
+      ],
+    )?;
+    for action in saga.actions.values() {
+      let status = match action.status {
+        crate::CorrectionActionStatus::Registered => "registered",
+        crate::CorrectionActionStatus::Started => "started",
+        crate::CorrectionActionStatus::RetryScheduled => "retry_scheduled",
+        crate::CorrectionActionStatus::Succeeded => "succeeded",
+        crate::CorrectionActionStatus::Failed => "failed",
+        crate::CorrectionActionStatus::Interrupted => "interrupted",
+        crate::CorrectionActionStatus::ManualRecovery => "manual_recovery",
+      };
+      connection.execute(
+        "INSERT INTO woml_correction_actions(
+           run_id, saga_id, action_id, action_kind, for_step_execution_id,
+           completion_sequence, status, attempts, next_attempt_at, updated_at
+         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+        params![
+          run_id,
+          saga.saga_id,
+          action.action_id,
+          correction_action_kind_name(action.action_kind),
+          action.for_step_id,
+          action
+            .completion_sequence
+            .map(i64::try_from)
+            .transpose()
+            .map_err(|_| {
+              DurableStoreError::Contract(
+                "Correction sequence exceeds SQLite integer range.".to_string(),
+              )
+            })?,
+          status,
+          i64::from(action.attempts),
+          action.retry_at.map(|value| value.to_rfc3339()),
+          updated_at,
+        ],
+      )?;
+    }
+  }
+  for event in events {
+    match &event.payload {
+      RunEventPayload::CorrectionAttemptStarted(data) => {
+        connection.execute(
+          "INSERT INTO woml_correction_attempts(
+             run_id, saga_id, action_id, attempt, invocation_id, status,
+             started_at, finished_at, failure_code
+           ) VALUES (?1, ?2, ?3, ?4, ?5, 'started', ?6, NULL, NULL)",
+          params![
+            run_id,
+            data.saga_id,
+            data.action_id,
+            i64::from(data.attempt),
+            correction_invocation_id(run_id, &data.saga_id, &data.action_id, data.attempt),
+            event.occurred_at.to_rfc3339(),
+          ],
+        )?;
+      }
+      RunEventPayload::CorrectionAttemptSucceeded(data) => {
+        connection.execute(
+          "UPDATE woml_correction_attempts
+           SET status = 'succeeded', finished_at = ?1
+           WHERE run_id = ?2 AND saga_id = ?3 AND action_id = ?4 AND attempt = ?5",
+          params![
+            event.occurred_at.to_rfc3339(),
+            run_id,
+            data.saga_id,
+            data.action_id,
+            i64::from(data.attempt)
+          ],
+        )?;
+      }
+      RunEventPayload::CorrectionAttemptFailed(data) => {
+        connection.execute(
+          "UPDATE woml_correction_attempts
+           SET status = 'failed', finished_at = ?1, failure_code = ?2
+           WHERE run_id = ?3 AND saga_id = ?4 AND action_id = ?5 AND attempt = ?6",
+          params![
+            event.occurred_at.to_rfc3339(),
+            data.code,
+            run_id,
+            data.saga_id,
+            data.action_id,
+            i64::from(data.attempt)
+          ],
+        )?;
+      }
+      RunEventPayload::CorrectionInterrupted(data) => {
+        connection.execute(
+          "UPDATE woml_correction_attempts
+           SET status = 'interrupted', finished_at = ?1, failure_code = 'WOML_CORRECTION_INTERRUPTED'
+           WHERE run_id = ?2 AND saga_id = ?3 AND action_id = ?4 AND attempt = ?5",
+          params![event.occurred_at.to_rfc3339(), run_id, data.saga_id, data.action_id, i64::from(data.attempt)],
+        )?;
+      }
+      RunEventPayload::ManualRecoveryRequired(data) => {
+        connection.execute(
+          "INSERT INTO woml_correction_manual_recovery(
+             run_id, saga_id, action_id, status, reason_code, created_at, resolved_at
+           ) VALUES (?1, ?2, ?3, 'required', ?4, ?5, NULL)",
+          params![
+            run_id,
+            data.saga_id,
+            data.action_id,
+            data.code,
+            event.occurred_at.to_rfc3339()
+          ],
+        )?;
+      }
+      _ => {}
+    }
+  }
+  Ok(())
+}
+
+fn rebuild_correction_indexes(connection: &Connection) -> Result<(), DurableStoreError> {
+  connection.execute("DELETE FROM woml_correction_manual_recovery", [])?;
+  connection.execute("DELETE FROM woml_correction_attempts", [])?;
+  connection.execute("DELETE FROM woml_correction_actions", [])?;
+  connection.execute("DELETE FROM woml_saga_scopes", [])?;
+  let mut statement = connection
+    .prepare("SELECT run_id, definition_hash FROM woml_runs ORDER BY created_at, run_id")?;
+  let runs = statement
+    .query_map([], |row| {
+      Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+    })?
+    .collect::<Result<Vec<_>, _>>()?;
+  drop(statement);
+  for (run_id, definition_hash) in runs {
+    let events = load_events(connection, &run_id)?;
+    if events
+      .first()
+      .is_some_and(|event| event.event_schema_version == crate::RUN_EVENT_SCHEMA_VERSION_V18)
+    {
+      let projection = fold_events(&events)?;
+      write_correction_indexes_from_projection(
+        connection,
+        &run_id,
+        &definition_hash,
+        &events,
+        &projection,
+      )?;
+    }
+  }
+  Ok(())
+}
+
 fn projection_state_for_events(
   cache: &RefCell<HashMap<String, ProjectionFoldState>>,
   run_id: &str,
@@ -13167,6 +13791,7 @@ fn append_to_history_scoped_incremental(
       | crate::RUN_EVENT_SCHEMA_VERSION_V15
       | crate::RUN_EVENT_SCHEMA_VERSION_V16
       | crate::RUN_EVENT_SCHEMA_VERSION_V17
+      | crate::RUN_EVENT_SCHEMA_VERSION_V18
   ) && matches!(
     payload,
     RunEventPayload::RunSucceeded(_) | RunEventPayload::RunFailed(_)
@@ -13829,6 +14454,7 @@ fn append_to_history_scoped(
       | crate::RUN_EVENT_SCHEMA_VERSION_V15
       | crate::RUN_EVENT_SCHEMA_VERSION_V16
       | crate::RUN_EVENT_SCHEMA_VERSION_V17
+      | crate::RUN_EVENT_SCHEMA_VERSION_V18
   ) && matches!(
     payload,
     RunEventPayload::RunSucceeded(_) | RunEventPayload::RunFailed(_)
@@ -14457,7 +15083,8 @@ fn attempt_run_failed_data(
     | crate::RUN_EVENT_SCHEMA_VERSION_V14
     | crate::RUN_EVENT_SCHEMA_VERSION_V15
     | crate::RUN_EVENT_SCHEMA_VERSION_V16
-    | crate::RUN_EVENT_SCHEMA_VERSION_V17 => RunFailedData::V2(RunFailedDataV2::Attempt {
+    | crate::RUN_EVENT_SCHEMA_VERSION_V17
+    | crate::RUN_EVENT_SCHEMA_VERSION_V18 => RunFailedData::V2(RunFailedDataV2::Attempt {
       node_id,
       attempt,
       invocation_id,
@@ -14616,6 +15243,7 @@ impl DurableDagEngine {
         | crate::RUN_EVENT_SCHEMA_VERSION_V15
         | crate::RUN_EVENT_SCHEMA_VERSION_V16
         | crate::RUN_EVENT_SCHEMA_VERSION_V17
+        | crate::RUN_EVENT_SCHEMA_VERSION_V18
     ) && matches!(
       &payload,
       RunEventPayload::RunSucceeded(_) | RunEventPayload::RunFailed(_)
@@ -14762,6 +15390,7 @@ impl DurableDagEngine {
         }
         false
       });
+    let saga_body = self.workflow.saga_for_body_node(&failure.node_id).is_some();
     let projection = self.projection(run_id)?;
     let fork_coordinated = self.workflow.schema_version >= crate::COMPILED_MODEL_SCHEMA_VERSION_V13
       && projection.forks.values().any(|fork| {
@@ -14837,7 +15466,7 @@ impl DurableDagEngine {
         )],
         StepFailureDisposition::StepFailed,
       )
-    } else if reusable_lifecycle || lock_body {
+    } else if reusable_lifecycle || lock_body || saga_body {
       (
         vec![(
           generated_event_id(),
@@ -14900,6 +15529,31 @@ impl DurableDagEngine {
         handler: node.handler.clone(),
         idempotency_key: Some(idempotency_key),
       }),
+    )
+  }
+
+  /// Commits a successful forward effect and its compensation eligibility as
+  /// one Store v17 transaction. A validation or SQLite failure rolls back both
+  /// records, so replay can never observe success without registration.
+  pub fn record_step_success_with_compensation(
+    &mut self,
+    run_id: &str,
+    success: crate::StepAttemptSucceededData,
+    saga_id: &str,
+    action_id: &str,
+  ) -> Result<RunProjection, DurableEngineError> {
+    let completion_sequence = self.events(run_id)?.len() as u64 + 1;
+    self.append_payloads_atomically(
+      run_id,
+      vec![
+        RunEventPayload::StepAttemptSucceeded(success.clone()),
+        RunEventPayload::CompensationRegistered(crate::CompensationRegisteredData {
+          saga_id: saga_id.to_string(),
+          action_id: action_id.to_string(),
+          for_step_id: success.node_id,
+          completion_sequence,
+        }),
+      ],
     )
   }
 
@@ -15135,7 +15789,10 @@ impl DurableDagEngine {
     let node = self.workflow.node(node_id).ok_or_else(|| {
       DurableEngineError::Contract(format!("Unknown pure result node {node_id:?}."))
     })?;
-    if node.handler != "engine.branch-result" && node.handler != "engine.choice-result" {
+    if !matches!(
+      node.handler.as_str(),
+      "engine.branch-result" | "engine.choice-result" | "engine.saga-result"
+    ) {
       return Err(DurableEngineError::Contract(format!(
         "Node {node_id:?} is not a supported pure-result operation."
       )));

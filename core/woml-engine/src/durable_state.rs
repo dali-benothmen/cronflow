@@ -1137,7 +1137,11 @@ fn validate_store(connection: &Connection) -> Result<(), DurableStateError> {
   // State v1 was introduced by Store v13 and remains unchanged inside the
   // Durable state shares the current Store v16 envelope. Its own tables remain
   // unchanged; Store v16 adds locks beside durable-state and wait tables.
-  if version.as_deref() != Some("16") {
+  if version
+    .as_deref()
+    .and_then(|value| value.parse::<u32>().ok())
+    != Some(crate::DURABLE_STORE_SCHEMA_VERSION)
+  {
     return Err(DurableStateError::StoreCorrupt);
   }
   for (object_type, name) in [

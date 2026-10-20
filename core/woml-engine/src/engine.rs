@@ -401,6 +401,20 @@ pub(crate) fn node_is_complete(
   node: &crate::model::CompiledWorkflowNode,
   projection: &RunProjection,
 ) -> bool {
+  if node.handler == "engine.saga-open" {
+    return workflow
+      .saga_for_control_node(&node.id)
+      .is_some_and(|saga| projection.sagas.contains_key(&saga.saga_id));
+  }
+  if node.handler == "engine.saga-commit" {
+    return workflow
+      .saga_for_control_node(&node.id)
+      .and_then(|saga| projection.sagas.get(&saga.saga_id))
+      .is_some_and(|saga| saga.phase == crate::SagaPhase::CorrectionCompleted);
+  }
+  if node.handler == "engine.saga-result" {
+    return projection.context.steps.contains_key(&node.id);
+  }
   if node.handler == "engine.for-each-open" {
     return workflow
       .graph
@@ -824,6 +838,7 @@ pub(crate) fn validate_payload_against_definition(
           | crate::COMPILED_MODEL_SCHEMA_VERSION_V16
           | crate::COMPILED_MODEL_SCHEMA_VERSION_V17
           | crate::COMPILED_MODEL_SCHEMA_VERSION_V18
+          | crate::COMPILED_MODEL_SCHEMA_VERSION_V19
       ) || data.definition_hash != definition_hash
         || workflow.runtime_policy_hash().as_deref() != Some(data.policy_hash.as_str())
         || workflow.runtime_policy_queue_name().as_deref() != Some(data.queue.name.as_str())
@@ -857,6 +872,7 @@ pub(crate) fn validate_payload_against_definition(
           | crate::COMPILED_MODEL_SCHEMA_VERSION_V16
           | crate::COMPILED_MODEL_SCHEMA_VERSION_V17
           | crate::COMPILED_MODEL_SCHEMA_VERSION_V18
+          | crate::COMPILED_MODEL_SCHEMA_VERSION_V19
       ) {
         return Err("Event v11+ runtime-policy events require compiled Model v12+.".to_string());
       }
@@ -885,6 +901,7 @@ pub(crate) fn validate_payload_against_definition(
           | crate::COMPILED_MODEL_SCHEMA_VERSION_V16
           | crate::COMPILED_MODEL_SCHEMA_VERSION_V17
           | crate::COMPILED_MODEL_SCHEMA_VERSION_V18
+          | crate::COMPILED_MODEL_SCHEMA_VERSION_V19
       ) {
         return Err("Event v11+ runtime-policy events require compiled Model v12+.".to_string());
       }
@@ -1418,6 +1435,7 @@ pub(crate) fn validate_payload_against_definition(
           | crate::COMPILED_MODEL_SCHEMA_VERSION_V16
           | crate::COMPILED_MODEL_SCHEMA_VERSION_V17
           | crate::COMPILED_MODEL_SCHEMA_VERSION_V18
+          | crate::COMPILED_MODEL_SCHEMA_VERSION_V19
       ) {
         return Err("Lifecycle and run-control events require compiled Model v11+.".to_string());
       }
@@ -1699,8 +1717,99 @@ pub(crate) fn validate_payload_against_definition(
     RunEventPayload::ForEachSucceeded(data)
     | RunEventPayload::ForEachFailed(data)
     | RunEventPayload::ForEachCancelled(data) => validate_for_each_id(workflow, &data.for_each_id)?,
+    RunEventPayload::SagaStarted(data)
+    | RunEventPayload::SagaForwardSucceeded(data)
+    | RunEventPayload::SagaCorrectionCompleted(data) => {
+      if workflow.schema_version != crate::COMPILED_MODEL_SCHEMA_VERSION_V19
+        || workflow
+          .graph
+          .sagas
+          .as_deref()
+          .unwrap_or_default()
+          .iter()
+          .all(|saga| saga.saga_id != data.saga_id)
+      {
+        return Err(format!(
+          "Correction event references unknown saga {:?}.",
+          data.saga_id
+        ));
+      }
+    }
+    RunEventPayload::CompensationRegistered(data) => {
+      let valid = workflow
+        .graph
+        .sagas
+        .as_deref()
+        .unwrap_or_default()
+        .iter()
+        .find(|saga| saga.saga_id == data.saga_id)
+        .is_some_and(|saga| {
+          saga.compensations.iter().any(|action| {
+            action.action_id == data.action_id
+              && action.for_step_id.as_deref() == Some(data.for_step_id.as_str())
+          })
+        });
+      if workflow.schema_version != crate::COMPILED_MODEL_SCHEMA_VERSION_V19 || !valid {
+        return Err("Compensation registration does not match Model v19.".to_string());
+      }
+    }
+    RunEventPayload::SagaCorrectionStarted(data) => {
+      if workflow
+        .graph
+        .sagas
+        .as_deref()
+        .unwrap_or_default()
+        .iter()
+        .all(|saga| saga.saga_id != data.saga_id)
+      {
+        return Err("Saga correction references an unknown Model v19 saga.".to_string());
+      }
+    }
+    RunEventPayload::CorrectionAttemptStarted(data)
+    | RunEventPayload::CorrectionAttemptSucceeded(data) => {
+      validate_correction_action(workflow, &data.saga_id, &data.action_id, data.action_kind)?;
+    }
+    RunEventPayload::CorrectionAttemptFailed(data) => {
+      validate_correction_action(workflow, &data.saga_id, &data.action_id, data.action_kind)?;
+    }
+    RunEventPayload::CorrectionRetryScheduled(data) => {
+      validate_correction_action(workflow, &data.saga_id, &data.action_id, data.action_kind)?;
+    }
+    RunEventPayload::CorrectionInterrupted(data) => {
+      validate_correction_action(workflow, &data.saga_id, &data.action_id, data.action_kind)?;
+    }
+    RunEventPayload::ManualRecoveryRequired(data) => {
+      validate_correction_action(workflow, &data.saga_id, &data.action_id, data.action_kind)?;
+    }
   }
 
+  Ok(())
+}
+
+fn validate_correction_action(
+  workflow: &CompiledWorkflowDefinition,
+  saga_id: &str,
+  action_id: &str,
+  kind: crate::CorrectiveActionKind,
+) -> Result<(), String> {
+  let saga = workflow
+    .graph
+    .sagas
+    .as_deref()
+    .unwrap_or_default()
+    .iter()
+    .find(|saga| saga.saga_id == saga_id)
+    .ok_or_else(|| format!("Correction action references unknown saga {saga_id:?}."))?;
+  let exists = match kind {
+    crate::CorrectiveActionKind::Compensation => saga.compensations.iter(),
+    crate::CorrectiveActionKind::Cleanup => saga.cleanup.iter(),
+  }
+  .any(|action| action.action_id == action_id);
+  if workflow.schema_version != crate::COMPILED_MODEL_SCHEMA_VERSION_V19 || !exists {
+    return Err(format!(
+      "Correction action {action_id:?} does not match saga {saga_id:?}."
+    ));
+  }
   Ok(())
 }
 
@@ -2070,6 +2179,114 @@ pub(crate) fn validate_event_history_against_definition(
           return Err(format!(
             "Fork {:?} join succeeded before every joined branch succeeded.",
             data.fork_id
+          ));
+        }
+      }
+      RunEventPayload::SagaStarted(data) => {
+        let saga = workflow
+          .saga(&data.saga_id)
+          .ok_or_else(|| format!("Unknown saga {:?}.", data.saga_id))?;
+        let prefix = crate::fold_events(&events[..index]).map_err(|error| error.to_string())?;
+        let ready = ready_node_ids_for_projection(workflow, definition_hash, &prefix)?;
+        if !ready.contains(&saga.open_node_id) {
+          return Err(format!(
+            "Saga {:?} started before its open node was ready.",
+            data.saga_id
+          ));
+        }
+      }
+      RunEventPayload::CorrectionAttemptStarted(data) => {
+        let saga = workflow
+          .saga(&data.saga_id)
+          .ok_or_else(|| format!("Unknown saga {:?}.", data.saga_id))?;
+        let prefix = crate::fold_events(&events[..index]).map_err(|error| error.to_string())?;
+        let state = prefix
+          .sagas
+          .get(&data.saga_id)
+          .ok_or_else(|| format!("Saga {:?} has no projected correction state.", data.saga_id))?;
+        match data.action_kind {
+          crate::CorrectiveActionKind::Compensation => {
+            if state.reason == Some(crate::SagaCorrectionReason::Success) {
+              return Err("Compensation cannot run after successful forward work.".to_string());
+            }
+            let next = state
+              .actions
+              .values()
+              .filter(|action| {
+                action.action_kind == crate::CorrectiveActionKind::Compensation
+                  && action.status == crate::CorrectionActionStatus::Registered
+              })
+              .max_by_key(|action| action.completion_sequence)
+              .map(|action| action.action_id.as_str());
+            if next != Some(data.action_id.as_str()) {
+              return Err(format!(
+                "Compensation {:?} is not next in reverse durable completion order.",
+                data.action_id
+              ));
+            }
+          }
+          crate::CorrectiveActionKind::Cleanup => {
+            if state.reason != Some(crate::SagaCorrectionReason::Success)
+              && state.actions.values().any(|action| {
+                action.action_kind == crate::CorrectiveActionKind::Compensation
+                  && matches!(
+                    action.status,
+                    crate::CorrectionActionStatus::Registered
+                      | crate::CorrectionActionStatus::Started
+                      | crate::CorrectionActionStatus::RetryScheduled
+                  )
+              })
+            {
+              return Err("Cleanup cannot start before compensation settles.".to_string());
+            }
+            let position = saga
+              .cleanup
+              .iter()
+              .position(|action| action.action_id == data.action_id)
+              .ok_or_else(|| "Cleanup action is absent from Model v19.".to_string())?;
+            if saga.cleanup[..position].iter().any(|action| {
+              !state
+                .actions
+                .get(&action.action_id)
+                .is_some_and(|projected| {
+                  matches!(
+                    projected.status,
+                    crate::CorrectionActionStatus::Succeeded
+                      | crate::CorrectionActionStatus::Failed
+                  )
+                })
+            }) {
+              return Err(format!(
+                "Cleanup {:?} is not next in compiled source order.",
+                data.action_id
+              ));
+            }
+          }
+        }
+      }
+      RunEventPayload::SagaCorrectionCompleted(data) => {
+        let saga = workflow
+          .saga(&data.saga_id)
+          .ok_or_else(|| format!("Unknown saga {:?}.", data.saga_id))?;
+        let prefix = crate::fold_events(&events[..index]).map_err(|error| error.to_string())?;
+        let state = prefix
+          .sagas
+          .get(&data.saga_id)
+          .ok_or_else(|| format!("Saga {:?} has no projected correction state.", data.saga_id))?;
+        if saga.cleanup.iter().any(|action| {
+          !state
+            .actions
+            .get(&action.action_id)
+            .is_some_and(|projected| {
+              matches!(
+                projected.status,
+                crate::CorrectionActionStatus::Succeeded | crate::CorrectionActionStatus::Failed
+              )
+            })
+        }) {
+          return Err(format!(
+            "Saga {:?} completed before every cleanup action settled.",
+            data.saga_id
           ));
         }
       }
@@ -2518,6 +2735,14 @@ pub(crate) fn validate_event_history_against_definition(
       | RunEventPayload::LockAcquireTimedOut(_)
       | RunEventPayload::LockAcquisitionCancelled(_)
       | RunEventPayload::LockLeaseLost(_)
+      | RunEventPayload::CompensationRegistered(_)
+      | RunEventPayload::SagaForwardSucceeded(_)
+      | RunEventPayload::SagaCorrectionStarted(_)
+      | RunEventPayload::CorrectionAttemptSucceeded(_)
+      | RunEventPayload::CorrectionAttemptFailed(_)
+      | RunEventPayload::CorrectionRetryScheduled(_)
+      | RunEventPayload::CorrectionInterrupted(_)
+      | RunEventPayload::ManualRecoveryRequired(_)
       | RunEventPayload::RunFinalized(_)
       | RunEventPayload::RunFailed(_) => {}
     }
@@ -2558,6 +2783,7 @@ fn validate_reusable_lifecycle_binding(
       | crate::COMPILED_MODEL_SCHEMA_VERSION_V16
       | crate::COMPILED_MODEL_SCHEMA_VERSION_V17
       | crate::COMPILED_MODEL_SCHEMA_VERSION_V18
+      | crate::COMPILED_MODEL_SCHEMA_VERSION_V19
   ) {
     return Err("Reusable lifecycle events require compiled Model v14 or later.".to_string());
   }

@@ -8,9 +8,9 @@ use crate::{
   RUN_EVENT_SCHEMA_VERSION_V1, RUN_EVENT_SCHEMA_VERSION_V10, RUN_EVENT_SCHEMA_VERSION_V11,
   RUN_EVENT_SCHEMA_VERSION_V12, RUN_EVENT_SCHEMA_VERSION_V13, RUN_EVENT_SCHEMA_VERSION_V14,
   RUN_EVENT_SCHEMA_VERSION_V15, RUN_EVENT_SCHEMA_VERSION_V16, RUN_EVENT_SCHEMA_VERSION_V17,
-  RUN_EVENT_SCHEMA_VERSION_V2, RUN_EVENT_SCHEMA_VERSION_V3, RUN_EVENT_SCHEMA_VERSION_V4,
-  RUN_EVENT_SCHEMA_VERSION_V5, RUN_EVENT_SCHEMA_VERSION_V6, RUN_EVENT_SCHEMA_VERSION_V7,
-  RUN_EVENT_SCHEMA_VERSION_V8, RUN_EVENT_SCHEMA_VERSION_V9,
+  RUN_EVENT_SCHEMA_VERSION_V18, RUN_EVENT_SCHEMA_VERSION_V2, RUN_EVENT_SCHEMA_VERSION_V3,
+  RUN_EVENT_SCHEMA_VERSION_V4, RUN_EVENT_SCHEMA_VERSION_V5, RUN_EVENT_SCHEMA_VERSION_V6,
+  RUN_EVENT_SCHEMA_VERSION_V7, RUN_EVENT_SCHEMA_VERSION_V8, RUN_EVENT_SCHEMA_VERSION_V9,
 };
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -89,6 +89,17 @@ pub enum RunEventPayload {
   LockAcquireTimedOut(LockAcquireTimedOutData),
   LockAcquisitionCancelled(LockAcquisitionCancelledData),
   LockLeaseLost(LockLeaseLostData),
+  SagaStarted(SagaIdentityData),
+  CompensationRegistered(CompensationRegisteredData),
+  SagaForwardSucceeded(SagaIdentityData),
+  SagaCorrectionStarted(SagaCorrectionStartedData),
+  CorrectionAttemptStarted(CorrectionAttemptIdentityData),
+  CorrectionAttemptSucceeded(CorrectionAttemptIdentityData),
+  CorrectionAttemptFailed(CorrectionAttemptFailedData),
+  CorrectionRetryScheduled(CorrectionRetryScheduledData),
+  CorrectionInterrupted(CorrectionInterruptedData),
+  SagaCorrectionCompleted(SagaIdentityData),
+  ManualRecoveryRequired(ManualRecoveryRequiredData),
   RunOutcomeDecided(RunOutcomeDecidedData),
   RunFinalized(RunFinalizedData),
   RunSucceeded(RunSucceededData),
@@ -101,6 +112,93 @@ pub enum DurableWaitKind {
   Duration,
   Until,
   Signal,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CorrectiveActionKind {
+  Compensation,
+  Cleanup,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SagaCorrectionReason {
+  Failure,
+  Cancel,
+  Success,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct SagaIdentityData {
+  pub saga_id: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct CompensationRegisteredData {
+  pub saga_id: String,
+  pub action_id: String,
+  pub for_step_id: String,
+  pub completion_sequence: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct SagaCorrectionStartedData {
+  pub saga_id: String,
+  pub reason: SagaCorrectionReason,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct CorrectionAttemptIdentityData {
+  pub saga_id: String,
+  pub action_id: String,
+  pub action_kind: CorrectiveActionKind,
+  pub attempt: u32,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct CorrectionAttemptFailedData {
+  pub saga_id: String,
+  pub action_id: String,
+  pub action_kind: CorrectiveActionKind,
+  pub attempt: u32,
+  pub code: String,
+  pub retryable: bool,
+  pub ambiguous: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct CorrectionRetryScheduledData {
+  pub saga_id: String,
+  pub action_id: String,
+  pub action_kind: CorrectiveActionKind,
+  pub attempt: u32,
+  pub retry_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct CorrectionInterruptedData {
+  pub saga_id: String,
+  pub action_id: String,
+  pub action_kind: CorrectiveActionKind,
+  pub attempt: u32,
+  pub ambiguous: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ManualRecoveryRequiredData {
+  pub saga_id: String,
+  pub action_id: String,
+  pub action_kind: CorrectiveActionKind,
+  pub code: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -1670,6 +1768,7 @@ impl RunEvent {
         | RUN_EVENT_SCHEMA_VERSION_V15
         | RUN_EVENT_SCHEMA_VERSION_V16
         | RUN_EVENT_SCHEMA_VERSION_V17
+        | RUN_EVENT_SCHEMA_VERSION_V18
     ) {
       return Err(EventValidationError::UnsupportedSchemaVersion(
         self.event_schema_version,
@@ -1708,6 +1807,31 @@ impl RunEvent {
         | RunEventPayload::LockAcquisitionCancelled(_)
         | RunEventPayload::LockLeaseLost(_)
     );
+    let correction_event = matches!(
+      self.payload,
+      RunEventPayload::SagaStarted(_)
+        | RunEventPayload::CompensationRegistered(_)
+        | RunEventPayload::SagaForwardSucceeded(_)
+        | RunEventPayload::SagaCorrectionStarted(_)
+        | RunEventPayload::CorrectionAttemptStarted(_)
+        | RunEventPayload::CorrectionAttemptSucceeded(_)
+        | RunEventPayload::CorrectionAttemptFailed(_)
+        | RunEventPayload::CorrectionRetryScheduled(_)
+        | RunEventPayload::CorrectionInterrupted(_)
+        | RunEventPayload::SagaCorrectionCompleted(_)
+        | RunEventPayload::ManualRecoveryRequired(_)
+    );
+    if self.event_schema_version == RUN_EVENT_SCHEMA_VERSION_V18 && !correction_event {
+      let mut inherited = self.clone();
+      inherited.event_schema_version = RUN_EVENT_SCHEMA_VERSION_V17;
+      return inherited.validate();
+    }
+    if self.event_schema_version == RUN_EVENT_SCHEMA_VERSION_V18 && self.iteration.is_some() {
+      return Err(EventValidationError::Invalid(
+        "Event v18 correction records cannot be iteration-scoped in the sequential profile."
+          .to_string(),
+      ));
+    }
     if self.event_schema_version == RUN_EVENT_SCHEMA_VERSION_V17 && !lock_event {
       let mut inherited = self.clone();
       inherited.event_schema_version = RUN_EVENT_SCHEMA_VERSION_V16;
@@ -2766,6 +2890,104 @@ impl RunEvent {
         {
           return Err(EventValidationError::Invalid(
             "lock_lease_lost does not match the frozen Event v17 contract.".to_string(),
+          ));
+        }
+      }
+      RunEventPayload::SagaStarted(data)
+      | RunEventPayload::SagaForwardSucceeded(data)
+      | RunEventPayload::SagaCorrectionCompleted(data) => {
+        if self.event_schema_version != RUN_EVENT_SCHEMA_VERSION_V18
+          || !valid_public_structural_id(&data.saga_id)
+        {
+          return Err(EventValidationError::Invalid(
+            "Saga lifecycle event does not match the frozen Event v18 contract.".to_string(),
+          ));
+        }
+      }
+      RunEventPayload::CompensationRegistered(data) => {
+        if self.event_schema_version != RUN_EVENT_SCHEMA_VERSION_V18
+          || !valid_public_structural_id(&data.saga_id)
+          || data.action_id.is_empty()
+          || data.action_id.len() > 768
+          || !valid_public_structural_id(&data.for_step_id)
+          || data.completion_sequence == 0
+        {
+          return Err(EventValidationError::Invalid(
+            "compensation_registered does not match the frozen Event v18 contract.".to_string(),
+          ));
+        }
+      }
+      RunEventPayload::SagaCorrectionStarted(data) => {
+        if self.event_schema_version != RUN_EVENT_SCHEMA_VERSION_V18
+          || !valid_public_structural_id(&data.saga_id)
+        {
+          return Err(EventValidationError::Invalid(
+            "saga_correction_started does not match the frozen Event v18 contract.".to_string(),
+          ));
+        }
+      }
+      RunEventPayload::CorrectionAttemptStarted(data)
+      | RunEventPayload::CorrectionAttemptSucceeded(data) => {
+        if self.event_schema_version != RUN_EVENT_SCHEMA_VERSION_V18
+          || !valid_public_structural_id(&data.saga_id)
+          || data.action_id.is_empty()
+          || data.action_id.len() > 768
+          || !(1..=10).contains(&data.attempt)
+        {
+          return Err(EventValidationError::Invalid(
+            "Correction attempt identity does not match the frozen Event v18 contract.".to_string(),
+          ));
+        }
+      }
+      RunEventPayload::CorrectionAttemptFailed(data) => {
+        if self.event_schema_version != RUN_EVENT_SCHEMA_VERSION_V18
+          || !valid_public_structural_id(&data.saga_id)
+          || data.action_id.is_empty()
+          || data.action_id.len() > 768
+          || !(1..=10).contains(&data.attempt)
+          || !data.code.starts_with("WOML_")
+          || data.code.len() > 128
+        {
+          return Err(EventValidationError::Invalid(
+            "correction_attempt_failed does not match the frozen Event v18 contract.".to_string(),
+          ));
+        }
+      }
+      RunEventPayload::CorrectionRetryScheduled(data) => {
+        if self.event_schema_version != RUN_EVENT_SCHEMA_VERSION_V18
+          || !valid_public_structural_id(&data.saga_id)
+          || data.action_id.is_empty()
+          || data.action_id.len() > 768
+          || !(1..=10).contains(&data.attempt)
+          || data.retry_at < self.occurred_at
+        {
+          return Err(EventValidationError::Invalid(
+            "correction_retry_scheduled does not match the frozen Event v18 contract.".to_string(),
+          ));
+        }
+      }
+      RunEventPayload::CorrectionInterrupted(data) => {
+        if self.event_schema_version != RUN_EVENT_SCHEMA_VERSION_V18
+          || !valid_public_structural_id(&data.saga_id)
+          || data.action_id.is_empty()
+          || data.action_id.len() > 768
+          || !(1..=10).contains(&data.attempt)
+        {
+          return Err(EventValidationError::Invalid(
+            "correction_interrupted does not match the frozen Event v18 contract.".to_string(),
+          ));
+        }
+      }
+      RunEventPayload::ManualRecoveryRequired(data) => {
+        if self.event_schema_version != RUN_EVENT_SCHEMA_VERSION_V18
+          || !valid_public_structural_id(&data.saga_id)
+          || data.action_id.is_empty()
+          || data.action_id.len() > 768
+          || !data.code.starts_with("WOML_")
+          || data.code.len() > 128
+        {
+          return Err(EventValidationError::Invalid(
+            "manual_recovery_required does not match the frozen Event v18 contract.".to_string(),
           ));
         }
       }
