@@ -1,0 +1,16 @@
+{
+  "profile": "woml.run-events/v18",
+  "events": {
+    "saga_started": ["sagaId"],
+    "compensation_registered": ["sagaId", "actionId", "forStepId", "completionSequence"],
+    "saga_forward_succeeded": ["sagaId"],
+    "saga_correction_started": ["sagaId", "reason"],
+    "correction_attempt_started": ["sagaId", "actionId", "actionKind", "attempt"],
+    "correction_attempt_succeeded": ["sagaId", "actionId", "actionKind", "attempt"],
+    "correction_attempt_failed": ["sagaId", "actionId", "actionKind", "attempt", "code", "retryable", "ambiguous"],
+    "correction_retry_scheduled": ["sagaId", "actionId", "actionKind", "attempt", "retryAt"],
+    "correction_interrupted": ["sagaId", "actionId", "actionKind", "attempt", "ambiguous"],
+    "saga_correction_completed": ["sagaId"],
+    "manual_recovery_required": ["sagaId", "actionId", "actionKind", "code"]
+  }
+}

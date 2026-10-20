@@ -1,0 +1,31 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://woml.dev/schemas/correction-recovery/v1",
+  "title": "WOML Correction Recovery Request and Result v1",
+  "oneOf": [
+    {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["profile", "runId", "action", "actionId"],
+      "properties": {
+        "profile": { "const": "woml.correction-recovery-request/v1" },
+        "runId": { "type": "string", "minLength": 1 },
+        "action": { "enum": ["retry", "externally_resolve"] },
+        "actionId": { "type": "string", "minLength": 1 },
+        "note": { "type": "string", "minLength": 1, "maxLength": 1000 }
+      }
+    },
+    {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["profile", "runId", "actionId", "status", "auditRecorded"],
+      "properties": {
+        "profile": { "const": "woml.correction-recovery-result/v1" },
+        "runId": { "type": "string", "minLength": 1 },
+        "actionId": { "type": "string", "minLength": 1 },
+        "status": { "enum": ["retry_scheduled", "externally_resolved", "rejected"] },
+        "auditRecorded": { "const": true }
+      }
+    }
+  ]
+}

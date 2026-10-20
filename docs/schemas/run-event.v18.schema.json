@@ -1,0 +1,35 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://woml.dev/schemas/run-event/v18",
+  "title": "WOML Correction Run Event v18",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schemaVersion", "type", "runId", "sequence", "at", "data"],
+  "properties": {
+    "schemaVersion": { "const": 18 },
+    "type": {
+      "enum": ["saga_started", "compensation_registered", "saga_forward_succeeded", "saga_correction_started", "correction_attempt_started", "correction_attempt_succeeded", "correction_attempt_failed", "correction_retry_scheduled", "correction_interrupted", "saga_correction_completed", "manual_recovery_required"]
+    },
+    "runId": { "type": "string", "minLength": 1, "maxLength": 256 },
+    "sequence": { "type": "integer", "minimum": 1 },
+    "at": { "type": "string", "format": "date-time" },
+    "data": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["sagaId"],
+      "properties": {
+        "sagaId": { "type": "string", "pattern": "^[a-z][A-Za-z0-9]*$" },
+        "actionId": { "type": "string", "minLength": 1, "maxLength": 768 },
+        "forStepId": { "type": "string", "pattern": "^[a-z][A-Za-z0-9]*$" },
+        "actionKind": { "enum": ["compensation", "cleanup"] },
+        "reason": { "enum": ["failure", "cancel", "success"] },
+        "attempt": { "type": "integer", "minimum": 1, "maximum": 10 },
+        "retryAt": { "type": "string", "format": "date-time" },
+        "code": { "type": "string", "minLength": 1, "maxLength": 128 },
+        "retryable": { "type": "boolean" },
+        "ambiguous": { "type": "boolean" },
+        "completionSequence": { "type": "integer", "minimum": 1 }
+      }
+    }
+  }
+}

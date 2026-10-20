@@ -1,0 +1,4 @@
+{
+  "request": { "profile": "woml.correction-recovery-request/v1", "runId": "run_preview_1", "action": "externally_resolve", "actionId": "provision:compensate:createNetwork", "note": "Network removed through the cloud console" },
+  "result": { "profile": "woml.correction-recovery-result/v1", "runId": "run_preview_1", "actionId": "provision:compensate:createNetwork", "status": "externally_resolved", "auditRecorded": true }
+}

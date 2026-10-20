@@ -97,6 +97,31 @@
       "</lock>"
     ]
   },
+  "WOML saga": {
+    "prefix": "woml-saga",
+    "description": "Create a correction scope with explicit compensation and mandatory cleanup.",
+    "body": [
+      "<saga id=\"${1:operation}\" name=\"${2:Protected operation}\">",
+      "  <step id=\"${3:createResource}\" name=\"${4:Create resource}\">",
+      "    <script>",
+      "      ${5:return { id: 'resource-1' };}",
+      "    </script>",
+      "    <compensate timeout=\"${6:5m}\" retry=\"${7:3}\">",
+      "      <script>",
+      "        ${8:return { removed: context.steps.createResource.id };}",
+      "      </script>",
+      "    </compensate>",
+      "  </step>",
+      "  <cleanup>",
+      "    <step id=\"${9:cleanupTemporaryState}\" name=\"${10:Cleanup temporary state}\">",
+      "      <script>",
+      "        ${11:return { cleaned: true };}",
+      "      </script>",
+      "    </step>",
+      "  </cleanup>",
+      "</saga>"
+    ]
+  },
   "WOML Telegram trigger": {
     "prefix": "woml-telegram-trigger",
     "description": "Create a Telegram message trigger.",

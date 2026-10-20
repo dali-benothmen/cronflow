@@ -1,0 +1,379 @@
+{
+  "schemaVersion": 19,
+  "workflowId": "preview-environment",
+  "metadata": {
+    "name": "Preview environment",
+    "description": "Provision and safely correct a preview environment.",
+    "version": "1.0.0"
+  },
+  "triggers": [
+    {
+      "id": "start",
+      "handler": "trigger.manual",
+      "config": {
+        "kind": "object",
+        "fields": {}
+      }
+    }
+  ],
+  "graph": {
+    "entryNodeIds": [
+      "prepare"
+    ],
+    "nodes": [
+      {
+        "id": "prepare",
+        "handler": "runtime.script",
+        "metadata": {
+          "name": "Prepare request"
+        },
+        "inputs": {
+          "kind": "object",
+          "fields": {
+            "source": {
+              "kind": "literal",
+              "value": "return { pullRequest: context.payload.pullRequest ?? 42 };"
+            }
+          }
+        },
+        "scriptRuntime": {
+          "bindingVersion": 1,
+          "bindings": [
+            "context",
+            "attempt",
+            "services",
+            "secrets"
+          ],
+          "requiredSecrets": []
+        }
+      },
+      {
+        "id": "__woml_saga__provision__open",
+        "handler": "engine.saga-open",
+        "inputs": {
+          "kind": "object",
+          "fields": {}
+        }
+      },
+      {
+        "id": "createNetwork",
+        "handler": "runtime.script",
+        "metadata": {
+          "name": "Create network"
+        },
+        "inputs": {
+          "kind": "object",
+          "fields": {
+            "source": {
+              "kind": "literal",
+              "value": "return { networkId: `network-${context.steps.prepare.pullRequest}` };"
+            }
+          }
+        },
+        "scriptRuntime": {
+          "bindingVersion": 1,
+          "bindings": [
+            "context",
+            "attempt",
+            "services",
+            "secrets"
+          ],
+          "requiredSecrets": []
+        }
+      },
+      {
+        "id": "deployApplication",
+        "handler": "runtime.script",
+        "metadata": {
+          "name": "Deploy application"
+        },
+        "inputs": {
+          "kind": "object",
+          "fields": {
+            "source": {
+              "kind": "literal",
+              "value": "return { deployed: true, networkId: context.steps.createNetwork.networkId };"
+            }
+          }
+        },
+        "scriptRuntime": {
+          "bindingVersion": 1,
+          "bindings": [
+            "context",
+            "attempt",
+            "services",
+            "secrets"
+          ],
+          "requiredSecrets": []
+        }
+      },
+      {
+        "id": "__woml_saga__provision__commit",
+        "handler": "engine.saga-commit",
+        "inputs": {
+          "kind": "object",
+          "fields": {}
+        }
+      },
+      {
+        "id": "provision",
+        "handler": "engine.saga-result",
+        "inputs": {
+          "kind": "object",
+          "fields": {}
+        },
+        "metadata": {
+          "name": "Provision preview",
+          "description": "Create resources as one correction scope."
+        }
+      },
+      {
+        "id": "summary",
+        "handler": "runtime.script",
+        "metadata": {
+          "name": "Build summary"
+        },
+        "inputs": {
+          "kind": "object",
+          "fields": {
+            "source": {
+              "kind": "literal",
+              "value": "return { provisioned: context.steps.provision.deployed };"
+            }
+          }
+        },
+        "scriptRuntime": {
+          "bindingVersion": 1,
+          "bindings": [
+            "context",
+            "attempt",
+            "services",
+            "secrets"
+          ],
+          "requiredSecrets": []
+        }
+      },
+      {
+        "id": "__woml_workflow__settlement",
+        "handler": "engine.workflow-settlement",
+        "inputs": {
+          "kind": "object",
+          "fields": {}
+        }
+      }
+    ],
+    "edges": [
+      {
+        "id": "prepare-to-__woml_saga__provision__open",
+        "from": "prepare",
+        "to": "__woml_saga__provision__open",
+        "condition": {
+          "kind": "always"
+        }
+      },
+      {
+        "id": "__woml_saga__provision__open-to-createNetwork",
+        "from": "__woml_saga__provision__open",
+        "to": "createNetwork",
+        "condition": {
+          "kind": "always"
+        }
+      },
+      {
+        "id": "createNetwork-to-deployApplication",
+        "from": "createNetwork",
+        "to": "deployApplication",
+        "condition": {
+          "kind": "always"
+        }
+      },
+      {
+        "id": "deployApplication-to-__woml_saga__provision__commit",
+        "from": "deployApplication",
+        "to": "__woml_saga__provision__commit",
+        "condition": {
+          "kind": "always"
+        }
+      },
+      {
+        "id": "__woml_saga__provision__commit-to-provision",
+        "from": "__woml_saga__provision__commit",
+        "to": "provision",
+        "condition": {
+          "kind": "always"
+        }
+      },
+      {
+        "id": "provision-to-summary",
+        "from": "provision",
+        "to": "summary",
+        "condition": {
+          "kind": "always"
+        }
+      },
+      {
+        "id": "__woml_workflow__:main:settlement",
+        "from": "summary",
+        "to": "__woml_workflow__settlement",
+        "condition": {
+          "kind": "always"
+        }
+      }
+    ],
+    "forks": [],
+    "choices": [],
+    "contextVisibility": [
+      {
+        "nodeId": "prepare",
+        "stepIds": []
+      },
+      {
+        "nodeId": "createNetwork",
+        "stepIds": [
+          "prepare"
+        ]
+      },
+      {
+        "nodeId": "deployApplication",
+        "stepIds": [
+          "prepare",
+          "createNetwork"
+        ]
+      },
+      {
+        "nodeId": "summary",
+        "stepIds": [
+          "prepare",
+          "provision"
+        ]
+      }
+    ],
+    "settlement": {
+      "nodeId": "__woml_workflow__settlement",
+      "mainResultNodeId": "summary",
+      "ownedBranchTerminalNodeIds": []
+    },
+    "forEach": [],
+    "waits": [],
+    "locks": [],
+    "sagas": [
+      {
+        "sagaId": "provision",
+        "openNodeId": "__woml_saga__provision__open",
+        "commitNodeId": "__woml_saga__provision__commit",
+        "resultNodeId": "provision",
+        "bodyEntryNodeId": "createNetwork",
+        "bodyTerminalNodeId": "deployApplication",
+        "bodyResultNodeId": "deployApplication",
+        "outerStepIds": [
+          "prepare"
+        ],
+        "compensations": [
+          {
+            "actionId": "provision:compensate:createNetwork",
+            "forStepId": "createNetwork",
+            "identity": {
+              "kind": "static",
+              "actionId": "provision:compensate:createNetwork"
+            },
+            "visibleStepIds": [
+              "prepare",
+              "createNetwork"
+            ],
+            "node": {
+              "id": "provision:compensate:createNetwork",
+              "handler": "runtime.script",
+              "inputs": {
+                "kind": "object",
+                "fields": {
+                  "source": {
+                    "kind": "literal",
+                    "value": "return { deleted: context.steps.createNetwork.networkId };"
+                  }
+                }
+              },
+              "timeoutMs": 300000,
+              "retryPolicy": {
+                "maxAttempts": 3,
+                "backoff": {
+                  "kind": "exponential",
+                  "initialDelayMs": 1000,
+                  "multiplier": 2,
+                  "maximumDelayMs": 30000
+                }
+              },
+              "scriptRuntime": {
+                "bindingVersion": 1,
+                "bindings": [
+                  "context",
+                  "attempt",
+                  "services",
+                  "secrets"
+                ],
+                "requiredSecrets": []
+              }
+            }
+          }
+        ],
+        "cleanup": [
+          {
+            "actionId": "provision:cleanup:revokeCredentials",
+            "identity": {
+              "kind": "static",
+              "actionId": "provision:cleanup:revokeCredentials"
+            },
+            "visibleStepIds": [
+              "prepare",
+              "createNetwork",
+              "deployApplication"
+            ],
+            "node": {
+              "id": "provision:cleanup:revokeCredentials",
+              "handler": "runtime.script",
+              "inputs": {
+                "kind": "object",
+                "fields": {
+                  "source": {
+                    "kind": "literal",
+                    "value": "return { revoked: true };"
+                  }
+                }
+              },
+              "timeoutMs": 60000,
+              "retryPolicy": {
+                "maxAttempts": 2,
+                "backoff": {
+                  "kind": "exponential",
+                  "initialDelayMs": 1000,
+                  "multiplier": 2,
+                  "maximumDelayMs": 30000
+                }
+              },
+              "metadata": {
+                "name": "Revoke temporary credentials"
+              },
+              "scriptRuntime": {
+                "bindingVersion": 1,
+                "bindings": [
+                  "context",
+                  "attempt",
+                  "services",
+                  "secrets"
+                ],
+                "requiredSecrets": []
+              }
+            }
+          }
+        ],
+        "metadata": {
+          "name": "Provision preview",
+          "description": "Create resources as one correction scope."
+        }
+      }
+    ]
+  },
+  "runtimePolicy": {
+    "profileVersion": 1,
+    "concurrency": 1
+  }
+}

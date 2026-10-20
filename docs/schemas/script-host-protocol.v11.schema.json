@@ -1,0 +1,44 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://woml.dev/schemas/script-host-protocol/v11",
+  "title": "WOML Correction Script Host Protocol v11",
+  "description": "Protocol v10 plus mutually exclusive, bounded correction context bindings.",
+  "type": "object",
+  "additionalProperties": true,
+  "required": ["protocol", "protocolVersion", "messageType"],
+  "properties": {
+    "protocol": { "const": "woml.script-host" },
+    "protocolVersion": { "const": 11 },
+    "messageType": { "enum": ["ready", "register_module", "module_registered", "execute", "cancel", "completed", "capability_call", "capability_result", "fetch_observation", "fetch_observation_ack"] },
+    "context": {
+      "type": "object",
+      "properties": {
+        "compensation": { "$ref": "#/$defs/compensation" },
+        "cleanup": { "$ref": "#/$defs/cleanup" }
+      },
+      "not": { "required": ["compensation", "cleanup"] }
+    }
+  },
+  "$defs": {
+    "compensation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["sagaId", "forStepId", "reason"],
+      "properties": {
+        "sagaId": { "type": "string", "minLength": 1 },
+        "forStepId": { "type": "string", "minLength": 1 },
+        "reason": { "enum": ["failure", "cancel"] }
+      }
+    },
+    "cleanup": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["sagaId", "reason", "compensationStatus"],
+      "properties": {
+        "sagaId": { "type": "string", "minLength": 1 },
+        "reason": { "enum": ["success", "failure", "cancel"] },
+        "compensationStatus": { "enum": ["not_required", "completed", "incomplete", "manual_recovery"] }
+      }
+    }
+  }
+}

@@ -363,6 +363,27 @@ declare const context: Readonly<{
 `;
 }
 
+export function generateWomlCorrectionEditorDeclarations(): string {
+  return `// WOML Compensation and Cleanup Script Host Binding v1.
+interface WomlCompensationBinding {
+  readonly sagaId: string;
+  readonly forStepId: string;
+  readonly reason: 'failure' | 'cancel';
+}
+
+interface WomlCleanupBinding {
+  readonly sagaId: string;
+  readonly reason: 'success' | 'failure' | 'cancel';
+  readonly compensationStatus: 'not_required' | 'completed' | 'incomplete' | 'manual_recovery';
+}
+
+declare const context: Readonly<{
+  readonly compensation?: Readonly<WomlCompensationBinding>;
+  readonly cleanup?: Readonly<WomlCleanupBinding>;
+}>;
+`;
+}
+
 export function generateWomlLifecycleEditorDeclarations(): string {
   return `// WOML Lifecycle Runtime Binding v1. Available only inside <lifecycle> scripts.
 type WomlLifecycleEvent =

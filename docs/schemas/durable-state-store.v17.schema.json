@@ -1,0 +1,26 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://woml.dev/schemas/durable-state-store/v17",
+  "title": "WOML Durable Store Contract v17",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schemaVersion", "profile", "tables", "invariants", "migration", "restore"],
+  "properties": {
+    "schemaVersion": { "const": 17 },
+    "profile": { "const": "woml.durable-store/v17" },
+    "tables": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["sagaScopes", "correctionActions", "correctionAttempts", "manualRecovery"],
+      "properties": {
+        "sagaScopes": { "type": "array", "minItems": 8, "uniqueItems": true, "items": { "type": "string" } },
+        "correctionActions": { "type": "array", "minItems": 10, "uniqueItems": true, "items": { "type": "string" } },
+        "correctionAttempts": { "type": "array", "minItems": 9, "uniqueItems": true, "items": { "type": "string" } },
+        "manualRecovery": { "type": "array", "minItems": 7, "uniqueItems": true, "items": { "type": "string" } }
+      }
+    },
+    "invariants": { "type": "array", "minItems": 6, "uniqueItems": true, "items": { "type": "string" } },
+    "migration": { "type": "object", "additionalProperties": false, "required": ["from", "additive", "futureVersionsFailClosed"], "properties": { "from": { "const": 16 }, "additive": { "const": true }, "futureVersionsFailClosed": { "const": true } } },
+    "restore": { "type": "object", "additionalProperties": false, "required": ["preserveCorrectionHistory", "clearUnprovenOwnership", "resumeOnlyProvenWork"], "properties": { "preserveCorrectionHistory": { "const": true }, "clearUnprovenOwnership": { "const": true }, "resumeOnlyProvenWork": { "const": true } } }
+  }
+}

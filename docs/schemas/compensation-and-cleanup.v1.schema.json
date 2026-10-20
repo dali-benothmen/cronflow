@@ -1,0 +1,18 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://woml.dev/schemas/compensation-and-cleanup/v1",
+  "title": "WOML Compensation and Cleanup Contract v1",
+  "type": "object",
+  "additionalProperties": true,
+  "required": ["profile", "modelVersion", "eventVersion", "storeVersion", "scriptHostVersion", "inspectionVersion", "ordering", "limits"],
+  "properties": {
+    "profile": { "const": "woml.compensation-and-cleanup/v1" },
+    "modelVersion": { "const": 19 },
+    "eventVersion": { "const": 18 },
+    "storeVersion": { "const": 17 },
+    "scriptHostVersion": { "const": 11 },
+    "inspectionVersion": { "const": 1 },
+    "ordering": { "type": "object" },
+    "limits": { "type": "object" }
+  }
+}

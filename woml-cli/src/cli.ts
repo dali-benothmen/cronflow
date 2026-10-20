@@ -53,6 +53,7 @@ import {
   type WomlDefinitionPackageV11,
   type WomlDefinitionPackageV12,
   type WomlDefinitionPackageV13,
+  type WomlDefinitionPackageV14,
 } from '@woml/compiler';
 import {
   compiledDefinitionHash,
@@ -1875,6 +1876,7 @@ function runtimeModulesFromPackage(
     | WomlDefinitionPackageV11
     | WomlDefinitionPackageV12
     | WomlDefinitionPackageV13
+    | WomlDefinitionPackageV14
 ): readonly RustRuntimeModuleArtifact[] {
   const modules = definitionPackage.modules.map(module => {
     const bundle = definitionPackage.artifacts.find(
@@ -2309,6 +2311,12 @@ async function compileWorkflowSourcesUnprofiled(
         }
         return lowered;
       });
+    if (frontendWorkflow.schemaVersion === 19) {
+      throw new CliInputError(
+        'WOML_FEATURE_NOT_EXECUTABLE',
+        'Compensation and cleanup authoring is valid, but Model v19 execution begins in CC2–CC4. Use `woml check` to validate this workflow for now.'
+      );
+    }
     const workflow = profileSync('compiler', 'compiler.promote_model', () =>
       promoteForLifecycleAuthority(frontendWorkflow)
     );
@@ -2732,6 +2740,12 @@ async function runSingleCheckCommand(
         child => child.kind === 'element' && declaresLock(child)
       );
     const hasLock = declaresLock(document.root);
+    const declaresSaga = (element: WomlSourceElement): boolean =>
+      element.name === 'saga' ||
+      element.children.some(
+        child => child.kind === 'element' && declaresSaga(child)
+      );
+    const hasSaga = declaresSaga(document.root);
     if (
       reusableGraph.root.kind !== 'workflow' ||
       reusableGraph.definitions.length > 0
@@ -2782,7 +2796,9 @@ async function runSingleCheckCommand(
         );
       }
       io.stdout(
-        reusablePackage?.schemaVersion === 13
+        reusablePackage?.schemaVersion === 14
+          ? `Compiled Model v19 package: ${reusablePackage.rootHash}\nExecution: compensation and cleanup authoring is validated; durable correction execution begins in CC2–CC4.\n`
+          : reusablePackage?.schemaVersion === 13
           ? `Compiled Model v18 package: ${reusablePackage.rootHash}\nExecution: lock authoring and lowering are validated; the durable lock runtime begins in LL2–LL4.\n`
           : reusablePackage?.schemaVersion === 11
           ? `Compiled Model v16 package: ${reusablePackage.rootHash}\nExecution: <for-each>, modules, and reusable steps are runnable together.\n`
@@ -2798,6 +2814,62 @@ async function runSingleCheckCommand(
                 : reusableGraph.root.kind === 'workflow'
                   ? 'Execution: reusable provider source is validated; custom notification providers begin in SCP5.\n'
                   : 'Execution: reusable definitions are imported by workflows and are not independently runnable.\n'
+      );
+      return 0;
+    }
+    if (hasSaga) {
+      const inspectionPackage = buildWomlDefinitionPackage(document, {
+        sourcePath: filePath,
+        projectRoot,
+      });
+      const executablePackage =
+        inspectionPackage.modules.length === 0
+          ? undefined
+          : await buildWomlExecutableDefinitionPackage(document, {
+              sourcePath: filePath,
+              projectRoot,
+            });
+      const compiled =
+        executablePackage?.workflow.model ?? compileWoml(document);
+      if (compiled.schemaVersion !== 19) {
+        throw new CliInputError(
+          'WOML_CORRECTION_MODEL_INVALID',
+          '<saga> did not lower to the frozen compiled Model v19 contract.'
+        );
+      }
+      const workflowElement = document.root.children.find(
+        (child): child is WomlSourceElement =>
+          child.kind === 'element' && child.name === 'workflow'
+      );
+      if (executablePackage !== undefined) {
+        await refreshEditorTypes(filePath, executablePackage.modules, io);
+      }
+      if (options[0] === '--json') {
+        io.stdout(
+          `${JSON.stringify(
+            {
+              profile: 'woml.model-validation/v1',
+              valid: true,
+              workflowId: workflowElement?.attributes.id?.value,
+              feature: 'compensation-and-cleanup',
+              executable: false,
+              modelVersion: compiled.schemaVersion,
+              runtimePhase: 'CC1',
+            },
+            null,
+            2
+          )}\n`
+        );
+        return 0;
+      }
+      io.stdout(
+        `WOML check passed for workflow "${workflowElement?.attributes.id?.value ?? filePath}".\n`
+      );
+      io.stdout(
+        'Compiled Model v19 passed compensation and cleanup frontend validation.\n'
+      );
+      io.stdout(
+        'Execution: corrective runtime execution begins in CC2–CC4.\n'
       );
       return 0;
     }

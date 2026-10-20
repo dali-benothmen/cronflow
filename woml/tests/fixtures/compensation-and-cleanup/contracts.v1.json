@@ -1,0 +1,33 @@
+{
+  "profile": "woml.compensation-and-cleanup/v1",
+  "modelVersion": 19,
+  "eventVersion": 18,
+  "storeVersion": 17,
+  "scriptHostVersion": 11,
+  "inspectionVersion": 1,
+  "failurePolicy": "compensate-completed-eligible-actions",
+  "cancellationPolicy": "stop-forward-then-correct",
+  "commitPolicy": "scope-commits-after-forward-and-cleanup-succeed",
+  "ordering": {
+    "compensation": "reverse-durable-completion-sequence",
+    "cleanup": "source-order",
+    "continueAfterCorrectiveFailure": true,
+    "originalOutcomeRemainsPrimary": true
+  },
+  "atomicity": {
+    "forwardSuccessAndRegistration": "one-durable-transaction",
+    "indexesAreAuthoritative": false,
+    "eventsAreAuthoritative": true
+  },
+  "limits": {
+    "sagasPerWorkflow": 64,
+    "compensationRegistrationsPerRun": 10000,
+    "cleanupStepsPerSaga": 64,
+    "correctiveAttemptsPerAction": 10,
+    "unresolvedRecoveryRecordsPerStore": 10000,
+    "inspectionRows": 100,
+    "inspectionResponseBytes": 1048576,
+    "recoveryBatchSize": 100
+  },
+  "unsupported": ["nested-sagas", "waits-inside-corrective-actions", "approvals-inside-corrective-actions", "multi-step-compensation", "detached-fork-work-inside-saga", "force-skip-cleanup"]
+}

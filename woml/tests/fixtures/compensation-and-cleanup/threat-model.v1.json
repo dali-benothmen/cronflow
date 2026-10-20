@@ -1,0 +1,5 @@
+{
+  "profile": "woml.correction-threat-model/v1",
+  "protected": ["no-secret-values-in-events-or-indexes", "no-automatic-replay-after-ambiguous-corrective-effect", "same-capability-policy-as-forward-script", "bounded-inspection-and-failure-data", "audited-external-resolution"],
+  "nonGuarantees": ["compensation-does-not-rewind-time", "successful-compensation-does-not-prove-original-world-state", "external-effects-are-not-exactly-once", "authors-must-declare-domain-correct-inverses"]
+}
