@@ -1713,6 +1713,15 @@ impl RunEvent {
       inherited.event_schema_version = RUN_EVENT_SCHEMA_VERSION_V16;
       return inherited.validate();
     }
+    if self.event_schema_version == RUN_EVENT_SCHEMA_VERSION_V17
+      && self.iteration.as_ref().is_some_and(|scope| {
+        !valid_public_structural_id(&scope.for_each_id) || scope.index >= 10_000
+      })
+    {
+      return Err(EventValidationError::Invalid(
+        "Event v17 lock iteration scope is invalid.".to_string(),
+      ));
+    }
     if self.event_schema_version == RUN_EVENT_SCHEMA_VERSION_V16 && !wait_event {
       let mut inherited = self.clone();
       inherited.event_schema_version = RUN_EVENT_SCHEMA_VERSION_V15;
@@ -2680,7 +2689,6 @@ impl RunEvent {
       }
       RunEventPayload::LockWaitRegistered(data) => {
         if self.event_schema_version != RUN_EVENT_SCHEMA_VERSION_V17
-          || self.iteration.is_some()
           || !valid_public_structural_id(&data.lock_id)
           || !valid_lock_key(&data.key)
           || data.waiter_sequence == 0
@@ -2695,7 +2703,6 @@ impl RunEvent {
       }
       RunEventPayload::LockAcquired(data) => {
         if self.event_schema_version != RUN_EVENT_SCHEMA_VERSION_V17
-          || self.iteration.is_some()
           || !valid_public_structural_id(&data.lock_id)
           || !valid_lock_key(&data.key)
           || !valid_prefixed_id(&data.lease_id, "lease_", 7)
@@ -2711,7 +2718,6 @@ impl RunEvent {
       }
       RunEventPayload::LockReleased(data) => {
         if self.event_schema_version != RUN_EVENT_SCHEMA_VERSION_V17
-          || self.iteration.is_some()
           || !valid_public_structural_id(&data.lock_id)
           || !valid_lock_key(&data.key)
           || !valid_prefixed_id(&data.lease_id, "lease_", 7)
@@ -2727,7 +2733,6 @@ impl RunEvent {
       }
       RunEventPayload::LockAcquireTimedOut(data) => {
         if self.event_schema_version != RUN_EVENT_SCHEMA_VERSION_V17
-          || self.iteration.is_some()
           || !valid_public_structural_id(&data.lock_id)
           || !valid_lock_key(&data.key)
           || data.resolved_at != self.occurred_at
@@ -2740,7 +2745,6 @@ impl RunEvent {
       }
       RunEventPayload::LockAcquisitionCancelled(data) => {
         if self.event_schema_version != RUN_EVENT_SCHEMA_VERSION_V17
-          || self.iteration.is_some()
           || !valid_public_structural_id(&data.lock_id)
           || !valid_lock_key(&data.key)
           || data.cancelled_at != self.occurred_at
@@ -2753,7 +2757,6 @@ impl RunEvent {
       }
       RunEventPayload::LockLeaseLost(data) => {
         if self.event_schema_version != RUN_EVENT_SCHEMA_VERSION_V17
-          || self.iteration.is_some()
           || !valid_public_structural_id(&data.lock_id)
           || !valid_lock_key(&data.key)
           || !valid_prefixed_id(&data.lease_id, "lease_", 7)

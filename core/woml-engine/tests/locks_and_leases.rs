@@ -3,6 +3,7 @@ use rusqlite::Connection;
 use serde_json::{json, Map, Value};
 use std::path::{Path, PathBuf};
 use uuid::Uuid;
+use woml_engine::event::{ForEachIterationIdentityData, ForEachIterationScope, ForEachOpenedData};
 use woml_engine::{
   execute_workflow_durable_outcome, CompiledWorkflowDefinition, DurableDagEngine,
   DurableEventStore, LockStatus, RunEventPayload, RuntimeExecutionOptions,
@@ -16,6 +17,26 @@ const HASH: &str = "sha256:18181818181818181818181818181818181818181818181818181
 
 fn model() -> CompiledWorkflowDefinition {
   serde_json::from_str(MODEL).expect("reviewed Model v18 fixture")
+}
+
+fn composition_model() -> Option<CompiledWorkflowDefinition> {
+  host_options()?;
+  let repository = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
+  let fixture = repository.join("woml/tests/fixtures/locks-and-leases/composition.reviewed.woml");
+  let output = std::process::Command::new("bun")
+    .current_dir(&repository)
+    .env("WOML_FIXTURE", fixture)
+    .args([
+      "-e",
+      "import {readFileSync} from 'node:fs'; import {parseWoml,compileWoml} from './woml/src/index.ts'; process.stdout.write(JSON.stringify(compileWoml(parseWoml(readFileSync(process.env.WOML_FIXTURE,'utf8')))));",
+    ])
+    .output()
+    .ok()?;
+  output
+    .status
+    .success()
+    .then(|| serde_json::from_slice(&output.stdout).ok())
+    .flatten()
 }
 
 struct TemporaryDatabase(PathBuf);
@@ -277,6 +298,439 @@ fn expired_waiter_is_settled_and_cannot_acquire_later() {
   assert_eq!(
     engine.projection(&runs[1]).unwrap().locks["deployment"].status,
     LockStatus::AcquireTimedOut,
+  );
+}
+
+#[test]
+fn renewal_extends_exact_ownership_and_expiry_transfers_with_a_greater_fence() {
+  let now = Utc::now();
+  let (mut engine, runs) = admitted_runs(3, now);
+  engine
+    .register_lock_waiter(
+      &runs[0],
+      "deployment",
+      "production/payments",
+      now,
+      now + Duration::minutes(10),
+    )
+    .unwrap();
+  engine
+    .register_lock_waiter(
+      &runs[1],
+      "deployment",
+      "production/payments",
+      now + Duration::milliseconds(1),
+      now + Duration::minutes(10),
+    )
+    .unwrap();
+  assert_eq!(
+    engine
+      .renew_lock_lease(&runs[0], "deployment", now + Duration::seconds(10))
+      .unwrap(),
+    woml_engine::LockLeaseMaintenance::Renewed
+  );
+
+  // The original 30-second expiry is no longer authoritative after renewal.
+  engine
+    .register_lock_waiter(
+      &runs[2],
+      "deployment",
+      "production/payments",
+      now + Duration::seconds(31),
+      now + Duration::minutes(10),
+    )
+    .unwrap();
+  assert_eq!(
+    engine.projection(&runs[1]).unwrap().locks["deployment"].status,
+    LockStatus::Waiting
+  );
+
+  let mut store = engine.into_store();
+  assert!(!store
+    .managed_effect_has_current_lock(&runs[0], "deploy", "inv-stale", now + Duration::seconds(41),)
+    .unwrap());
+  let former = store.projection(&runs[0]).unwrap();
+  let successor = store.projection(&runs[1]).unwrap();
+  assert_eq!(former.locks["deployment"].status, LockStatus::LeaseLost);
+  assert_eq!(successor.locks["deployment"].status, LockStatus::Held);
+  assert_eq!(
+    successor.locks["deployment"].fencing_token.as_deref(),
+    Some("2")
+  );
+}
+
+#[test]
+fn late_release_loses_to_expiry_and_cannot_clear_the_successor() {
+  let now = Utc::now();
+  let (mut engine, runs) = admitted_runs(2, now);
+  engine
+    .register_lock_waiter(
+      &runs[0],
+      "deployment",
+      "production/payments",
+      now,
+      now + Duration::minutes(10),
+    )
+    .unwrap();
+  engine
+    .register_lock_waiter(
+      &runs[1],
+      "deployment",
+      "production/payments",
+      now + Duration::milliseconds(1),
+      now + Duration::minutes(10),
+    )
+    .unwrap();
+  let error = engine
+    .release_lock(
+      &runs[0],
+      "deployment",
+      json!({"status":"too-late"}),
+      now + Duration::seconds(31),
+    )
+    .unwrap_err();
+  assert!(matches!(
+    error,
+    woml_engine::DurableEngineError::Store(woml_engine::DurableStoreError::LockHistoryInvalid(_))
+  ));
+  assert_eq!(
+    engine.projection(&runs[0]).unwrap().locks["deployment"].status,
+    LockStatus::LeaseLost
+  );
+  let successor = engine.projection(&runs[1]).unwrap();
+  assert_eq!(successor.locks["deployment"].status, LockStatus::Held);
+  assert_eq!(
+    successor.locks["deployment"].fencing_token.as_deref(),
+    Some("2")
+  );
+}
+
+#[test]
+fn restart_reattaches_to_the_exact_lease_then_expires_it_fail_closed() {
+  let now = Utc::now();
+  let database = TemporaryDatabase::new();
+  let mut workflow = model();
+  workflow.runtime_policy.as_mut().unwrap().concurrency = Some(2);
+  let mut store = DurableEventStore::open(database.path()).unwrap();
+  store.register_definition(&workflow, HASH).unwrap();
+  let mut runs = Vec::new();
+  for index in 0..2 {
+    let run_id = store
+      .admit_trigger_occurrence(TriggerAdmissionRequest {
+        workflow_id: workflow.workflow_id.clone(),
+        definition_hash: HASH.to_string(),
+        trigger_id: "start".to_string(),
+        trigger_handler: "trigger.manual".to_string(),
+        source_identity: format!("restart-lock-{index}"),
+        payload: Map::new(),
+        received_at: now + Duration::milliseconds(i64::from(index)),
+      })
+      .unwrap()
+      .run_id;
+    store
+      .claim_policy_run(
+        &run_id,
+        &format!("restart-owner-{index}"),
+        now,
+        std::time::Duration::from_secs(30),
+      )
+      .unwrap();
+    runs.push(run_id);
+  }
+  let mut engine = DurableDagEngine::resume(store, &runs[0]).unwrap();
+  for run_id in &runs {
+    prepare_run(&mut engine, run_id, now);
+  }
+  engine
+    .register_lock_waiter(
+      &runs[0],
+      "deployment",
+      "production/payments",
+      now,
+      now + Duration::minutes(10),
+    )
+    .unwrap();
+  engine
+    .register_lock_waiter(
+      &runs[1],
+      "deployment",
+      "production/payments",
+      now + Duration::milliseconds(1),
+      now + Duration::minutes(10),
+    )
+    .unwrap();
+  drop(engine);
+
+  let store = DurableEventStore::open(database.path()).unwrap();
+  let mut resumed = DurableDagEngine::resume(store, &runs[0]).unwrap();
+  assert_eq!(
+    resumed
+      .renew_lock_lease(&runs[0], "deployment", now + Duration::seconds(10))
+      .unwrap(),
+    woml_engine::LockLeaseMaintenance::Renewed
+  );
+  drop(resumed);
+
+  let mut store = DurableEventStore::open(database.path()).unwrap();
+  assert!(!store
+    .managed_effect_has_current_lock(
+      &runs[0],
+      "deploy",
+      "restart-stale-effect",
+      now + Duration::seconds(41),
+    )
+    .unwrap());
+  assert_eq!(
+    store.projection(&runs[0]).unwrap().locks["deployment"].status,
+    LockStatus::LeaseLost
+  );
+  assert_eq!(
+    store.projection(&runs[1]).unwrap().locks["deployment"].status,
+    LockStatus::Held
+  );
+  assert_eq!(
+    store.projection(&runs[1]).unwrap().locks["deployment"]
+      .fencing_token
+      .as_deref(),
+    Some("2")
+  );
+}
+
+#[test]
+fn cancellation_removes_a_waiter_but_does_not_release_an_unproven_owner() {
+  let now = Utc::now();
+  let (mut engine, runs) = admitted_runs(2, now);
+  engine
+    .register_lock_waiter(
+      &runs[0],
+      "deployment",
+      "production/payments",
+      now,
+      now + Duration::minutes(10),
+    )
+    .unwrap();
+  engine
+    .register_lock_waiter(
+      &runs[1],
+      "deployment",
+      "production/payments",
+      now + Duration::milliseconds(1),
+      now + Duration::minutes(10),
+    )
+    .unwrap();
+  let mut store = engine.into_store();
+  store
+    .request_run_cancellation(&runs[1], "cancel-waiter", now + Duration::seconds(1))
+    .unwrap();
+  let cancelling = store.projection(&runs[1]).unwrap();
+  assert_eq!(cancelling.status, woml_engine::RunStatus::Cancelling);
+  assert_eq!(
+    cancelling.cancellation_request_id.as_deref(),
+    Some("cancel-waiter")
+  );
+  let cancelled = store
+    .cancel_lock_waiters_atomically(&runs[1], "cancel-waiter", now + Duration::seconds(1))
+    .unwrap();
+  assert_eq!(
+    cancelled.locks["deployment"].status,
+    LockStatus::AcquisitionCancelled
+  );
+  assert_eq!(
+    store.projection(&runs[0]).unwrap().locks["deployment"].status,
+    LockStatus::Held
+  );
+}
+
+#[test]
+fn for_each_iterations_have_distinct_fifo_acquisition_identities() {
+  let Some(workflow) = composition_model() else {
+    return;
+  };
+  let now = Utc::now();
+  let hash = "sha256:1919191919191919191919191919191919191919191919191919191919191919";
+  let mut store = DurableEventStore::open_in_memory().unwrap();
+  store.register_definition(&workflow, hash).unwrap();
+  let run_id = store
+    .admit_trigger_occurrence(TriggerAdmissionRequest {
+      workflow_id: workflow.workflow_id.clone(),
+      definition_hash: hash.to_string(),
+      trigger_id: "start".to_string(),
+      trigger_handler: "trigger.manual".to_string(),
+      source_identity: "iteration-lock-test".to_string(),
+      payload: Map::new(),
+      received_at: now,
+    })
+    .unwrap()
+    .run_id;
+  store
+    .claim_policy_run(
+      &run_id,
+      "iteration-owner",
+      now,
+      std::time::Duration::from_secs(30),
+    )
+    .unwrap();
+  let mut engine = DurableDagEngine::resume(store, &run_id).unwrap();
+  engine
+    .append_payload(
+      "open-loop",
+      &run_id,
+      now,
+      RunEventPayload::ForEachOpened(ForEachOpenedData {
+        for_each_id: "items".to_string(),
+        total: 2,
+        items_digest: format!("sha256:{}", "1".repeat(64)),
+        concurrency: 1,
+      }),
+    )
+    .unwrap();
+  for index in 0..2 {
+    engine
+      .append_scoped_payload(
+        format!("start-iteration-{index}"),
+        &run_id,
+        now + Duration::milliseconds(i64::from(index)),
+        ForEachIterationScope {
+          for_each_id: "items".to_string(),
+          index,
+        },
+        RunEventPayload::ForEachIterationStarted(ForEachIterationIdentityData {
+          for_each_id: "items".to_string(),
+        }),
+      )
+      .unwrap();
+    engine
+      .register_iteration_lock_waiter(
+        &run_id,
+        "iterationLock",
+        "item/shared",
+        ForEachIterationScope {
+          for_each_id: "items".to_string(),
+          index,
+        },
+        now + Duration::milliseconds(i64::from(index)),
+        now + Duration::minutes(1),
+      )
+      .unwrap();
+  }
+  let projected = engine.projection(&run_id).unwrap();
+  assert_eq!(
+    projected.for_each["items"].executions[&0].locks["iterationLock"].status,
+    LockStatus::Held
+  );
+  assert_eq!(
+    projected.for_each["items"].executions[&1].locks["iterationLock"].status,
+    LockStatus::Waiting
+  );
+  engine
+    .release_iteration_lock(
+      &run_id,
+      "iterationLock",
+      ForEachIterationScope {
+        for_each_id: "items".to_string(),
+        index: 0,
+      },
+      json!({"status":"released"}),
+      now + Duration::seconds(1),
+    )
+    .unwrap();
+  let projected = engine.projection(&run_id).unwrap();
+  assert_eq!(
+    projected.for_each["items"].executions[&1].locks["iterationLock"].status,
+    LockStatus::Held
+  );
+  assert_eq!(
+    projected.for_each["items"].executions[&1].locks["iterationLock"]
+      .fencing_token
+      .as_deref(),
+    Some("2")
+  );
+}
+
+#[test]
+fn cancellation_removes_iteration_waiters_without_releasing_iteration_owners() {
+  let Some(workflow) = composition_model() else {
+    return;
+  };
+  let now = Utc::now();
+  let hash = "sha256:2020202020202020202020202020202020202020202020202020202020202020";
+  let mut store = DurableEventStore::open_in_memory().unwrap();
+  store.register_definition(&workflow, hash).unwrap();
+  let run_id = store
+    .admit_trigger_occurrence(TriggerAdmissionRequest {
+      workflow_id: workflow.workflow_id.clone(),
+      definition_hash: hash.to_string(),
+      trigger_id: "start".to_string(),
+      trigger_handler: "trigger.manual".to_string(),
+      source_identity: "iteration-lock-cancellation".to_string(),
+      payload: Map::new(),
+      received_at: now,
+    })
+    .unwrap()
+    .run_id;
+  store
+    .claim_policy_run(
+      &run_id,
+      "iteration-owner",
+      now,
+      std::time::Duration::from_secs(30),
+    )
+    .unwrap();
+  let mut engine = DurableDagEngine::resume(store, &run_id).unwrap();
+  engine
+    .append_payload(
+      "open-loop",
+      &run_id,
+      now,
+      RunEventPayload::ForEachOpened(ForEachOpenedData {
+        for_each_id: "items".to_string(),
+        total: 2,
+        items_digest: format!("sha256:{}", "2".repeat(64)),
+        concurrency: 1,
+      }),
+    )
+    .unwrap();
+  for index in 0..2 {
+    let scope = ForEachIterationScope {
+      for_each_id: "items".to_string(),
+      index,
+    };
+    engine
+      .append_scoped_payload(
+        format!("start-iteration-{index}"),
+        &run_id,
+        now + Duration::milliseconds(i64::from(index)),
+        scope.clone(),
+        RunEventPayload::ForEachIterationStarted(ForEachIterationIdentityData {
+          for_each_id: "items".to_string(),
+        }),
+      )
+      .unwrap();
+    engine
+      .register_iteration_lock_waiter(
+        &run_id,
+        "iterationLock",
+        "item/shared",
+        scope,
+        now + Duration::milliseconds(i64::from(index)),
+        now + Duration::minutes(1),
+      )
+      .unwrap();
+  }
+  let mut store = engine.into_store();
+  store
+    .request_run_cancellation(&run_id, "cancel-loop", now + Duration::seconds(1))
+    .unwrap();
+  let cancelled = store
+    .cancel_lock_waiters_atomically(&run_id, "cancel-loop", now + Duration::seconds(1))
+    .unwrap();
+  assert_eq!(
+    cancelled.for_each["items"].executions[&0].locks["iterationLock"].status,
+    LockStatus::Held
+  );
+  assert_eq!(
+    cancelled.for_each["items"].executions[&1].locks["iterationLock"].status,
+    LockStatus::AcquisitionCancelled
   );
 }
 

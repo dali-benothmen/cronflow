@@ -2912,6 +2912,9 @@ fn inspect_for_each_contract(workflow: &CompiledWorkflowDefinition, issues: &mut
           | "engine.choice-result"
           | "engine.parallel-start"
           | "engine.parallel-join"
+          | "engine.lock-acquire"
+          | "engine.lock-release"
+          | "engine.lock-result"
       );
       let script_valid = if node.handler == "runtime.script" {
         matches!(&node.inputs, ValueExpression::Object { fields } if fields.len() == 1
@@ -3372,10 +3375,43 @@ fn inspect_lock_contract(workflow: &CompiledWorkflowDefinition, issues: &mut Vec
     ));
     return;
   }
+  let root_node_ids = workflow
+    .graph
+    .nodes
+    .iter()
+    .map(|node| node.id.as_str())
+    .collect::<HashSet<_>>();
+  let body_node_ids = workflow
+    .graph
+    .for_each
+    .as_deref()
+    .unwrap_or_default()
+    .iter()
+    .map(|descriptor| {
+      (
+        descriptor.for_each_id.as_str(),
+        descriptor
+          .body
+          .nodes
+          .iter()
+          .map(|node| node.id.as_str())
+          .collect::<HashSet<_>>(),
+      )
+    })
+    .collect::<HashMap<_, _>>();
   let nodes = workflow
     .graph
     .nodes
     .iter()
+    .chain(
+      workflow
+        .graph
+        .for_each
+        .as_deref()
+        .unwrap_or_default()
+        .iter()
+        .flat_map(|descriptor| descriptor.body.nodes.iter()),
+    )
     .map(|node| (node.id.as_str(), node))
     .collect::<HashMap<_, _>>();
   let mut lock_ids = HashSet::new();
@@ -3406,6 +3442,17 @@ fn inspect_lock_contract(workflow: &CompiledWorkflowDefinition, issues: &mut Vec
       &lock.release_node_id,
       &lock.result_node_id,
     ];
+    let ownership_ids = [
+      lock.acquire_node_id.as_str(),
+      lock.release_node_id.as_str(),
+      lock.result_node_id.as_str(),
+      lock.body_entry_node_id.as_str(),
+      lock.body_terminal_node_id.as_str(),
+    ];
+    let one_graph_owns_every_node = ownership_ids.iter().all(|id| root_node_ids.contains(id))
+      || body_node_ids
+        .values()
+        .any(|body| ownership_ids.iter().all(|id| body.contains(id)));
     let valid = valid_public_structural_id(&lock.lock_id)
       && lock_ids.insert(lock.lock_id.as_str())
       && node_ids.iter().all(|id| owned_nodes.insert(id.as_str()))
@@ -3417,6 +3464,7 @@ fn inspect_lock_contract(workflow: &CompiledWorkflowDefinition, issues: &mut Vec
       && valid_control(&lock.result_node_id, "engine.lock-result")
       && nodes.contains_key(lock.body_entry_node_id.as_str())
       && nodes.contains_key(lock.body_terminal_node_id.as_str())
+      && one_graph_owns_every_node
       && key_valid
       && (1_000..=604_800_000).contains(&lock.acquire_timeout_ms)
       && (5_000..=600_000).contains(&lock.lease_ms);
@@ -3434,6 +3482,15 @@ fn inspect_lock_contract(workflow: &CompiledWorkflowDefinition, issues: &mut Vec
     .graph
     .nodes
     .iter()
+    .chain(
+      workflow
+        .graph
+        .for_each
+        .as_deref()
+        .unwrap_or_default()
+        .iter()
+        .flat_map(|descriptor| descriptor.body.nodes.iter()),
+    )
     .filter(|node| {
       matches!(
         node.handler.as_str(),

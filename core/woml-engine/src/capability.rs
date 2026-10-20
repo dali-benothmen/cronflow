@@ -688,7 +688,7 @@ impl DurableCapabilityAuthority {
     cancellation: CapabilityCancellationToken,
   ) -> Result<CapabilityCallResult, DurableCapabilityAuthorityError> {
     let (workflow_scope, iteration_scope) = {
-      let store = self.store.lock().await;
+      let mut store = self.store.lock().await;
       let projection = store.projection(&request.run_id)?;
       let binding = store.run_binding(&request.run_id)?;
       let attempt = projection.attempts.iter().find(|attempt| {
@@ -734,6 +734,24 @@ impl DurableCapabilityAuthority {
           )
           .into(),
         );
+      }
+      if !store.managed_effect_has_current_lock(
+        &request.run_id,
+        &request.node_id,
+        &request.invocation_id,
+        Utc::now(),
+      )? {
+        return Ok(failed_result(
+          &request,
+          Instant::now(),
+          failure(
+            CapabilityFailureKind::ServiceRejected,
+            "WOML_LOCK_STALE_OWNER",
+            "The managed effect was rejected because its lock lease is no longer current.",
+            false,
+            false,
+          ),
+        ));
       }
       (binding.workflow_id, iteration_scope)
     };
