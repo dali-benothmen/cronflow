@@ -1,0 +1,29 @@
+<woml>
+  <workflow id="lock-composition" version="1.0.0">
+    <triggers><manual id="start" /></triggers>
+    <steps>
+      <step id="seed"><script>return { tenant: "acme", deploy: true, items: [1] };</script></step>
+      <choose>
+        <when test="{{context.steps.seed.deploy}}">
+          <lock id="choiceLock" key="choice/{{context.steps.seed.tenant}}" acquire-timeout="1m">
+            <step id="choiceWork"><script>return true;</script></step>
+          </lock>
+        </when>
+        <otherwise><step id="choiceSkip"><script>return true;</script></step></otherwise>
+      </choose>
+      <fork id="routes" join="all">
+        <branch id="deploy">
+          <lock id="branchLock" key="branch/{{context.steps.seed.tenant}}" acquire-timeout="1m">
+            <step id="branchWork"><script>return true;</script></step>
+          </lock>
+        </branch>
+      </fork>
+      <for-each id="items" items="{{context.steps.seed.items}}">
+        <lock id="iterationLock" key="item/{{context.iteration.index}}" acquire-timeout="1m">
+          <step id="iterationWork"><script>return context.item;</script></step>
+        </lock>
+      </for-each>
+      <step id="done"><script>return { ok: true };</script></step>
+    </steps>
+  </workflow>
+</woml>

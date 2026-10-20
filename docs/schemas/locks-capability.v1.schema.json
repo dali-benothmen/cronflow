@@ -1,0 +1,19 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://woml.dev/schemas/locks-capability/v1",
+  "title": "WOML Locks Capability v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["profile", "operation", "invocationId", "key", "acquireTimeoutMs", "leaseMs", "operationIdentity"],
+  "properties": {
+    "profile": { "const": "woml.locks-capability/v1" },
+    "operation": { "enum": ["acquire", "assert-current", "release"] },
+    "invocationId": { "type": "string", "minLength": 1 },
+    "key": { "type": "string", "minLength": 1, "maxLength": 256 },
+    "acquireTimeoutMs": { "type": "integer", "minimum": 1000, "maximum": 604800000 },
+    "leaseMs": { "type": "integer", "minimum": 5000, "maximum": 600000 },
+    "operationIdentity": { "type": "string", "minLength": 1 },
+    "leaseId": { "type": "string", "minLength": 1 },
+    "fencingToken": { "type": "string", "pattern": "^(0|[1-9][0-9]*)$" }
+  }
+}

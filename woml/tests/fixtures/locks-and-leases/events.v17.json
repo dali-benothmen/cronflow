@@ -1,0 +1,18 @@
+{
+  "schemaVersion": 17,
+  "profile": "woml.run-events/v17",
+  "events": {
+    "lock_wait_registered": { "required": ["lockId", "key", "waiterSequence", "registeredAt", "deadline", "executionIdentity"] },
+    "lock_acquired": { "required": ["lockId", "key", "leaseId", "fencingToken", "acquiredAt", "expiresAt", "executionIdentity"] },
+    "lock_released": { "required": ["lockId", "key", "leaseId", "fencingToken", "releasedAt", "result"] },
+    "lock_acquire_timed_out": { "required": ["lockId", "key", "deadline", "resolvedAt"] },
+    "lock_acquisition_cancelled": { "required": ["lockId", "key", "cancelledAt", "cancellationId"] },
+    "lock_lease_lost": { "required": ["lockId", "key", "leaseId", "fencingToken", "expiredAt", "detectedAt", "ambiguous"] }
+  },
+  "rules": {
+    "oneAcquisitionTerminalPerExecution": true,
+    "routineRenewalsAreRunEvents": false,
+    "credentialsPersisted": false,
+    "fencingTokenNeverDecreases": true
+  }
+}

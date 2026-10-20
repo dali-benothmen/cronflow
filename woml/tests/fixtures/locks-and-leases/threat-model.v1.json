@@ -1,0 +1,17 @@
+{
+  "profile": "woml.lock-threat-model/v1",
+  "threats": {
+    "staleOwnerWrites": "managed-capability-check-plus-target-fencing",
+    "splitBrainRestore": "preserve-high-water-clear-owners-retire-old-authority",
+    "secretInKey": "compile-and-runtime-rejection",
+    "waiterExhaustion": "per-key-and-store-bounds",
+    "forgedRelease": "exact-lease-owner-and-token-match",
+    "clockMovement": "single-authority-clock-and-cross-platform-tests",
+    "rawCodeBypass": "documented-residual-risk"
+  },
+  "nonGuarantees": [
+    "no-distributed-guarantee-for-copied-sqlite",
+    "no-automatic-fencing-for-raw-fetch-or-third-party-code",
+    "no-rollback-of-already-issued-side-effects"
+  ]
+}

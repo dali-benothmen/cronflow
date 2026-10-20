@@ -1,0 +1,15 @@
+{
+  "profile": "woml.locks-and-leases-rejections/v1",
+  "cases": [
+    { "id": "missing-key", "code": "WOML_MISSING_ATTRIBUTE" },
+    { "id": "missing-timeout", "code": "WOML_MISSING_ATTRIBUTE" },
+    { "id": "empty-body", "code": "WOML_LOCK_EMPTY" },
+    { "id": "invalid-key", "code": "WOML_LOCK_KEY_INVALID" },
+    { "id": "secret-key", "code": "WOML_LOCK_KEY_SENSITIVE" },
+    { "id": "invalid-acquire-timeout", "code": "WOML_LOCK_ACQUIRE_TIMEOUT_INVALID" },
+    { "id": "invalid-lease", "code": "WOML_LOCK_LEASE_INVALID" },
+    { "id": "reference-not-dominating", "code": "WOML_REFERENCE_NOT_DOMINATING" },
+    { "id": "nested-lock", "code": "WOML_LOCK_NESTED_UNSUPPORTED" },
+    { "id": "duplicate-id", "code": "WOML_DUPLICATE_ID" }
+  ]
+}

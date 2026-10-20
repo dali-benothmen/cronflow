@@ -1,0 +1,24 @@
+{
+  "profile": "woml.lock-state-transitions/v1",
+  "states": ["unregistered", "waiting", "held", "released", "timed_out", "cancelled", "lost"],
+  "transitions": [
+    ["unregistered", "waiting", "register"],
+    ["waiting", "held", "oldest-eligible-grant"],
+    ["waiting", "timed_out", "deadline"],
+    ["waiting", "cancelled", "run-cancellation"],
+    ["held", "released", "protected-scope-settled"],
+    ["held", "lost", "durable-expiry" ]
+  ],
+  "races": {
+    "releaseVsExpiry": "one-transaction-wins",
+    "cancelVsAcquire": "one-transaction-wins",
+    "timeoutVsAcquire": "one-transaction-wins",
+    "staleRenewalVsTakeover": "new-owner-cannot-be-mutated"
+  },
+  "recovery": {
+    "waiting": "reattach",
+    "heldBeforeBody": "resume-protected-continuation",
+    "interruptedEffect": "fail-closed-no-replay",
+    "expiredOwner": "mark-lost-before-continuation"
+  }
+}

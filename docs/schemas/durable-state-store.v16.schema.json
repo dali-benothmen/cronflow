@@ -1,0 +1,34 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://woml.dev/schemas/durable-state-store/v16",
+  "title": "WOML Durable Store Contract v16",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schemaVersion", "profile", "tables", "invariants", "migration", "restore"],
+  "properties": {
+    "schemaVersion": { "const": 16 },
+    "profile": { "const": "woml.durable-store/v16" },
+    "tables": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["lockResources", "lockWaiters"],
+      "properties": {
+        "lockResources": { "type": "array", "minItems": 9, "uniqueItems": true, "items": { "type": "string" } },
+        "lockWaiters": { "type": "array", "minItems": 9, "uniqueItems": true, "items": { "type": "string" } }
+      }
+    },
+    "invariants": { "type": "array", "minItems": 5, "uniqueItems": true, "items": { "type": "string" } },
+    "migration": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["from", "additive", "futureVersionsFailClosed"],
+      "properties": { "from": { "const": 15 }, "additive": { "const": true }, "futureVersionsFailClosed": { "const": true } }
+    },
+    "restore": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["preserveFencingHighWater", "clearLiveOwnership", "oldAuthorityMustBeRetired"],
+      "properties": { "preserveFencingHighWater": { "const": true }, "clearLiveOwnership": { "const": true }, "oldAuthorityMustBeRetired": { "const": true } }
+    }
+  }
+}

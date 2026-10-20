@@ -1,0 +1,11 @@
+<woml>
+  <props>
+    <prop name="value" />
+  </props>
+
+  <step name="Increment value">
+    <script>
+      return { value: Number(props.value) + 1 };
+    </script>
+  </step>
+</woml>

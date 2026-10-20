@@ -19,6 +19,7 @@
     "test:discord-authoring": "bun test tests/discord-authoring.test.ts",
     "test:whatsapp-authoring": "bun test tests/whatsapp-authoring.test.ts",
     "test:reusable-definitions": "bun test tests/reusable-definition-contracts.test.ts tests/reusable-definitions.test.ts",
+    "test:locks-and-leases-authoring": "bun test tests/locks-and-leases-authoring.test.ts --max-concurrency=1 && bun run typecheck",
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
