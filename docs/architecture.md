@@ -115,6 +115,7 @@ and recovery for:
 - `services.events.emit()`;
 - `services.state`;
 - `services.process.run()`;
+- `<lock>` and `services.locks.withLease()` through the Store v16 lock authority;
 - `services.workflows.call()` and `.start()`; and
 - supervised Telegram, Discord, and WhatsApp messaging.
 
@@ -128,6 +129,14 @@ revalidates its filesystem identity, applies working-directory/environment
 policy, creates OS process-tree containment, drains bounded output, and settles
 the durable operation. An unmatched process start is ambiguous and fails
 closed during recovery; it is never automatically replayed.
+
+Durable locks follow the same ownership rule. Rust alone registers FIFO
+waiters, grants one lease, renews it, advances fencing tokens, settles timeout
+or cancellation, and releases proven ownership. Waiting does not retain a Bun
+worker or workflow execution slot. Compact resource rows hold the current
+owner and fencing high-water; immutable events record meaningful workflow
+transitions instead of every heartbeat. The released local profile coordinates
+processes sharing one SQLite store and does not claim cross-host consensus.
 
 ## Triggers and admission
 

@@ -268,10 +268,12 @@ pub struct RuntimeExecutionOptions {
   managed_storage_store: Option<Arc<crate::ManagedStorageStore>>,
   managed_cache_store: Option<Arc<crate::ManagedCacheStore>>,
   managed_durable_state_store: Option<Arc<crate::ManagedDurableStateStore>>,
+  managed_locks_service: Option<Arc<crate::ManagedLocksService>>,
   managed_artifact_store: Option<Arc<crate::ManagedArtifactStore>>,
   artifact_policy: Option<Arc<crate::artifacts::PreparedArtifactPolicy>>,
   policy_execution: Option<Arc<PolicyExecutionCoordinator>>,
   policy_execution_registry: PolicyExecutionRegistry,
+  lock_renewals: Arc<std::sync::Mutex<HashMap<String, Arc<AtomicBool>>>>,
 }
 
 struct ArtifactInvocationCleanup {
@@ -336,6 +338,14 @@ impl std::fmt::Debug for RuntimeExecutionOptions {
       .field(
         "shared_script_hosts",
         &self.shared_script_hosts.as_ref().map(|_| "enabled"),
+      )
+      .field(
+        "lock_renewal_count",
+        &self
+          .lock_renewals
+          .lock()
+          .map(|items| items.len())
+          .unwrap_or(0),
       )
       .field(
         "progress_reporter",
@@ -436,6 +446,12 @@ impl RuntimeExecutionOptions {
         .register(handler)
         .expect("each production durable state operation is registered exactly once");
     }
+    let managed_locks_service = Arc::new(crate::ManagedLocksService::default());
+    for handler in crate::ManagedLocksService::handlers(Arc::clone(&managed_locks_service)) {
+      capability_registry
+        .register(handler)
+        .expect("each production lock operation is registered exactly once");
+    }
     Self {
       script_host,
       notification_host,
@@ -460,10 +476,12 @@ impl RuntimeExecutionOptions {
       managed_storage_store: Some(managed_storage_store),
       managed_cache_store: Some(managed_cache_store),
       managed_durable_state_store: Some(managed_durable_state_store),
+      managed_locks_service: Some(managed_locks_service),
       managed_artifact_store: None,
       artifact_policy: None,
       policy_execution: None,
       policy_execution_registry: Arc::new(tokio::sync::RwLock::new(HashMap::new())),
+      lock_renewals: Arc::new(std::sync::Mutex::new(HashMap::new())),
     }
   }
 
@@ -595,6 +613,7 @@ impl RuntimeExecutionOptions {
     self.managed_storage_store = None;
     self.managed_cache_store = None;
     self.managed_durable_state_store = None;
+    self.managed_locks_service = None;
     self.managed_artifact_store = None;
     self.artifact_policy = None;
     self
@@ -726,6 +745,126 @@ impl RuntimeExecutionOptions {
 
   pub(crate) fn policy_execution_registry(&self) -> PolicyExecutionRegistry {
     Arc::clone(&self.policy_execution_registry)
+  }
+
+  fn ensure_lock_renewal(&self, run_id: &str, lock_id: &str, lease_ms: u64) {
+    let Some(authority) = self.capability_authority.clone() else {
+      return;
+    };
+    let identity = format!("{run_id}\0{lock_id}");
+    let cancelled = Arc::new(AtomicBool::new(false));
+    {
+      let Ok(mut renewals) = self.lock_renewals.lock() else {
+        return;
+      };
+      if renewals.contains_key(&identity) {
+        return;
+      }
+      renewals.insert(identity.clone(), Arc::clone(&cancelled));
+    }
+    let renewals = Arc::clone(&self.lock_renewals);
+    let run_id = run_id.to_string();
+    let lock_id = lock_id.to_string();
+    let interval = Duration::from_millis((lease_ms / 3).max(1));
+    tokio::spawn(async move {
+      loop {
+        tokio::time::sleep(interval).await;
+        if cancelled.load(Ordering::SeqCst) {
+          break;
+        }
+        let outcome = authority.store().lock().await.renew_lock_lease_atomically(
+          &run_id,
+          &lock_id,
+          chrono::Utc::now(),
+        );
+        if !matches!(outcome, Ok(crate::LockLeaseMaintenance::Renewed)) {
+          break;
+        }
+      }
+      if let Ok(mut active) = renewals.lock() {
+        active.remove(&identity);
+      }
+    });
+  }
+
+  fn stop_lock_renewal(&self, run_id: &str, lock_id: &str) {
+    let identity = format!("{run_id}\0{lock_id}");
+    if let Ok(mut renewals) = self.lock_renewals.lock() {
+      if let Some(cancelled) = renewals.remove(&identity) {
+        cancelled.store(true, Ordering::SeqCst);
+      }
+    }
+  }
+
+  fn ensure_iteration_lock_renewal(
+    &self,
+    run_id: &str,
+    lock_id: &str,
+    scope: ForEachIterationScope,
+    lease_ms: u64,
+  ) {
+    let Some(authority) = self.capability_authority.clone() else {
+      return;
+    };
+    let identity = format!(
+      "{run_id}\0{}\0{}\0{lock_id}",
+      scope.for_each_id, scope.index
+    );
+    let cancelled = Arc::new(AtomicBool::new(false));
+    {
+      let Ok(mut renewals) = self.lock_renewals.lock() else {
+        return;
+      };
+      if renewals.contains_key(&identity) {
+        return;
+      }
+      renewals.insert(identity.clone(), Arc::clone(&cancelled));
+    }
+    let renewals = Arc::clone(&self.lock_renewals);
+    let run_id = run_id.to_string();
+    let lock_id = lock_id.to_string();
+    let interval = Duration::from_millis((lease_ms / 3).max(1));
+    tokio::spawn(async move {
+      loop {
+        tokio::time::sleep(interval).await;
+        if cancelled.load(Ordering::SeqCst) {
+          break;
+        }
+        let outcome = authority
+          .store()
+          .lock()
+          .await
+          .renew_lock_lease_atomically_scoped(
+            &run_id,
+            &lock_id,
+            Some(scope.clone()),
+            chrono::Utc::now(),
+          );
+        if !matches!(outcome, Ok(crate::LockLeaseMaintenance::Renewed)) {
+          break;
+        }
+      }
+      if let Ok(mut active) = renewals.lock() {
+        active.remove(&identity);
+      }
+    });
+  }
+
+  fn stop_iteration_lock_renewal(
+    &self,
+    run_id: &str,
+    lock_id: &str,
+    scope: &ForEachIterationScope,
+  ) {
+    let identity = format!(
+      "{run_id}\0{}\0{}\0{lock_id}",
+      scope.for_each_id, scope.index
+    );
+    if let Ok(mut renewals) = self.lock_renewals.lock() {
+      if let Some(cancelled) = renewals.remove(&identity) {
+        cancelled.store(true, Ordering::SeqCst);
+      }
+    }
   }
 
   async fn ensure_policy_execution_slot(&self) -> Result<(), RuntimeExecutionError> {
@@ -1627,7 +1766,10 @@ pub async fn execute_workflow_durable(
   options: RuntimeExecutionOptions,
   database_path: PathBuf,
 ) -> Result<WorkflowExecutionResult, RuntimeExecutionError> {
-  if workflow_has_approval(&workflow) || workflow_has_durable_wait(&workflow) {
+  if workflow_has_approval(&workflow)
+    || workflow_has_durable_wait(&workflow)
+    || workflow_has_durable_lock(&workflow)
+  {
     return Err(RuntimeExecutionError::InvalidConfiguration(
       "durably waiting workflows require execute_workflow_durable_outcome".to_string(),
     ));
@@ -1645,9 +1787,12 @@ pub async fn execute_workflow_durable_outcome(
   options: RuntimeExecutionOptions,
   database_path: PathBuf,
 ) -> Result<WorkflowRuntimeOutcome, RuntimeExecutionError> {
-  if !workflow_has_approval(&workflow) && !workflow_has_durable_wait(&workflow) {
+  if !workflow_has_approval(&workflow)
+    && !workflow_has_durable_wait(&workflow)
+    && !workflow_has_durable_lock(&workflow)
+  {
     return Err(RuntimeExecutionError::InvalidConfiguration(
-      "the runtime outcome API requires an approval or durable-wait workflow".to_string(),
+      "the runtime outcome API requires an approval, durable-wait, or lock workflow".to_string(),
     ));
   }
   execute_workflow_durable_internal(workflow, definition_hash, trigger, options, database_path)
@@ -1800,12 +1945,13 @@ async fn resume_workflow_durable_internal(
   let workflow = store.definition(&binding.definition_hash)?;
   let has_approval = workflow_has_approval(&workflow);
   let has_durable_wait = workflow_has_durable_wait(&workflow);
-  if approval_outcome_api == Some(true) && !has_approval && !has_durable_wait {
+  let has_durable_lock = workflow_has_durable_lock(&workflow);
+  if approval_outcome_api == Some(true) && !has_approval && !has_durable_wait && !has_durable_lock {
     return Err(RuntimeExecutionError::InvalidConfiguration(
-      "the runtime outcome API requires an approval or durable-wait workflow".to_string(),
+      "the runtime outcome API requires an approval, durable-wait, or lock workflow".to_string(),
     ));
   }
-  if approval_outcome_api == Some(false) && (has_approval || has_durable_wait) {
+  if approval_outcome_api == Some(false) && (has_approval || has_durable_wait || has_durable_lock) {
     return Err(RuntimeExecutionError::InvalidConfiguration(
       "durably waiting workflows require resume_workflow_durable_outcome".to_string(),
     ));
@@ -1838,6 +1984,11 @@ fn attach_durable_capability_authority(
       .configure_for_state(database_path)
       .map_err(|failure| RuntimeExecutionError::InvalidConfiguration(failure.message))?;
   }
+  if let Some(locks) = &options.managed_locks_service {
+    locks
+      .configure_for_state(database_path)
+      .map_err(|failure| RuntimeExecutionError::InvalidConfiguration(failure.message))?;
+  }
   if let (Some(artifacts), Some(policy)) =
     (&options.managed_artifact_store, &options.artifact_policy)
   {
@@ -1858,9 +2009,14 @@ fn attach_durable_capability_authority(
       .protect_path(database_path)
       .map_err(|failure| RuntimeExecutionError::InvalidConfiguration(failure.message))?;
   }
-  options.capability_authority = Some(Arc::new(DurableCapabilityAuthority::new(
+  let locks = options
+    .managed_locks_service
+    .clone()
+    .unwrap_or_else(|| Arc::new(crate::ManagedLocksService::default()));
+  options.capability_authority = Some(Arc::new(DurableCapabilityAuthority::new_with_locks(
     Arc::clone(&options.capability_registry),
     Arc::new(tokio::sync::Mutex::new(store)),
+    locks,
   )));
   Ok(options)
 }
@@ -1946,6 +2102,15 @@ fn workflow_has_durable_wait(workflow: &CompiledWorkflowDefinition) -> bool {
       .nodes
       .iter()
       .any(|node| node.handler == "engine.durable-wait")
+}
+
+fn workflow_has_durable_lock(workflow: &CompiledWorkflowDefinition) -> bool {
+  workflow.schema_version >= crate::COMPILED_MODEL_SCHEMA_VERSION_V18
+    && workflow
+      .graph
+      .locks
+      .as_deref()
+      .is_some_and(|locks| !locks.is_empty())
 }
 
 fn resolved_script_secrets(
@@ -2474,6 +2639,7 @@ async fn resume_with_engine_unprofiled<E: RuntimeDagEngine>(
     ));
   }
   validate_runtime_modules(engine.workflow(), &options)?;
+  ensure_held_locks_current(engine, run_id, &options)?;
   let projection = engine.projection(run_id)?;
   let execution_order = recorded_execution_order(&engine.events(run_id)?);
   match projection.status {
@@ -2566,7 +2732,7 @@ async fn continue_runtime<E: RuntimeDagEngine>(
   )
   .await;
   if execution.is_err() && engine.projection(run_id)?.status == RunStatus::Cancelling {
-    settle_cancelling_run(engine, run_id, options.clock.now())?;
+    settle_cancelling_run(engine, run_id, options.clock.now(), options)?;
     execution = Err(cancelled_run_error(engine, run_id)?);
   }
   let lifecycle = drive_workflow_lifecycle(engine, run_id, options, &mut host).await;
@@ -2773,6 +2939,85 @@ async fn register_durable_wait_node<E: RuntimeDagEngine>(
       },
     },
   ))
+}
+
+fn ensure_held_locks_current<E: RuntimeDagEngine>(
+  engine: &mut E,
+  run_id: &str,
+  options: &RuntimeExecutionOptions,
+) -> Result<(), RuntimeExecutionError> {
+  let projection = engine.projection(run_id)?;
+  let mut lost = projection
+    .locks
+    .values()
+    .filter(|lock| lock.status == crate::LockStatus::LeaseLost)
+    .map(|lock| lock.lock_id.clone())
+    .collect::<Vec<_>>();
+  lost.extend(projection.for_each.values().flat_map(|loop_state| {
+    loop_state.executions.values().flat_map(|execution| {
+      execution
+        .locks
+        .values()
+        .filter(|lock| lock.status == crate::LockStatus::LeaseLost)
+        .map(|lock| lock.lock_id.clone())
+    })
+  }));
+  if let Some(lock_id) = lost.first() {
+    if projection.business_outcome.is_some() || projection.status == RunStatus::Cancelling {
+      return Ok(());
+    }
+    engine.decide_run_failed(
+      run_id,
+      LifecycleFailure {
+        kind: LifecycleFailureKind::Interrupted,
+        code: "WOML_LOCK_LEASE_LOST".to_string(),
+        message: format!(
+          "Lock {lock_id:?} expired before its protected continuation could finish."
+        ),
+      },
+      options.clock.now(),
+    )?;
+    return Err(resumed_failure(engine, run_id, engine.projection(run_id)?)?);
+  }
+  let held = projection
+    .locks
+    .values()
+    .filter(|lock| lock.status == crate::LockStatus::Held)
+    .map(|lock| lock.lock_id.clone())
+    .collect::<Vec<_>>();
+  for lock_id in held {
+    let descriptor = engine
+      .workflow()
+      .durable_lock(&lock_id)
+      .cloned()
+      .ok_or_else(|| {
+        RuntimeExecutionError::Stalled("A held lease has no compiled lock descriptor.".to_string())
+      })?;
+    match engine.renew_lock_lease(run_id, &lock_id, options.clock.now())? {
+      crate::LockLeaseMaintenance::Renewed => {
+        options.ensure_lock_renewal(run_id, &lock_id, descriptor.lease_ms);
+      }
+      crate::LockLeaseMaintenance::Lost | crate::LockLeaseMaintenance::NotHeld => {
+        options.stop_lock_renewal(run_id, &lock_id);
+        let projection = engine.projection(run_id)?;
+        if projection.business_outcome.is_none() {
+          engine.decide_run_failed(
+            run_id,
+            LifecycleFailure {
+              kind: LifecycleFailureKind::Interrupted,
+              code: "WOML_LOCK_LEASE_LOST".to_string(),
+              message: format!(
+                "Lock {lock_id:?} expired before WOML could renew its durable lease."
+              ),
+            },
+            options.clock.now(),
+          )?;
+        }
+        return Err(resumed_failure(engine, run_id, engine.projection(run_id)?)?);
+      }
+    }
+  }
+  Ok(())
 }
 
 fn settle_workflow_timeout_if_due<E: RuntimeDagEngine>(
@@ -5072,6 +5317,7 @@ async fn continue_runtime_loop<E: RuntimeDagEngine>(
 ) -> Result<WorkflowRuntimeOutcome, RuntimeExecutionError> {
   loop {
     settle_workflow_timeout_if_due(engine, run_id, options.clock.now(), options)?;
+    ensure_held_locks_current(engine, run_id, options)?;
     drive_pending_reusable_step_lifecycles(engine, run_id, options, host).await?;
     let current = engine.projection(run_id)?;
     if current.timeout_reached_at.is_some() {
@@ -5079,7 +5325,7 @@ async fn continue_runtime_loop<E: RuntimeDagEngine>(
     }
     if current.status == RunStatus::Cancelling {
       options.ensure_policy_execution_slot().await?;
-      settle_cancelling_run(engine, run_id, options.clock.now())?;
+      settle_cancelling_run(engine, run_id, options.clock.now(), options)?;
       return Err(cancelled_run_error(engine, run_id)?);
     }
     if current.status == RunStatus::Cancelled {
@@ -5159,6 +5405,105 @@ async fn continue_runtime_loop<E: RuntimeDagEngine>(
         "no node is ready before the run reached a terminal state".to_string(),
       ));
     };
+    if let Some(lock) = engine
+      .workflow()
+      .graph
+      .locks
+      .as_deref()
+      .unwrap_or_default()
+      .iter()
+      .find(|lock| lock.acquire_node_id == *node_id)
+      .cloned()
+    {
+      let projection = engine.projection(run_id)?;
+      if !projection.locks.contains_key(&lock.lock_id) {
+        let key = resolve_lock_key(&lock.key, &projection.context)?;
+        let now = options.clock.now();
+        let deadline = now
+          + chrono::Duration::milliseconds(i64::try_from(lock.acquire_timeout_ms).map_err(
+            |_| {
+              RuntimeExecutionError::InvalidConfiguration(
+                "Lock acquisition timeout exceeds the runtime clock.".to_string(),
+              )
+            },
+          )?);
+        engine.register_lock_waiter(run_id, &lock.lock_id, &key, now, deadline)?;
+      }
+      options.suspend_policy_execution_slot().await?;
+      loop {
+        let projection = engine.projection(run_id)?;
+        let state = projection.locks.get(&lock.lock_id).ok_or_else(|| {
+          RuntimeExecutionError::Stalled(
+            "Registered lock disappeared from durable projection.".to_string(),
+          )
+        })?;
+        match state.status {
+          crate::LockStatus::Held => {
+            options.ensure_lock_renewal(run_id, &lock.lock_id, lock.lease_ms);
+            break;
+          }
+          crate::LockStatus::Released => break,
+          crate::LockStatus::Waiting => {
+            if options.clock.now() >= state.deadline {
+              let resolved_at = options.clock.now();
+              engine.timeout_lock_waiter(run_id, &lock.lock_id, resolved_at)?;
+              engine.decide_run_failed(
+                run_id,
+                LifecycleFailure {
+                  kind: LifecycleFailureKind::TimedOut,
+                  code: "WOML_LOCK_ACQUIRE_TIMED_OUT".to_string(),
+                  message: format!(
+                    "Lock {:?} was not acquired before its deadline.",
+                    lock.lock_id
+                  ),
+                },
+                resolved_at,
+              )?;
+              return Err(resumed_failure(engine, run_id, engine.projection(run_id)?)?);
+            }
+            tokio::time::sleep(CANCELLATION_POLL_INTERVAL).await;
+          }
+          _ => {
+            return Err(RuntimeExecutionError::Stalled(format!(
+              "Lock {:?} acquisition did not succeed.",
+              lock.lock_id
+            )))
+          }
+        }
+      }
+      execution_order.push(lock.acquire_node_id);
+      continue;
+    }
+    if let Some(lock) = engine
+      .workflow()
+      .graph
+      .locks
+      .as_deref()
+      .unwrap_or_default()
+      .iter()
+      .find(|lock| lock.release_node_id == *node_id)
+      .cloned()
+    {
+      let projection = engine.projection(run_id)?;
+      let held = projection.locks.get(&lock.lock_id).ok_or_else(|| {
+        RuntimeExecutionError::Stalled("Lock release has no projected acquisition.".to_string())
+      })?;
+      let acquired_at = held.acquired_at.ok_or_else(|| {
+        RuntimeExecutionError::Stalled("Lock release has no acquisition timestamp.".to_string())
+      })?;
+      let released_at = options.clock.now();
+      let waited_ms = (acquired_at - held.registered_at).num_milliseconds().max(0);
+      let result = serde_json::json!({
+        "status": "released", "key": held.key, "fencingToken": held.fencing_token,
+        "acquiredAt": acquired_at.to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
+        "releasedAt": released_at.to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
+        "waitedMs": waited_ms,
+      });
+      engine.release_lock(run_id, &lock.lock_id, result, released_at)?;
+      options.stop_lock_renewal(run_id, &lock.lock_id);
+      execution_order.push(lock.release_node_id);
+      continue;
+    }
     options.ensure_policy_execution_slot().await?;
     if let Some(mut group) = engine.workflow().parallel_group_for_child(node_id) {
       if ready.iter().any(|ready_id| {
@@ -5812,7 +6157,183 @@ fn runtime_context_for_node(
       .steps
       .retain(|step_id, _| visibility.step_ids.contains(step_id));
   }
+  if let Some(descriptor) = lock_descriptor_for_body_node(workflow, node_id) {
+    if let Some(lock) = projection
+      .locks
+      .get(&descriptor.lock_id)
+      .filter(|lock| lock.status == crate::LockStatus::Held)
+    {
+      context.lock = Some(crate::LockContext {
+        id: lock.lock_id.clone(),
+        key: lock.key.clone(),
+        fencing_token: lock.fencing_token.clone().unwrap_or_default(),
+        acquired_at: lock
+          .acquired_at
+          .map(|value| value.to_rfc3339_opts(chrono::SecondsFormat::Millis, true))
+          .unwrap_or_default(),
+      });
+    }
+  }
   context
+}
+
+fn lock_descriptor_for_body_node<'a>(
+  workflow: &'a CompiledWorkflowDefinition,
+  node_id: &str,
+) -> Option<&'a crate::CompiledLock> {
+  fn contains_node(
+    lock: &crate::CompiledLock,
+    node_id: &str,
+    edges: &[crate::model::CompiledWorkflowEdge],
+  ) -> bool {
+    let mut pending = vec![lock.body_entry_node_id.as_str()];
+    let mut visited = HashSet::new();
+    while let Some(candidate) = pending.pop() {
+      if !visited.insert(candidate) {
+        continue;
+      }
+      if candidate == node_id {
+        return true;
+      }
+      if candidate == lock.body_terminal_node_id {
+        continue;
+      }
+      pending.extend(
+        edges
+          .iter()
+          .filter(|edge| edge.from == candidate)
+          .map(|edge| edge.to.as_str()),
+      );
+    }
+    false
+  }
+  workflow
+    .graph
+    .locks
+    .as_deref()
+    .unwrap_or_default()
+    .iter()
+    .find(|lock| {
+      contains_node(lock, node_id, &workflow.graph.edges)
+        || workflow
+          .graph
+          .for_each
+          .as_deref()
+          .unwrap_or_default()
+          .iter()
+          .any(|loop_| contains_node(lock, node_id, &loop_.body.edges))
+    })
+}
+
+fn resolve_lock_key(
+  expression: &ValueExpression,
+  context: &WorkflowContext,
+) -> Result<String, RuntimeExecutionError> {
+  match expression {
+    ValueExpression::Literal { value } => value.as_str().map(str::to_string),
+    ValueExpression::ContextReference { .. } => resolve_context_reference(expression, context)
+      .ok()
+      .and_then(render_template_scalar),
+    ValueExpression::Template { parts } => {
+      let mut rendered = String::new();
+      for part in parts {
+        match part {
+          TemplatePart::Text { text } => rendered.push_str(text),
+          TemplatePart::ContextReference { path } => {
+            let value = resolve_context_reference(
+              &ValueExpression::ContextReference { path: path.clone() },
+              context,
+            )
+            .ok()
+            .and_then(render_template_scalar)
+            .ok_or_else(|| {
+              RuntimeExecutionError::InvalidConfiguration(
+                "A lock-key reference is unavailable or is not scalar.".to_string(),
+              )
+            })?;
+            rendered.push_str(&value);
+          }
+          TemplatePart::LifecycleReference { .. } => {
+            return Err(RuntimeExecutionError::InvalidConfiguration(
+              "Lock keys cannot use lifecycle references.".to_string(),
+            ))
+          }
+        }
+      }
+      Some(rendered)
+    }
+    _ => None,
+  }
+  .filter(|key| {
+    !key.is_empty()
+      && key.len() <= 256
+      && key.trim() == key
+      && !key.chars().any(char::is_control)
+      && !key.split('/').any(str::is_empty)
+  })
+  .ok_or_else(|| {
+    RuntimeExecutionError::InvalidConfiguration(
+      "The lock key did not resolve to a valid scalar key.".to_string(),
+    )
+  })
+}
+
+fn resolve_for_each_lock_key(
+  expression: &ValueExpression,
+  context: &WorkflowContext,
+  item: &Value,
+  index: u32,
+  total: u32,
+) -> Result<String, RuntimeExecutionError> {
+  let rendered = match expression {
+    ValueExpression::Literal { value } => value.as_str().map(str::to_string),
+    ValueExpression::ContextReference { .. } => render_template_scalar(resolve_for_each_reference(
+      expression, context, item, index, total,
+    )?),
+    ValueExpression::Template { parts } => {
+      let mut output = String::new();
+      for part in parts {
+        match part {
+          TemplatePart::Text { text } => output.push_str(text),
+          TemplatePart::ContextReference { path } => {
+            let value = resolve_for_each_reference(
+              &ValueExpression::ContextReference { path: path.clone() },
+              context,
+              item,
+              index,
+              total,
+            )?;
+            output.push_str(&render_template_scalar(value).ok_or_else(|| {
+              RuntimeExecutionError::Stalled(
+                "Iteration lock key contains a non-scalar context value.".to_string(),
+              )
+            })?);
+          }
+          TemplatePart::LifecycleReference { .. } => {
+            return Err(RuntimeExecutionError::Stalled(
+              "Lock keys cannot contain lifecycle references.".to_string(),
+            ));
+          }
+        }
+      }
+      Some(output)
+    }
+    _ => None,
+  }
+  .ok_or_else(|| {
+    RuntimeExecutionError::Stalled("Iteration lock key did not resolve to a string.".to_string())
+  })?;
+  if rendered.is_empty()
+    || rendered.len() > 256
+    || rendered.trim() != rendered
+    || rendered.chars().any(char::is_control)
+    || rendered.split('/').any(str::is_empty)
+  {
+    return Err(RuntimeExecutionError::InvalidConfiguration(
+      "The iteration lock key did not resolve to a valid scalar key.".to_string(),
+    ));
+  }
+  Ok(rendered)
 }
 
 fn final_attempt_failure_in_nodes(
@@ -6112,6 +6633,107 @@ async fn execute_fork<E: RuntimeDagEngine>(
         .map(|node| node.handler.as_str())
         .ok_or_else(|| RuntimeExecutionError::Stalled("ready node disappeared".to_string()))?;
       match handler {
+        "engine.lock-acquire" => {
+          let lock = engine
+            .workflow()
+            .graph
+            .locks
+            .as_deref()
+            .unwrap_or_default()
+            .iter()
+            .find(|lock| lock.acquire_node_id == *node_id)
+            .cloned()
+            .ok_or_else(|| {
+              RuntimeExecutionError::Stalled(
+                "Fork lock acquire node has no compiled descriptor.".to_string(),
+              )
+            })?;
+          if !projection.locks.contains_key(&lock.lock_id) {
+            let key = resolve_lock_key(&lock.key, &projection.context)?;
+            let now = options.clock.now();
+            let deadline = now
+              + chrono::Duration::milliseconds(i64::try_from(lock.acquire_timeout_ms).map_err(
+                |_| {
+                  RuntimeExecutionError::InvalidConfiguration(
+                    "Fork lock acquisition timeout exceeds the runtime clock.".to_string(),
+                  )
+                },
+              )?);
+            engine.register_lock_waiter(run_id, &lock.lock_id, &key, now, deadline)?;
+          }
+          let state = engine
+            .projection(run_id)?
+            .locks
+            .get(&lock.lock_id)
+            .cloned()
+            .ok_or_else(|| {
+              RuntimeExecutionError::Stalled(
+                "Fork lock waiter disappeared from durable projection.".to_string(),
+              )
+            })?;
+          match state.status {
+            crate::LockStatus::Held => {
+              options.ensure_lock_renewal(run_id, &lock.lock_id, lock.lease_ms);
+              completion_order.push(lock.acquire_node_id);
+              pure_node_completed = true;
+              break;
+            }
+            crate::LockStatus::Waiting if options.clock.now() < state.deadline => {}
+            crate::LockStatus::Waiting => {
+              engine.timeout_lock_waiter(run_id, &lock.lock_id, options.clock.now())?;
+              return Err(RuntimeExecutionError::InvalidConfiguration(format!(
+                "Fork lock {:?} was not acquired before its deadline.",
+                lock.lock_id
+              )));
+            }
+            _ => {
+              return Err(RuntimeExecutionError::InvalidConfiguration(format!(
+                "Fork lock {:?} did not acquire safely.",
+                lock.lock_id
+              )));
+            }
+          }
+        }
+        "engine.lock-release" => {
+          let lock = engine
+            .workflow()
+            .graph
+            .locks
+            .as_deref()
+            .unwrap_or_default()
+            .iter()
+            .find(|lock| lock.release_node_id == *node_id)
+            .cloned()
+            .ok_or_else(|| {
+              RuntimeExecutionError::Stalled(
+                "Fork lock release node has no compiled descriptor.".to_string(),
+              )
+            })?;
+          let held = projection
+            .locks
+            .get(&lock.lock_id)
+            .cloned()
+            .ok_or_else(|| {
+              RuntimeExecutionError::Stalled("Fork lock release has no lease.".to_string())
+            })?;
+          let acquired_at = held.acquired_at.ok_or_else(|| {
+            RuntimeExecutionError::Stalled(
+              "Fork lock release has no acquisition timestamp.".to_string(),
+            )
+          })?;
+          let released_at = options.clock.now();
+          let result = serde_json::json!({
+            "status": "released", "key": held.key, "fencingToken": held.fencing_token,
+            "acquiredAt": acquired_at.to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
+            "releasedAt": released_at.to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
+            "waitedMs": (acquired_at - held.registered_at).num_milliseconds().max(0),
+          });
+          engine.release_lock(run_id, &lock.lock_id, result, released_at)?;
+          options.stop_lock_renewal(run_id, &lock.lock_id);
+          completion_order.push(lock.release_node_id);
+          pure_node_completed = true;
+          break;
+        }
         "engine.approval-wait" if active.is_empty() => {
           let outcome = request_approval_wait(engine, run_id, node_id, options)?;
           return Ok(ForkRuntimeProgress::Waiting {
@@ -6467,6 +7089,22 @@ async fn execute_fork<E: RuntimeDagEngine>(
           })?;
           tokio::time::sleep(wait.min(CANCELLATION_POLL_INTERVAL)).await;
         }
+        continue;
+      }
+      let fork_waits_for_lock = projection.locks.values().any(|lock| {
+        lock.status == crate::LockStatus::Waiting
+          && engine
+            .workflow()
+            .durable_lock(&lock.lock_id)
+            .is_some_and(|descriptor| {
+              routes
+                .values()
+                .any(|route| route.contains(&descriptor.acquire_node_id))
+            })
+      });
+      if fork_waits_for_lock {
+        options.suspend_policy_execution_slot().await?;
+        tokio::time::sleep(CANCELLATION_POLL_INTERVAL).await;
         continue;
       }
     }
@@ -8916,6 +9554,26 @@ async fn execute_for_each_iteration_script<E: RuntimeDagEngine>(
   invocation_context.steps.retain(|step_id, _| {
     descriptor.outer_step_ids.contains(step_id) || visible_local.contains(step_id)
   });
+  if let Some(lock) = lock_descriptor_for_body_node(engine.workflow(), node_id) {
+    if let Some(held) = engine
+      .projection(run_id)?
+      .for_each
+      .get(&descriptor.for_each_id)
+      .and_then(|loop_| loop_.executions.get(&index))
+      .and_then(|execution| execution.locks.get(&lock.lock_id))
+      .filter(|lock| lock.status == crate::LockStatus::Held)
+    {
+      invocation_context.lock = Some(crate::LockContext {
+        id: held.lock_id.clone(),
+        key: held.key.clone(),
+        fencing_token: held.fencing_token.clone().unwrap_or_default(),
+        acquired_at: held
+          .acquired_at
+          .map(|value| value.to_rfc3339_opts(chrono::SecondsFormat::Millis, true))
+          .unwrap_or_default(),
+      });
+    }
+  }
   drive_for_each_step_lifecycle(
     engine,
     run_id,
@@ -9231,6 +9889,163 @@ async fn execute_for_each_iteration<E: RuntimeDagEngine + Clone>(
           RuntimeExecutionError::Stalled("for-each body node disappeared".to_string())
         })?;
       match node.handler.as_str() {
+        "engine.lock-acquire" => {
+          let lock = engine
+            .workflow()
+            .graph
+            .locks
+            .as_deref()
+            .unwrap_or_default()
+            .iter()
+            .find(|lock| lock.acquire_node_id == node_id)
+            .cloned()
+            .ok_or_else(|| {
+              RuntimeExecutionError::Stalled(
+                "Iteration lock acquire node has no compiled descriptor.".to_string(),
+              )
+            })?;
+          let projected = engine
+            .projection(run_id)?
+            .for_each
+            .get(&descriptor.for_each_id)
+            .and_then(|loop_| loop_.executions.get(&index))
+            .and_then(|execution| execution.locks.get(&lock.lock_id))
+            .cloned();
+          if projected.is_none() {
+            let key = resolve_for_each_lock_key(&lock.key, &context, item, index, total)?;
+            let now = options.clock.now();
+            let deadline = now
+              + chrono::Duration::milliseconds(i64::try_from(lock.acquire_timeout_ms).map_err(
+                |_| {
+                  RuntimeExecutionError::InvalidConfiguration(
+                    "Iteration lock acquisition timeout exceeds the runtime clock.".to_string(),
+                  )
+                },
+              )?);
+            engine.register_iteration_lock_waiter(
+              run_id,
+              &lock.lock_id,
+              &key,
+              scope.clone(),
+              now,
+              deadline,
+            )?;
+          }
+          options.suspend_policy_execution_slot().await?;
+          loop {
+            let state = engine
+              .projection(run_id)?
+              .for_each
+              .get(&descriptor.for_each_id)
+              .and_then(|loop_| loop_.executions.get(&index))
+              .and_then(|execution| execution.locks.get(&lock.lock_id))
+              .cloned()
+              .ok_or_else(|| {
+                RuntimeExecutionError::Stalled(
+                  "Iteration lock waiter disappeared from durable projection.".to_string(),
+                )
+              })?;
+            match state.status {
+              crate::LockStatus::Held => {
+                match engine.renew_iteration_lock_lease(
+                  run_id,
+                  &lock.lock_id,
+                  scope.clone(),
+                  options.clock.now(),
+                )? {
+                  crate::LockLeaseMaintenance::Renewed => {
+                    options.ensure_iteration_lock_renewal(
+                      run_id,
+                      &lock.lock_id,
+                      scope.clone(),
+                      lock.lease_ms,
+                    );
+                    break;
+                  }
+                  crate::LockLeaseMaintenance::Lost | crate::LockLeaseMaintenance::NotHeld => {
+                    return Err(RuntimeExecutionError::InvalidConfiguration(format!(
+                      "Iteration lock {:?} expired before its protected continuation resumed.",
+                      lock.lock_id
+                    )));
+                  }
+                }
+              }
+              crate::LockStatus::Waiting if options.clock.now() < state.deadline => {
+                tokio::time::sleep(CANCELLATION_POLL_INTERVAL).await;
+              }
+              crate::LockStatus::Waiting => {
+                engine.timeout_iteration_lock_waiter(
+                  run_id,
+                  &lock.lock_id,
+                  scope.clone(),
+                  options.clock.now(),
+                )?;
+                return Err(RuntimeExecutionError::InvalidConfiguration(format!(
+                  "Iteration lock {:?} was not acquired before its deadline.",
+                  lock.lock_id
+                )));
+              }
+              _ => {
+                return Err(RuntimeExecutionError::InvalidConfiguration(format!(
+                  "Iteration lock {:?} did not acquire safely.",
+                  lock.lock_id
+                )));
+              }
+            }
+          }
+        }
+        "engine.lock-release" => {
+          let lock = engine
+            .workflow()
+            .graph
+            .locks
+            .as_deref()
+            .unwrap_or_default()
+            .iter()
+            .find(|lock| lock.release_node_id == node_id)
+            .cloned()
+            .ok_or_else(|| {
+              RuntimeExecutionError::Stalled(
+                "Iteration lock release node has no compiled descriptor.".to_string(),
+              )
+            })?;
+          let held = engine
+            .projection(run_id)?
+            .for_each
+            .get(&descriptor.for_each_id)
+            .and_then(|loop_| loop_.executions.get(&index))
+            .and_then(|execution| execution.locks.get(&lock.lock_id))
+            .cloned()
+            .ok_or_else(|| {
+              RuntimeExecutionError::Stalled(
+                "Iteration lock release has no acquired lease.".to_string(),
+              )
+            })?;
+          let acquired_at = held.acquired_at.ok_or_else(|| {
+            RuntimeExecutionError::Stalled(
+              "Iteration lock release has no acquisition timestamp.".to_string(),
+            )
+          })?;
+          let released_at = options.clock.now();
+          let result = serde_json::json!({
+            "status": "released",
+            "key": held.key,
+            "fencingToken": held.fencing_token,
+            "acquiredAt": acquired_at.to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
+            "releasedAt": released_at.to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
+            "waitedMs": (acquired_at - held.registered_at).num_milliseconds().max(0),
+          });
+          engine.release_iteration_lock(
+            run_id,
+            &lock.lock_id,
+            scope.clone(),
+            result.clone(),
+            released_at,
+          )?;
+          options.stop_iteration_lock_renewal(run_id, &lock.lock_id, &scope);
+          context.steps.insert(lock.lock_id, result);
+        }
+        "engine.lock-result" => {}
         "runtime.script" => {
           let output = execute_for_each_iteration_script(
             engine,
@@ -9521,13 +10336,22 @@ async fn execute_script_node<E: RuntimeDagEngine>(
   let mut execution = Box::pin(host_client.execute(&request));
   let mut cancellation_sent = false;
   let mut timeout_sent = false;
+  let mut lease_loss_sent = false;
   let completed = loop {
     tokio::select! {
       result = &mut execution => break result,
-      _ = tokio::time::sleep(CANCELLATION_POLL_INTERVAL), if !cancellation_sent && !timeout_sent => {
+      _ = tokio::time::sleep(CANCELLATION_POLL_INTERVAL), if !cancellation_sent && !timeout_sent && !lease_loss_sent => {
         settle_workflow_timeout_if_due(engine, run_id, options.clock.now(), options)?;
         let current = engine.projection(run_id)?;
-        if current.timeout_reached_at.is_some() {
+        let protected_lease_lost = lock_descriptor_for_body_node(engine.workflow(), node_id)
+          .and_then(|lock| current.locks.get(&lock.lock_id))
+          .is_some_and(|lock| lock.status == crate::LockStatus::LeaseLost);
+        if protected_lease_lost {
+          lease_loss_sent = true;
+          if let Err(error) = host_client.cancel_run(&invocation_id).await {
+            break Err(error);
+          }
+        } else if current.timeout_reached_at.is_some() {
           timeout_sent = true;
           if let Err(error) = host_client.cancel_run(&invocation_id).await {
             break Err(error);
@@ -9547,6 +10371,26 @@ async fn execute_script_node<E: RuntimeDagEngine>(
   if timeout_sent || engine.projection(run_id)?.timeout_reached_at.is_some() {
     let projection = engine.projection(run_id)?;
     return Err(resumed_failure(engine, run_id, projection)?);
+  }
+  if lease_loss_sent {
+    let failure = AttemptFailure {
+      kind: AttemptFailureKind::Interrupted,
+      code: "WOML_LOCK_LEASE_LOST".to_string(),
+      message: "The protected step was stopped because its durable lock lease expired.".to_string(),
+      details: None,
+      ..AttemptFailure::legacy_defaults()
+    };
+    return settle_script_attempt_failure(
+      engine,
+      options,
+      host,
+      run_id,
+      node_id,
+      attempt_number,
+      &invocation_id,
+      failure,
+    )
+    .await;
   }
   let outcome = match completed {
     _ if cancellation_sent || engine.projection(run_id)?.status == RunStatus::Cancelling => {
@@ -9913,6 +10757,7 @@ fn settle_cancelling_run<E: RuntimeDagEngine>(
   engine: &mut E,
   run_id: &str,
   occurred_at: chrono::DateTime<chrono::Utc>,
+  options: &RuntimeExecutionOptions,
 ) -> Result<(), RuntimeExecutionError> {
   let projection = engine.projection(run_id)?;
   if projection.status != RunStatus::Cancelling {
@@ -10081,6 +10926,30 @@ fn settle_cancelling_run<E: RuntimeDagEngine>(
   let cancellation_request_id = projection.cancellation_request_id.ok_or_else(|| {
     RuntimeExecutionError::Stalled("cancelling run has no durable request identity".to_string())
   })?;
+  engine.cancel_lock_waiters(run_id, &cancellation_request_id, occurred_at)?;
+  for lock in engine
+    .projection(run_id)?
+    .locks
+    .values()
+    .filter(|lock| lock.status == crate::LockStatus::Held)
+  {
+    options.stop_lock_renewal(run_id, &lock.lock_id);
+  }
+  for (for_each_id, loop_state) in &engine.projection(run_id)?.for_each {
+    for (index, execution) in &loop_state.executions {
+      let scope = ForEachIterationScope {
+        for_each_id: for_each_id.clone(),
+        index: *index,
+      };
+      for lock in execution
+        .locks
+        .values()
+        .filter(|lock| lock.status == crate::LockStatus::Held)
+      {
+        options.stop_iteration_lock_renewal(run_id, &lock.lock_id, &scope);
+      }
+    }
+  }
   engine.decide_run_cancelled(run_id, cancellation_request_id, occurred_at)
 }
 
@@ -10152,6 +11021,7 @@ async fn settle_script_attempt_failure<E: RuntimeDagEngine>(
     )
     .await?;
   }
+  release_held_lock_after_body_failure(engine, run_id, node_id, options.clock.now(), options)?;
   if engine.projection(run_id)?.business_outcome.is_none() {
     engine.append_payload(
       run_id,
@@ -10196,6 +11066,41 @@ async fn settle_script_attempt_failure<E: RuntimeDagEngine>(
       events: engine.events(run_id)?,
     },
   )))
+}
+
+fn release_held_lock_after_body_failure<E: RuntimeDagEngine>(
+  engine: &mut E,
+  run_id: &str,
+  node_id: &str,
+  released_at: chrono::DateTime<chrono::Utc>,
+  options: &RuntimeExecutionOptions,
+) -> Result<(), RuntimeExecutionError> {
+  let Some(descriptor) = lock_descriptor_for_body_node(engine.workflow(), node_id).cloned() else {
+    return Ok(());
+  };
+  let projection = engine.projection(run_id)?;
+  let Some(lock) = projection
+    .locks
+    .get(&descriptor.lock_id)
+    .filter(|lock| lock.status == crate::LockStatus::Held)
+    .cloned()
+  else {
+    return Ok(());
+  };
+  let acquired_at = lock.acquired_at.ok_or_else(|| {
+    RuntimeExecutionError::Stalled("A held lock has no acquisition timestamp.".to_string())
+  })?;
+  let result = serde_json::json!({
+    "status": "released",
+    "key": lock.key,
+    "fencingToken": lock.fencing_token,
+    "acquiredAt": acquired_at.to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
+    "releasedAt": released_at.to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
+    "waitedMs": (acquired_at - lock.registered_at).num_milliseconds().max(0),
+  });
+  engine.release_lock(run_id, &descriptor.lock_id, result, released_at)?;
+  options.stop_lock_renewal(run_id, &descriptor.lock_id);
+  Ok(())
 }
 
 fn fail_choice<T, E: RuntimeDagEngine>(
@@ -10372,7 +11277,8 @@ fn attempt_run_failed_data(
     | crate::RUN_EVENT_SCHEMA_VERSION_V13
     | crate::RUN_EVENT_SCHEMA_VERSION_V14
     | crate::RUN_EVENT_SCHEMA_VERSION_V15
-    | crate::RUN_EVENT_SCHEMA_VERSION_V16 => RunFailedData::V2(RunFailedDataV2::Attempt {
+    | crate::RUN_EVENT_SCHEMA_VERSION_V16
+    | crate::RUN_EVENT_SCHEMA_VERSION_V17 => RunFailedData::V2(RunFailedDataV2::Attempt {
       node_id: failure.node_id.clone(),
       attempt: failure.attempt,
       invocation_id: failure.invocation_id.clone(),
@@ -10482,6 +11388,106 @@ trait RuntimeDagEngine {
   ) -> Result<(), RuntimeExecutionError> {
     Err(RuntimeExecutionError::Stalled(
       "durable waits require the durable runtime".to_string(),
+    ))
+  }
+  fn register_lock_waiter(
+    &mut self,
+    _run_id: &str,
+    _lock_id: &str,
+    _key: &str,
+    _occurred_at: chrono::DateTime<chrono::Utc>,
+    _deadline: chrono::DateTime<chrono::Utc>,
+  ) -> Result<(), RuntimeExecutionError> {
+    Err(RuntimeExecutionError::Stalled(
+      "durable locks require the durable runtime".to_string(),
+    ))
+  }
+  fn release_lock(
+    &mut self,
+    _run_id: &str,
+    _lock_id: &str,
+    _result: Value,
+    _occurred_at: chrono::DateTime<chrono::Utc>,
+  ) -> Result<(), RuntimeExecutionError> {
+    Err(RuntimeExecutionError::Stalled(
+      "durable locks require the durable runtime".to_string(),
+    ))
+  }
+  fn timeout_lock_waiter(
+    &mut self,
+    _run_id: &str,
+    _lock_id: &str,
+    _occurred_at: chrono::DateTime<chrono::Utc>,
+  ) -> Result<(), RuntimeExecutionError> {
+    Err(RuntimeExecutionError::Stalled(
+      "durable locks require the durable runtime".to_string(),
+    ))
+  }
+  fn renew_lock_lease(
+    &mut self,
+    _run_id: &str,
+    _lock_id: &str,
+    _now: chrono::DateTime<chrono::Utc>,
+  ) -> Result<crate::LockLeaseMaintenance, RuntimeExecutionError> {
+    Err(RuntimeExecutionError::Stalled(
+      "durable lock renewal requires the durable runtime".to_string(),
+    ))
+  }
+  fn renew_iteration_lock_lease(
+    &mut self,
+    _run_id: &str,
+    _lock_id: &str,
+    _iteration: ForEachIterationScope,
+    _now: chrono::DateTime<chrono::Utc>,
+  ) -> Result<crate::LockLeaseMaintenance, RuntimeExecutionError> {
+    Err(RuntimeExecutionError::Stalled(
+      "iteration lock renewal requires the durable runtime".to_string(),
+    ))
+  }
+  fn cancel_lock_waiters(
+    &mut self,
+    _run_id: &str,
+    _cancellation_id: &str,
+    _now: chrono::DateTime<chrono::Utc>,
+  ) -> Result<(), RuntimeExecutionError> {
+    Err(RuntimeExecutionError::Stalled(
+      "durable lock cancellation requires the durable runtime".to_string(),
+    ))
+  }
+  fn register_iteration_lock_waiter(
+    &mut self,
+    _run_id: &str,
+    _lock_id: &str,
+    _key: &str,
+    _iteration: ForEachIterationScope,
+    _now: chrono::DateTime<chrono::Utc>,
+    _deadline: chrono::DateTime<chrono::Utc>,
+  ) -> Result<(), RuntimeExecutionError> {
+    Err(RuntimeExecutionError::Stalled(
+      "iteration lock acquisition requires the durable runtime".to_string(),
+    ))
+  }
+  fn release_iteration_lock(
+    &mut self,
+    _run_id: &str,
+    _lock_id: &str,
+    _iteration: ForEachIterationScope,
+    _result: Value,
+    _now: chrono::DateTime<chrono::Utc>,
+  ) -> Result<(), RuntimeExecutionError> {
+    Err(RuntimeExecutionError::Stalled(
+      "iteration lock release requires the durable runtime".to_string(),
+    ))
+  }
+  fn timeout_iteration_lock_waiter(
+    &mut self,
+    _run_id: &str,
+    _lock_id: &str,
+    _iteration: ForEachIterationScope,
+    _now: chrono::DateTime<chrono::Utc>,
+  ) -> Result<(), RuntimeExecutionError> {
+    Err(RuntimeExecutionError::Stalled(
+      "iteration lock timeout requires the durable runtime".to_string(),
     ))
   }
   fn settle_timer_wait(
@@ -10739,6 +11745,7 @@ impl RuntimeDagEngine for InMemoryDagEngine {
         | crate::RUN_EVENT_SCHEMA_VERSION_V14
         | crate::RUN_EVENT_SCHEMA_VERSION_V15
         | crate::RUN_EVENT_SCHEMA_VERSION_V16
+        | crate::RUN_EVENT_SCHEMA_VERSION_V17
     ) {
       crate::durable::expand_model_v11_payload(self.workflow(), run_id, payload)?
     } else {
@@ -10975,6 +11982,110 @@ impl RuntimeDagEngine for DurableDagEngine {
     registration: crate::WaitRegisteredData,
   ) -> Result<(), RuntimeExecutionError> {
     DurableDagEngine::register_durable_wait(self, run_id, occurred_at, registration)?;
+    Ok(())
+  }
+
+  fn register_lock_waiter(
+    &mut self,
+    run_id: &str,
+    lock_id: &str,
+    key: &str,
+    occurred_at: chrono::DateTime<chrono::Utc>,
+    deadline: chrono::DateTime<chrono::Utc>,
+  ) -> Result<(), RuntimeExecutionError> {
+    DurableDagEngine::register_lock_waiter(self, run_id, lock_id, key, occurred_at, deadline)?;
+    Ok(())
+  }
+
+  fn release_lock(
+    &mut self,
+    run_id: &str,
+    lock_id: &str,
+    result: Value,
+    occurred_at: chrono::DateTime<chrono::Utc>,
+  ) -> Result<(), RuntimeExecutionError> {
+    DurableDagEngine::release_lock(self, run_id, lock_id, result, occurred_at)?;
+    Ok(())
+  }
+
+  fn timeout_lock_waiter(
+    &mut self,
+    run_id: &str,
+    lock_id: &str,
+    occurred_at: chrono::DateTime<chrono::Utc>,
+  ) -> Result<(), RuntimeExecutionError> {
+    DurableDagEngine::timeout_lock_waiter(self, run_id, lock_id, occurred_at)?;
+    Ok(())
+  }
+
+  fn renew_lock_lease(
+    &mut self,
+    run_id: &str,
+    lock_id: &str,
+    now: chrono::DateTime<chrono::Utc>,
+  ) -> Result<crate::LockLeaseMaintenance, RuntimeExecutionError> {
+    Ok(DurableDagEngine::renew_lock_lease(
+      self, run_id, lock_id, now,
+    )?)
+  }
+
+  fn renew_iteration_lock_lease(
+    &mut self,
+    run_id: &str,
+    lock_id: &str,
+    iteration: ForEachIterationScope,
+    now: chrono::DateTime<chrono::Utc>,
+  ) -> Result<crate::LockLeaseMaintenance, RuntimeExecutionError> {
+    Ok(DurableDagEngine::renew_iteration_lock_lease(
+      self, run_id, lock_id, iteration, now,
+    )?)
+  }
+
+  fn cancel_lock_waiters(
+    &mut self,
+    run_id: &str,
+    cancellation_id: &str,
+    now: chrono::DateTime<chrono::Utc>,
+  ) -> Result<(), RuntimeExecutionError> {
+    DurableDagEngine::cancel_lock_waiters(self, run_id, cancellation_id, now)?;
+    Ok(())
+  }
+
+  fn register_iteration_lock_waiter(
+    &mut self,
+    run_id: &str,
+    lock_id: &str,
+    key: &str,
+    iteration: ForEachIterationScope,
+    now: chrono::DateTime<chrono::Utc>,
+    deadline: chrono::DateTime<chrono::Utc>,
+  ) -> Result<(), RuntimeExecutionError> {
+    DurableDagEngine::register_iteration_lock_waiter(
+      self, run_id, lock_id, key, iteration, now, deadline,
+    )?;
+    Ok(())
+  }
+
+  fn release_iteration_lock(
+    &mut self,
+    run_id: &str,
+    lock_id: &str,
+    iteration: ForEachIterationScope,
+    result: Value,
+    now: chrono::DateTime<chrono::Utc>,
+  ) -> Result<(), RuntimeExecutionError> {
+    DurableDagEngine::release_iteration_lock(self, run_id, lock_id, iteration, result, now)?;
+    Ok(())
+  }
+
+  fn timeout_iteration_lock_waiter(
+    &mut self,
+    run_id: &str,
+    lock_id: &str,
+    iteration: ForEachIterationScope,
+    now: chrono::DateTime<chrono::Utc>,
+  ) -> Result<(), RuntimeExecutionError> {
+    DurableDagEngine::timeout_iteration_lock_waiter(self, run_id, lock_id, iteration, now)?;
     Ok(())
   }
 

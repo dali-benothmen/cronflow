@@ -270,6 +270,27 @@ interface WomlArtifactsService {
   ) => Promise<string>;
 }
 
+interface WomlLeaseBinding {
+  readonly key: string;
+  readonly fencingToken: string;
+  readonly acquiredAt: string;
+  readonly assertCurrent: () => Promise<void>;
+}
+
+interface WomlLeaseOptions {
+  readonly acquireTimeout: string | number;
+  readonly lease?: string | number;
+  readonly name?: string;
+}
+
+interface WomlLocksService {
+  readonly withLease: <T extends WomlJsonValue>(
+    key: string,
+    options: WomlLeaseOptions,
+    callback: (lease: Readonly<WomlLeaseBinding>) => T | Promise<T>
+  ) => Promise<T>;
+}
+
 interface WomlBuiltinServices {
   readonly http: {
     readonly request: <T = WomlJsonValue>(input: WomlHttpRequest, options?: WomlOperationOptions) => Promise<WomlHttpResponse<T>>;
@@ -283,6 +304,7 @@ interface WomlBuiltinServices {
   readonly state: WomlStateService;
   readonly process: WomlProcessService;
   readonly artifacts: WomlArtifactsService;
+  readonly locks: WomlLocksService;
   readonly events: {
     readonly emit: (name: string, payload: WomlJsonValue, options?: WomlOperationOptions) => Promise<any>;
   };
@@ -323,6 +345,21 @@ ${importedServices.join('\n')}
 }
 
 declare const services: Readonly<WomlBuiltinServices & WomlImportedServices>;
+`;
+}
+
+export function generateWomlLockEditorDeclarations(): string {
+  return `// WOML Lock Scope Binding v1. Available only inside a <lock> body.
+interface WomlLockBinding {
+  readonly id: string;
+  readonly key: string;
+  readonly fencingToken: string;
+  readonly acquiredAt: string;
+}
+
+declare const context: Readonly<{
+  readonly lock: Readonly<WomlLockBinding>;
+}>;
 `;
 }
 

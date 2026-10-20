@@ -101,6 +101,17 @@ pub struct ReusableLifecycleProjection {
 pub struct WorkflowContext {
   pub trigger: Map<String, Value>,
   pub steps: Map<String, Value>,
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub lock: Option<LockContext>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct LockContext {
+  pub id: String,
+  pub key: String,
+  pub fencing_token: String,
+  pub acquired_at: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -245,6 +256,7 @@ pub struct ForEachIterationExecutionProjection {
   pub parallel_groups: BTreeMap<String, ParallelGroupProjection>,
   pub lifecycle_hooks: BTreeMap<String, LifecycleHookProjection>,
   pub reusable_lifecycle_hooks: BTreeMap<String, ReusableLifecycleProjection>,
+  pub locks: BTreeMap<String, LockProjection>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -288,6 +300,32 @@ pub struct DurableWaitProjection {
   pub signals: Vec<String>,
   pub correlation_digest: Option<String>,
   pub status: DurableWaitStatus,
+  pub resolved_at: Option<DateTime<Utc>>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LockStatus {
+  Waiting,
+  Held,
+  Released,
+  AcquireTimedOut,
+  AcquisitionCancelled,
+  LeaseLost,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct LockProjection {
+  pub lock_id: String,
+  pub key: String,
+  pub waiter_sequence: u64,
+  pub execution_identity: String,
+  pub registered_at: DateTime<Utc>,
+  pub deadline: DateTime<Utc>,
+  pub status: LockStatus,
+  pub lease_id: Option<String>,
+  pub fencing_token: Option<String>,
+  pub acquired_at: Option<DateTime<Utc>>,
+  pub expires_at: Option<DateTime<Utc>>,
   pub resolved_at: Option<DateTime<Utc>>,
 }
 
@@ -413,6 +451,7 @@ pub struct RunProjection {
   pub for_each: BTreeMap<String, ForEachProjection>,
   pub approval_requests: BTreeMap<String, ApprovalRequestProjection>,
   pub durable_waits: BTreeMap<String, DurableWaitProjection>,
+  pub locks: BTreeMap<String, LockProjection>,
   pub external_signals: Vec<crate::ExternalSignalReceivedData>,
   pub notification_deliveries: BTreeMap<String, NotificationDeliveryProjection>,
   pub notification_updates: BTreeMap<String, NotificationMessageUpdateProjection>,
@@ -775,6 +814,111 @@ fn apply_iteration_scoped_event(
         failed_node_ids: data.failed_node_ids.clone(),
         cancelled_node_ids: data.cancelled_node_ids.clone(),
       };
+    }
+    RunEventPayload::LockWaitRegistered(data) => {
+      if execution.locks.contains_key(&data.lock_id) {
+        return Err(FoldError::InvalidHistory(
+          "Iteration lock was registered more than once.".to_string(),
+        ));
+      }
+      execution.locks.insert(
+        data.lock_id.clone(),
+        LockProjection {
+          lock_id: data.lock_id.clone(),
+          key: data.key.clone(),
+          waiter_sequence: data.waiter_sequence,
+          execution_identity: data.execution_identity.clone(),
+          registered_at: data.registered_at,
+          deadline: data.deadline,
+          status: LockStatus::Waiting,
+          lease_id: None,
+          fencing_token: None,
+          acquired_at: None,
+          expires_at: None,
+          resolved_at: None,
+        },
+      );
+    }
+    RunEventPayload::LockAcquired(data) => {
+      let lock = execution.locks.get_mut(&data.lock_id).ok_or_else(|| {
+        FoldError::InvalidHistory("Iteration lock acquisition has no waiter.".to_string())
+      })?;
+      if lock.status != LockStatus::Waiting
+        || lock.key != data.key
+        || lock.execution_identity != data.execution_identity
+      {
+        return Err(FoldError::InvalidHistory(
+          "Iteration lock acquisition does not match its waiter.".to_string(),
+        ));
+      }
+      lock.status = LockStatus::Held;
+      lock.lease_id = Some(data.lease_id.clone());
+      lock.fencing_token = Some(data.fencing_token.clone());
+      lock.acquired_at = Some(data.acquired_at);
+      lock.expires_at = Some(data.expires_at);
+    }
+    RunEventPayload::LockReleased(data) => {
+      let lock = execution.locks.get_mut(&data.lock_id).ok_or_else(|| {
+        FoldError::InvalidHistory("Iteration lock release has no held lease.".to_string())
+      })?;
+      if lock.status != LockStatus::Held
+        || lock.key != data.key
+        || lock.lease_id.as_deref() != Some(data.lease_id.as_str())
+        || lock.fencing_token.as_deref() != Some(data.fencing_token.as_str())
+      {
+        return Err(FoldError::InvalidHistory(
+          "Iteration lock release does not match its lease.".to_string(),
+        ));
+      }
+      lock.status = LockStatus::Released;
+      lock.resolved_at = Some(data.released_at);
+      execution
+        .context
+        .steps
+        .insert(data.lock_id.clone(), data.result.clone());
+    }
+    RunEventPayload::LockAcquireTimedOut(data) => {
+      let lock = execution.locks.get_mut(&data.lock_id).ok_or_else(|| {
+        FoldError::InvalidHistory("Iteration lock timeout has no waiter.".to_string())
+      })?;
+      if lock.status != LockStatus::Waiting
+        || lock.key != data.key
+        || lock.deadline != data.deadline
+      {
+        return Err(FoldError::InvalidHistory(
+          "Iteration lock timeout does not match its waiter.".to_string(),
+        ));
+      }
+      lock.status = LockStatus::AcquireTimedOut;
+      lock.resolved_at = Some(data.resolved_at);
+    }
+    RunEventPayload::LockAcquisitionCancelled(data) => {
+      let lock = execution.locks.get_mut(&data.lock_id).ok_or_else(|| {
+        FoldError::InvalidHistory("Iteration lock cancellation has no waiter.".to_string())
+      })?;
+      if lock.status != LockStatus::Waiting || lock.key != data.key {
+        return Err(FoldError::InvalidHistory(
+          "Iteration lock cancellation does not match its waiter.".to_string(),
+        ));
+      }
+      lock.status = LockStatus::AcquisitionCancelled;
+      lock.resolved_at = Some(data.cancelled_at);
+    }
+    RunEventPayload::LockLeaseLost(data) => {
+      let lock = execution.locks.get_mut(&data.lock_id).ok_or_else(|| {
+        FoldError::InvalidHistory("Iteration lease loss has no held lock.".to_string())
+      })?;
+      if lock.status != LockStatus::Held
+        || lock.key != data.key
+        || lock.lease_id.as_deref() != Some(data.lease_id.as_str())
+        || lock.fencing_token.as_deref() != Some(data.fencing_token.as_str())
+      {
+        return Err(FoldError::InvalidHistory(
+          "Iteration lease loss does not match its held lock.".to_string(),
+        ));
+      }
+      lock.status = LockStatus::LeaseLost;
+      lock.resolved_at = Some(data.detected_at);
     }
     RunEventPayload::OperationStarted(data) => {
       let active = execution.attempts.iter().any(|attempt| {
@@ -1832,6 +1976,124 @@ impl ProjectionFoldState {
           },
         );
         projection.status = RunStatus::Waiting;
+      }
+      RunEventPayload::LockWaitRegistered(data) => {
+        require_running(projection)?;
+        if projection.locks.contains_key(&data.lock_id) {
+          return Err(FoldError::InvalidHistory(format!(
+            "Lock {:?} was registered more than once.",
+            data.lock_id
+          )));
+        }
+        projection.locks.insert(
+          data.lock_id.clone(),
+          LockProjection {
+            lock_id: data.lock_id.clone(),
+            key: data.key.clone(),
+            waiter_sequence: data.waiter_sequence,
+            execution_identity: data.execution_identity.clone(),
+            registered_at: data.registered_at,
+            deadline: data.deadline,
+            status: LockStatus::Waiting,
+            lease_id: None,
+            fencing_token: None,
+            acquired_at: None,
+            expires_at: None,
+            resolved_at: None,
+          },
+        );
+        projection.status = RunStatus::Waiting;
+      }
+      RunEventPayload::LockAcquired(data) => {
+        if projection.status != RunStatus::Waiting {
+          return Err(FoldError::InvalidHistory(
+            "lock_acquired requires a waiting run.".to_string(),
+          ));
+        }
+        let lock = projection.locks.get_mut(&data.lock_id).ok_or_else(|| {
+          FoldError::InvalidHistory("lock_acquired has no registered waiter.".to_string())
+        })?;
+        if lock.status != LockStatus::Waiting
+          || lock.key != data.key
+          || lock.execution_identity != data.execution_identity
+        {
+          return Err(FoldError::InvalidHistory(
+            "lock_acquired does not match the active waiter.".to_string(),
+          ));
+        }
+        lock.status = LockStatus::Held;
+        lock.lease_id = Some(data.lease_id.clone());
+        lock.fencing_token = Some(data.fencing_token.clone());
+        lock.acquired_at = Some(data.acquired_at);
+        lock.expires_at = Some(data.expires_at);
+        projection.status = RunStatus::Running;
+      }
+      RunEventPayload::LockReleased(data) => {
+        require_running_or_cancelling(projection)?;
+        let lock = projection.locks.get_mut(&data.lock_id).ok_or_else(|| {
+          FoldError::InvalidHistory("lock_released has no acquired lease.".to_string())
+        })?;
+        if lock.status != LockStatus::Held
+          || lock.key != data.key
+          || lock.lease_id.as_deref() != Some(data.lease_id.as_str())
+          || lock.fencing_token.as_deref() != Some(data.fencing_token.as_str())
+        {
+          return Err(FoldError::InvalidHistory(
+            "lock_released does not match the held lease.".to_string(),
+          ));
+        }
+        lock.status = LockStatus::Released;
+        lock.resolved_at = Some(data.released_at);
+        projection
+          .context
+          .steps
+          .insert(data.lock_id.clone(), data.result.clone());
+        projection.status = RunStatus::Running;
+      }
+      RunEventPayload::LockAcquireTimedOut(data) => {
+        let lock = projection.locks.get_mut(&data.lock_id).ok_or_else(|| {
+          FoldError::InvalidHistory("lock_acquire_timed_out has no waiter.".to_string())
+        })?;
+        if lock.status != LockStatus::Waiting
+          || lock.key != data.key
+          || lock.deadline != data.deadline
+        {
+          return Err(FoldError::InvalidHistory(
+            "lock_acquire_timed_out does not match the active waiter.".to_string(),
+          ));
+        }
+        lock.status = LockStatus::AcquireTimedOut;
+        lock.resolved_at = Some(data.resolved_at);
+        projection.status = RunStatus::Running;
+      }
+      RunEventPayload::LockAcquisitionCancelled(data) => {
+        let lock = projection.locks.get_mut(&data.lock_id).ok_or_else(|| {
+          FoldError::InvalidHistory("lock_acquisition_cancelled has no waiter.".to_string())
+        })?;
+        if lock.status != LockStatus::Waiting || lock.key != data.key {
+          return Err(FoldError::InvalidHistory(
+            "lock_acquisition_cancelled does not match the active waiter.".to_string(),
+          ));
+        }
+        lock.status = LockStatus::AcquisitionCancelled;
+        lock.resolved_at = Some(data.cancelled_at);
+      }
+      RunEventPayload::LockLeaseLost(data) => {
+        let lock = projection.locks.get_mut(&data.lock_id).ok_or_else(|| {
+          FoldError::InvalidHistory("lock_lease_lost has no acquired lease.".to_string())
+        })?;
+        if lock.status != LockStatus::Held
+          || lock.key != data.key
+          || lock.lease_id.as_deref() != Some(data.lease_id.as_str())
+          || lock.fencing_token.as_deref() != Some(data.fencing_token.as_str())
+        {
+          return Err(FoldError::InvalidHistory(
+            "lock_lease_lost does not match the held lease.".to_string(),
+          ));
+        }
+        lock.status = LockStatus::LeaseLost;
+        lock.resolved_at = Some(data.detected_at);
+        projection.status = RunStatus::Running;
       }
       RunEventPayload::ExternalSignalReceived(data) => {
         if projection.status != RunStatus::Waiting {

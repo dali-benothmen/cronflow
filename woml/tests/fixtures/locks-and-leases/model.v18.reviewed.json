@@ -1,0 +1,157 @@
+{
+  "schemaVersion": 18,
+  "workflowId": "lock-model",
+  "metadata": { "name": "Reviewed lock model", "version": "1.0.0" },
+  "triggers": [
+    {
+      "id": "start",
+      "handler": "trigger.manual",
+      "config": { "kind": "object", "fields": {} }
+    }
+  ],
+  "graph": {
+    "entryNodeIds": ["prepare"],
+    "nodes": [
+      {
+        "id": "prepare",
+        "handler": "runtime.script",
+        "metadata": { "name": "Prepare resource" },
+        "inputs": {
+          "kind": "object",
+          "fields": {
+            "source": { "kind": "literal", "value": "return { service: \"payments\" };" }
+          }
+        },
+        "scriptRuntime": {
+          "bindingVersion": 1,
+          "bindings": ["context", "attempt", "services", "secrets"],
+          "requiredSecrets": []
+        }
+      },
+      {
+        "id": "__woml_lock__deployment__acquire",
+        "handler": "engine.lock-acquire",
+        "inputs": { "kind": "object", "fields": {} }
+      },
+      {
+        "id": "deploy",
+        "handler": "runtime.script",
+        "metadata": { "name": "Deploy service" },
+        "inputs": {
+          "kind": "object",
+          "fields": {
+            "source": {
+              "kind": "literal",
+              "value": "\n            return {\n              service: context.steps.prepare.service,\n              fencingToken: context.lock.fencingToken\n            };\n          "
+            }
+          }
+        },
+        "scriptRuntime": {
+          "bindingVersion": 1,
+          "bindings": ["context", "attempt", "services", "secrets"],
+          "requiredSecrets": []
+        }
+      },
+      {
+        "id": "verify",
+        "handler": "runtime.script",
+        "metadata": { "name": "Verify deployment" },
+        "inputs": {
+          "kind": "object",
+          "fields": {
+            "source": { "kind": "literal", "value": "return { healthy: true };" }
+          }
+        },
+        "scriptRuntime": {
+          "bindingVersion": 1,
+          "bindings": ["context", "attempt", "services", "secrets"],
+          "requiredSecrets": []
+        }
+      },
+      {
+        "id": "__woml_lock__deployment__release",
+        "handler": "engine.lock-release",
+        "inputs": { "kind": "object", "fields": {} }
+      },
+      {
+        "id": "deployment",
+        "handler": "engine.lock-result",
+        "inputs": { "kind": "object", "fields": {} },
+        "metadata": {
+          "name": "Production deployment",
+          "description": "Serialize deployments for one service."
+        }
+      },
+      {
+        "id": "summary",
+        "handler": "runtime.script",
+        "metadata": { "name": "Build summary" },
+        "inputs": {
+          "kind": "object",
+          "fields": {
+            "source": { "kind": "literal", "value": "return context.steps.deployment;" }
+          }
+        },
+        "scriptRuntime": {
+          "bindingVersion": 1,
+          "bindings": ["context", "attempt", "services", "secrets"],
+          "requiredSecrets": []
+        }
+      },
+      {
+        "id": "__woml_workflow__settlement",
+        "handler": "engine.workflow-settlement",
+        "inputs": { "kind": "object", "fields": {} }
+      }
+    ],
+    "edges": [
+      { "id": "prepare-to-__woml_lock__deployment__acquire", "from": "prepare", "to": "__woml_lock__deployment__acquire", "condition": { "kind": "always" } },
+      { "id": "__woml_lock__deployment__acquire-to-deploy", "from": "__woml_lock__deployment__acquire", "to": "deploy", "condition": { "kind": "always" } },
+      { "id": "deploy-to-verify", "from": "deploy", "to": "verify", "condition": { "kind": "always" } },
+      { "id": "verify-to-__woml_lock__deployment__release", "from": "verify", "to": "__woml_lock__deployment__release", "condition": { "kind": "always" } },
+      { "id": "__woml_lock__deployment__release-to-deployment", "from": "__woml_lock__deployment__release", "to": "deployment", "condition": { "kind": "always" } },
+      { "id": "deployment-to-summary", "from": "deployment", "to": "summary", "condition": { "kind": "always" } },
+      { "id": "__woml_workflow__:main:settlement", "from": "summary", "to": "__woml_workflow__settlement", "condition": { "kind": "always" } }
+    ],
+    "forks": [],
+    "choices": [],
+    "contextVisibility": [
+      { "nodeId": "prepare", "stepIds": [] },
+      { "nodeId": "deploy", "stepIds": ["prepare"] },
+      { "nodeId": "verify", "stepIds": ["prepare", "deploy"] },
+      { "nodeId": "summary", "stepIds": ["prepare", "deployment"] }
+    ],
+    "settlement": {
+      "nodeId": "__woml_workflow__settlement",
+      "mainResultNodeId": "summary",
+      "ownedBranchTerminalNodeIds": []
+    },
+    "forEach": [],
+    "waits": [],
+    "locks": [
+      {
+        "lockId": "deployment",
+        "acquireNodeId": "__woml_lock__deployment__acquire",
+        "releaseNodeId": "__woml_lock__deployment__release",
+        "resultNodeId": "deployment",
+        "bodyEntryNodeId": "deploy",
+        "bodyTerminalNodeId": "verify",
+        "key": {
+          "kind": "template",
+          "parts": [
+            { "kind": "text", "text": "production/" },
+            { "kind": "contextReference", "path": ["steps", "prepare", "service"] }
+          ]
+        },
+        "acquireTimeoutMs": 600000,
+        "leaseMs": 30000,
+        "outerStepIds": ["prepare"],
+        "metadata": {
+          "name": "Production deployment",
+          "description": "Serialize deployments for one service."
+        }
+      }
+    ]
+  },
+  "runtimePolicy": { "profileVersion": 1, "concurrency": 1 }
+}

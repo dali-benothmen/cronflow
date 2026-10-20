@@ -11,11 +11,11 @@ use crate::{
   COMPILED_MODEL_SCHEMA_VERSION_V11, COMPILED_MODEL_SCHEMA_VERSION_V12,
   COMPILED_MODEL_SCHEMA_VERSION_V13, COMPILED_MODEL_SCHEMA_VERSION_V14,
   COMPILED_MODEL_SCHEMA_VERSION_V15, COMPILED_MODEL_SCHEMA_VERSION_V16,
-  COMPILED_MODEL_SCHEMA_VERSION_V17, COMPILED_MODEL_SCHEMA_VERSION_V2,
-  COMPILED_MODEL_SCHEMA_VERSION_V3, COMPILED_MODEL_SCHEMA_VERSION_V4,
-  COMPILED_MODEL_SCHEMA_VERSION_V5, COMPILED_MODEL_SCHEMA_VERSION_V6,
-  COMPILED_MODEL_SCHEMA_VERSION_V7, COMPILED_MODEL_SCHEMA_VERSION_V8,
-  COMPILED_MODEL_SCHEMA_VERSION_V9,
+  COMPILED_MODEL_SCHEMA_VERSION_V17, COMPILED_MODEL_SCHEMA_VERSION_V18,
+  COMPILED_MODEL_SCHEMA_VERSION_V2, COMPILED_MODEL_SCHEMA_VERSION_V3,
+  COMPILED_MODEL_SCHEMA_VERSION_V4, COMPILED_MODEL_SCHEMA_VERSION_V5,
+  COMPILED_MODEL_SCHEMA_VERSION_V6, COMPILED_MODEL_SCHEMA_VERSION_V7,
+  COMPILED_MODEL_SCHEMA_VERSION_V8, COMPILED_MODEL_SCHEMA_VERSION_V9,
 };
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -202,6 +202,25 @@ pub struct CompiledWorkflowGraph {
   pub for_each: Option<Vec<CompiledForEach>>,
   #[serde(default, skip_serializing_if = "Option::is_none")]
   pub waits: Option<Vec<CompiledWait>>,
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub locks: Option<Vec<CompiledLock>>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct CompiledLock {
+  pub lock_id: String,
+  pub acquire_node_id: String,
+  pub release_node_id: String,
+  pub result_node_id: String,
+  pub body_entry_node_id: String,
+  pub body_terminal_node_id: String,
+  pub key: ValueExpression,
+  pub acquire_timeout_ms: u64,
+  pub lease_ms: u64,
+  pub outer_step_ids: Vec<String>,
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub metadata: Option<Map<String, Value>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -630,6 +649,8 @@ pub enum ModelIssueCode {
   UnsupportedForEachExecution,
   InvalidDurableWait,
   UnsupportedDurableWaitExecution,
+  InvalidLock,
+  UnsupportedLockExecution,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -805,6 +826,7 @@ fn inspect_reusable_contract(
       | COMPILED_MODEL_SCHEMA_VERSION_V15
       | COMPILED_MODEL_SCHEMA_VERSION_V16
       | COMPILED_MODEL_SCHEMA_VERSION_V17
+      | COMPILED_MODEL_SCHEMA_VERSION_V18
   ) || definitions.is_empty()
     || definitions.len() > 256
   {
@@ -1797,6 +1819,7 @@ fn inspect_lifecycle_contract(workflow: &CompiledWorkflowDefinition, issues: &mu
       | COMPILED_MODEL_SCHEMA_VERSION_V15
       | COMPILED_MODEL_SCHEMA_VERSION_V16
       | COMPILED_MODEL_SCHEMA_VERSION_V17
+      | COMPILED_MODEL_SCHEMA_VERSION_V18
   ) {
     issues.push(issue(
       ModelIssueCode::InvalidLifecycle,
@@ -1933,7 +1956,8 @@ fn inspect_runtime_policy_contract(
       | COMPILED_MODEL_SCHEMA_VERSION_V14
       | COMPILED_MODEL_SCHEMA_VERSION_V15
       | COMPILED_MODEL_SCHEMA_VERSION_V16
-      | COMPILED_MODEL_SCHEMA_VERSION_V17,
+      | COMPILED_MODEL_SCHEMA_VERSION_V17
+      | COMPILED_MODEL_SCHEMA_VERSION_V18,
       Some(policy),
     ) => {
       let has_policy = policy.concurrency.is_some()
@@ -1974,7 +1998,8 @@ fn inspect_runtime_policy_contract(
       | COMPILED_MODEL_SCHEMA_VERSION_V14
       | COMPILED_MODEL_SCHEMA_VERSION_V15
       | COMPILED_MODEL_SCHEMA_VERSION_V16
-      | COMPILED_MODEL_SCHEMA_VERSION_V17,
+      | COMPILED_MODEL_SCHEMA_VERSION_V17
+      | COMPILED_MODEL_SCHEMA_VERSION_V18,
       None,
     ) => issues.push(issue(
       ModelIssueCode::InvalidRuntimePolicy,
@@ -2050,6 +2075,11 @@ fn inspect_parallel_contract(workflow: &CompiledWorkflowDefinition, issues: &mut
             node.handler == "runtime.script"
               || workflow.schema_version >= COMPILED_MODEL_SCHEMA_VERSION_V17
                 && node.handler == "engine.durable-wait"
+              || workflow.schema_version >= COMPILED_MODEL_SCHEMA_VERSION_V18
+                && matches!(
+                  node.handler.as_str(),
+                  "engine.lock-acquire" | "engine.lock-release" | "engine.lock-result"
+                )
           })
       })
       && join_edges.iter().enumerate().all(|(index, edge)| {
@@ -2882,6 +2912,9 @@ fn inspect_for_each_contract(workflow: &CompiledWorkflowDefinition, issues: &mut
           | "engine.choice-result"
           | "engine.parallel-start"
           | "engine.parallel-join"
+          | "engine.lock-acquire"
+          | "engine.lock-release"
+          | "engine.lock-result"
       );
       let script_valid = if node.handler == "runtime.script" {
         matches!(&node.inputs, ValueExpression::Object { fields } if fields.len() == 1
@@ -3215,7 +3248,9 @@ fn inspect_durable_wait_contract(
     ));
     return;
   };
-  if waits.is_empty() || waits.len() > 1024 {
+  if (workflow.schema_version == COMPILED_MODEL_SCHEMA_VERSION_V17 && waits.is_empty())
+    || waits.len() > 1024
+  {
     issues.push(issue(
       ModelIssueCode::InvalidDurableWait,
       "Compiled Model v17 requires between 1 and 1024 durable waits.",
@@ -3312,6 +3347,161 @@ fn inspect_durable_wait_contract(
     issues.push(issue(
       ModelIssueCode::InvalidDurableWait,
       "Model v17 waits must describe every engine.durable-wait node exactly once.",
+    ));
+  }
+}
+
+fn inspect_lock_contract(workflow: &CompiledWorkflowDefinition, issues: &mut Vec<ModelIssue>) {
+  if workflow.schema_version < COMPILED_MODEL_SCHEMA_VERSION_V18 {
+    if workflow.graph.locks.is_some() {
+      issues.push(issue(
+        ModelIssueCode::InvalidLock,
+        "Lock descriptors are available only in compiled Model v18.",
+      ));
+    }
+    return;
+  }
+  let Some(locks) = workflow.graph.locks.as_deref() else {
+    issues.push(issue(
+      ModelIssueCode::InvalidLock,
+      "Compiled Model v18 requires a locks descriptor collection.",
+    ));
+    return;
+  };
+  if locks.len() > 1024 {
+    issues.push(issue(
+      ModelIssueCode::InvalidLock,
+      "Compiled Model v18 supports at most 1024 locks.",
+    ));
+    return;
+  }
+  let root_node_ids = workflow
+    .graph
+    .nodes
+    .iter()
+    .map(|node| node.id.as_str())
+    .collect::<HashSet<_>>();
+  let body_node_ids = workflow
+    .graph
+    .for_each
+    .as_deref()
+    .unwrap_or_default()
+    .iter()
+    .map(|descriptor| {
+      (
+        descriptor.for_each_id.as_str(),
+        descriptor
+          .body
+          .nodes
+          .iter()
+          .map(|node| node.id.as_str())
+          .collect::<HashSet<_>>(),
+      )
+    })
+    .collect::<HashMap<_, _>>();
+  let nodes = workflow
+    .graph
+    .nodes
+    .iter()
+    .chain(
+      workflow
+        .graph
+        .for_each
+        .as_deref()
+        .unwrap_or_default()
+        .iter()
+        .flat_map(|descriptor| descriptor.body.nodes.iter()),
+    )
+    .map(|node| (node.id.as_str(), node))
+    .collect::<HashMap<_, _>>();
+  let mut lock_ids = HashSet::new();
+  let mut owned_nodes = HashSet::new();
+  for lock in locks {
+    let valid_control = |id: &str, handler: &str| {
+      nodes.get(id).is_some_and(|node| {
+        node.handler == handler
+          && node.timeout_ms.is_none()
+          && node.retry_policy.is_none()
+          && node.script_runtime.is_none()
+          && matches!(&node.inputs, ValueExpression::Object { fields } if fields.is_empty())
+      })
+    };
+    let key_valid = match &lock.key {
+      ValueExpression::Literal { value } => value.as_str().is_some_and(|key| {
+        !key.is_empty()
+          && key.len() <= 256
+          && key.trim() == key
+          && !key.chars().any(char::is_control)
+      }),
+      ValueExpression::Template { parts } => !parts.is_empty() && parts.len() <= 65,
+      ValueExpression::ContextReference { path } => !path.is_empty() && path.len() <= 64,
+      _ => false,
+    };
+    let node_ids = [
+      &lock.acquire_node_id,
+      &lock.release_node_id,
+      &lock.result_node_id,
+    ];
+    let ownership_ids = [
+      lock.acquire_node_id.as_str(),
+      lock.release_node_id.as_str(),
+      lock.result_node_id.as_str(),
+      lock.body_entry_node_id.as_str(),
+      lock.body_terminal_node_id.as_str(),
+    ];
+    let one_graph_owns_every_node = ownership_ids.iter().all(|id| root_node_ids.contains(id))
+      || body_node_ids
+        .values()
+        .any(|body| ownership_ids.iter().all(|id| body.contains(id)));
+    let valid = valid_public_structural_id(&lock.lock_id)
+      && lock_ids.insert(lock.lock_id.as_str())
+      && node_ids.iter().all(|id| owned_nodes.insert(id.as_str()))
+      && lock.acquire_node_id == format!("__woml_lock__{}__acquire", lock.lock_id)
+      && lock.release_node_id == format!("__woml_lock__{}__release", lock.lock_id)
+      && lock.result_node_id == lock.lock_id
+      && valid_control(&lock.acquire_node_id, "engine.lock-acquire")
+      && valid_control(&lock.release_node_id, "engine.lock-release")
+      && valid_control(&lock.result_node_id, "engine.lock-result")
+      && nodes.contains_key(lock.body_entry_node_id.as_str())
+      && nodes.contains_key(lock.body_terminal_node_id.as_str())
+      && one_graph_owns_every_node
+      && key_valid
+      && (1_000..=604_800_000).contains(&lock.acquire_timeout_ms)
+      && (5_000..=600_000).contains(&lock.lease_ms);
+    if !valid {
+      issues.push(issue(
+        ModelIssueCode::InvalidLock,
+        format!(
+          "Lock {:?} does not match the frozen Model v18 descriptor contract.",
+          lock.lock_id
+        ),
+      ));
+    }
+  }
+  let control_count = workflow
+    .graph
+    .nodes
+    .iter()
+    .chain(
+      workflow
+        .graph
+        .for_each
+        .as_deref()
+        .unwrap_or_default()
+        .iter()
+        .flat_map(|descriptor| descriptor.body.nodes.iter()),
+    )
+    .filter(|node| {
+      matches!(
+        node.handler.as_str(),
+        "engine.lock-acquire" | "engine.lock-release" | "engine.lock-result"
+      )
+    })
+    .count();
+  if control_count != locks.len() * 3 {
+    issues.push(issue(
+      ModelIssueCode::InvalidLock,
+      "Model v18 locks must describe every lock control node exactly once.",
     ));
   }
 }
@@ -3706,6 +3896,16 @@ impl CompiledWorkflowDefinition {
       .find(|wait| wait.wait_id() == wait_id)
   }
 
+  pub fn durable_lock(&self, lock_id: &str) -> Option<&CompiledLock> {
+    self
+      .graph
+      .locks
+      .as_deref()
+      .unwrap_or_default()
+      .iter()
+      .find(|lock| lock.lock_id == lock_id)
+  }
+
   pub fn lifecycle_hook(&self, hook_id: &str) -> Option<&CompiledLifecycleHook> {
     self
       .lifecycle
@@ -3955,6 +4155,7 @@ impl CompiledWorkflowDefinition {
         | COMPILED_MODEL_SCHEMA_VERSION_V15
         | COMPILED_MODEL_SCHEMA_VERSION_V16
         | COMPILED_MODEL_SCHEMA_VERSION_V17
+        | COMPILED_MODEL_SCHEMA_VERSION_V18
     ) {
       issues.push(issue(
         ModelIssueCode::UnsupportedSchemaVersion,
@@ -3995,7 +4196,8 @@ impl CompiledWorkflowDefinition {
         | COMPILED_MODEL_SCHEMA_VERSION_V14
         | COMPILED_MODEL_SCHEMA_VERSION_V15
         | COMPILED_MODEL_SCHEMA_VERSION_V16
-        | COMPILED_MODEL_SCHEMA_VERSION_V17,
+        | COMPILED_MODEL_SCHEMA_VERSION_V17
+        | COMPILED_MODEL_SCHEMA_VERSION_V18,
         Some(runtime),
       ) => {
         let reserved = [
@@ -4061,6 +4263,7 @@ impl CompiledWorkflowDefinition {
           | COMPILED_MODEL_SCHEMA_VERSION_V15
           | COMPILED_MODEL_SCHEMA_VERSION_V16
           | COMPILED_MODEL_SCHEMA_VERSION_V17
+          | COMPILED_MODEL_SCHEMA_VERSION_V18
       )
     {
       issues.push(issue(
@@ -4080,7 +4283,8 @@ impl CompiledWorkflowDefinition {
       (
         COMPILED_MODEL_SCHEMA_VERSION_V15
         | COMPILED_MODEL_SCHEMA_VERSION_V16
-        | COMPILED_MODEL_SCHEMA_VERSION_V17,
+        | COMPILED_MODEL_SCHEMA_VERSION_V17
+        | COMPILED_MODEL_SCHEMA_VERSION_V18,
         Some(communication),
       ) => {
         let valid = communication.profile_version == 1
@@ -4468,6 +4672,7 @@ impl CompiledWorkflowDefinition {
     inspect_fork_contract(self, &mut issues);
     inspect_for_each_contract(self, &mut issues);
     inspect_durable_wait_contract(self, &mut issues);
+    inspect_lock_contract(self, &mut issues);
     issues
   }
 
@@ -4553,6 +4758,12 @@ impl CompiledWorkflowDefinition {
         ("engine.durable-wait", ValueExpression::Object { fields })
           if self.schema_version >= COMPILED_MODEL_SCHEMA_VERSION_V17 && durable =>
         {
+          fields.is_empty()
+        }
+        (
+          "engine.lock-acquire" | "engine.lock-release" | "engine.lock-result",
+          ValueExpression::Object { fields },
+        ) if self.schema_version >= COMPILED_MODEL_SCHEMA_VERSION_V18 && durable => {
           fields.is_empty()
         }
         ("engine.choice-result", ValueExpression::Object { fields })

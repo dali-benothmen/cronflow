@@ -1,0 +1,19 @@
+{
+  "profile": "woml.lock-errors/v1",
+  "errors": [
+    { "code": "WOML_LOCK_INVALID", "retryable": false, "ambiguous": false },
+    { "code": "WOML_LOCK_KEY_UNAVAILABLE", "retryable": false, "ambiguous": false },
+    { "code": "WOML_LOCK_KEY_SENSITIVE", "retryable": false, "ambiguous": false },
+    { "code": "WOML_LOCK_WAIT_LIMIT", "retryable": true, "ambiguous": false },
+    { "code": "WOML_LOCK_ACQUIRE_TIMED_OUT", "retryable": true, "ambiguous": false },
+    { "code": "WOML_LOCK_ACQUISITION_CANCELLED", "retryable": false, "ambiguous": false },
+    { "code": "WOML_LOCK_LEASE_LOST", "retryable": false, "ambiguous": true },
+    { "code": "WOML_LOCK_REENTRANT", "retryable": false, "ambiguous": false },
+    { "code": "WOML_LOCK_NESTED_UNSUPPORTED", "retryable": false, "ambiguous": false },
+    { "code": "WOML_LOCK_IDEMPOTENCY_CONFLICT", "retryable": false, "ambiguous": false },
+    { "code": "WOML_LOCK_AUTHORITY_UNAVAILABLE", "retryable": true, "ambiguous": false },
+    { "code": "WOML_LOCK_FENCING_EXHAUSTED", "retryable": false, "ambiguous": false },
+    { "code": "WOML_LOCK_STALE_OWNER", "retryable": false, "ambiguous": true },
+    { "code": "WOML_LOCK_COMPOSITION_UNSUPPORTED", "retryable": false, "ambiguous": false }
+  ]
+}

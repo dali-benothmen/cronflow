@@ -1,0 +1,18 @@
+<woml>
+  <workflow id="database-migration" name="Exclusive database migration" description="Prevent two releases from changing the same schema concurrently." version="1.0.0">
+    <triggers><manual id="start" /></triggers>
+    <steps>
+      <step id="plan" name="Select migration target"><script>return { database: "customers", migration: "2026_10_add_preferences" };</script></step>
+      <lock id="migration" name="Own schema migration" key="database/{{context.steps.plan.database}}" acquire-timeout="30m" lease="1m">
+        <step id="apply" name="Apply migration">
+          <script>
+            const result = await services.process.run({ executable: "database-migrate", args: [context.steps.plan.database, context.steps.plan.migration, context.lock.fencingToken] }, { name: "apply-schema-migration" });
+            return { exitCode: result.exitCode, fencingToken: context.lock.fencingToken };
+          </script>
+        </step>
+        <step id="check" name="Check schema"><script>return { migration: context.steps.plan.migration, verified: true };</script></step>
+      </lock>
+      <step id="done" name="Return migration result"><script>return context.steps.migration;</script></step>
+    </steps>
+  </workflow>
+</woml>

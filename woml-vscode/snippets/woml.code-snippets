@@ -78,6 +78,25 @@
       "</wait-for>"
     ]
   },
+  "WOML durable lock": {
+    "prefix": "woml-lock",
+    "description": "Protect a multi-step workflow scope with a durable renewable lease.",
+    "body": [
+      "<lock",
+      "  id=\"${1:resourceLock}\"",
+      "  name=\"${2:Protected operation}\"",
+      "  key=\"${3:production}/{{context.payload.${4:resourceId}}}\"",
+      "  acquire-timeout=\"${5:10m}\"",
+      "  lease=\"${6:30s}\"",
+      ">",
+      "  <step id=\"${7:protectedWork}\" name=\"${8:Run protected work}\">",
+      "    <script>",
+      "      return { fencingToken: context.lock.fencingToken };",
+      "    </script>",
+      "  </step>",
+      "</lock>"
+    ]
+  },
   "WOML Telegram trigger": {
     "prefix": "woml-telegram-trigger",
     "description": "Create a Telegram message trigger.",

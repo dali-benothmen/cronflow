@@ -38,7 +38,7 @@ machine.
 - State operation events use digests instead of raw keys and values.
 - Cache values, storage bodies, database rows, credentials, and state values do
   not appear in ordinary run inspection.
-- Startup fails closed when Store v15 integrity (including durable waits and State v1) contradicts its schema,
+- Startup fails closed when Store v16 integrity (including durable waits, locks, and State v1) contradicts its schema,
   digests, canonical results, versions, or quotas.
 - WOML does not silently copy the `secrets` object into workflow state.
 - Reusable definitions receive only secret props explicitly bound with an exact
@@ -83,3 +83,17 @@ expose them. Prefer owner-readable credential files or narrowly allowed
 environment names, discard unneeded output, and never return
 credential-bearing output as durable step context. See
 [Running Local Tools Safely](woml-process.md).
+
+## Lock keys and lease safety
+
+Lock keys are operator-visible coordination identifiers. Never include secrets,
+bearer credentials, raw customer payloads, or personal data in them. Rust keeps
+lease IDs, input digests, renewal state, and runtime ownership out of public
+context, events, logs, metrics, and inspection.
+
+Fencing tokens are ordering evidence, not credentials. Managed effects verify
+current ownership where supported, but an arbitrary external target must store
+and reject older tokens itself. Backup restore preserves fencing high-water and
+clears live owners; activating both the source and restored databases is an
+unsupported split-brain deployment. See the
+[Locks threat model](woml-lock-threat-model.md).

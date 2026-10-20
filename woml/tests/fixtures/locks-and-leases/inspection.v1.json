@@ -1,0 +1,8 @@
+{
+  "profile": "woml.lock-inspection/v1",
+  "required": ["runId", "lockId", "key", "status", "registeredAt"],
+  "status": ["waiting", "held", "released", "timed_out", "cancelled", "lost"],
+  "optional": ["acquiredAt", "releasedAt", "deadline", "expiresAt", "fencingToken", "waitedMs", "heldMs", "failureCode"],
+  "forbidden": ["leaseCredential", "renewalNonce", "ownerRuntimeId", "inputDigest", "secret", "payload"],
+  "metrics": ["heldLocks", "waitingAcquisitions", "oldestWaiterAgeMs", "renewalFailures", "expiredTakeovers", "acquisitionTimeouts"]
+}

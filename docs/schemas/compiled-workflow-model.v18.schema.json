@@ -1,0 +1,106 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://woml.dev/schemas/compiled-workflow-model/v18",
+  "title": "WOML Locks and Leases Compiled Workflow Model v18",
+  "type": "object",
+  "additionalProperties": true,
+  "required": ["schemaVersion", "workflowId", "triggers", "graph", "runtimePolicy"],
+  "properties": {
+    "schemaVersion": { "const": 18 },
+    "workflowId": { "type": "string", "minLength": 1 },
+    "triggers": { "type": "array" },
+    "runtimePolicy": { "type": "object" },
+    "graph": {
+      "type": "object",
+      "additionalProperties": true,
+      "required": ["entryNodeIds", "nodes", "edges", "forks", "choices", "contextVisibility", "settlement", "forEach", "waits", "locks"],
+      "properties": {
+        "entryNodeIds": { "type": "array", "minItems": 1, "items": { "type": "string" } },
+        "nodes": { "type": "array" },
+        "edges": { "type": "array" },
+        "forks": { "type": "array" },
+        "choices": { "type": "array" },
+        "contextVisibility": { "type": "array" },
+        "settlement": { "type": "object" },
+        "forEach": { "type": "array" },
+        "waits": { "type": "array" },
+        "locks": {
+          "type": "array",
+          "minItems": 1,
+          "items": { "$ref": "#/$defs/lock" }
+        }
+      }
+    }
+  },
+  "$defs": {
+    "publicId": { "type": "string", "pattern": "^[a-z][A-Za-z0-9]*$", "maxLength": 256 },
+    "contextReference": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "path"],
+      "properties": {
+        "kind": { "const": "contextReference" },
+        "path": { "type": "array", "minItems": 1, "items": { "type": "string", "minLength": 1 } }
+      }
+    },
+    "keyExpression": {
+      "oneOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["kind", "value"],
+          "properties": {
+            "kind": { "const": "literal" },
+            "value": { "type": "string", "minLength": 1, "maxLength": 256 }
+          }
+        },
+        { "$ref": "#/$defs/contextReference" },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["kind", "parts"],
+          "properties": {
+            "kind": { "const": "template" },
+            "parts": {
+              "type": "array",
+              "minItems": 1,
+              "items": {
+                "oneOf": [
+                  {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "required": ["kind", "text"],
+                    "properties": { "kind": { "const": "text" }, "text": { "type": "string", "minLength": 1 } }
+                  },
+                  { "$ref": "#/$defs/contextReference" }
+                ]
+              }
+            }
+          }
+        }
+      ]
+    },
+    "lock": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["lockId", "acquireNodeId", "releaseNodeId", "resultNodeId", "bodyEntryNodeId", "bodyTerminalNodeId", "key", "acquireTimeoutMs", "leaseMs", "outerStepIds"],
+      "properties": {
+        "lockId": { "$ref": "#/$defs/publicId" },
+        "acquireNodeId": { "type": "string", "minLength": 1 },
+        "releaseNodeId": { "type": "string", "minLength": 1 },
+        "resultNodeId": { "$ref": "#/$defs/publicId" },
+        "bodyEntryNodeId": { "type": "string", "minLength": 1 },
+        "bodyTerminalNodeId": { "type": "string", "minLength": 1 },
+        "key": { "$ref": "#/$defs/keyExpression" },
+        "acquireTimeoutMs": { "type": "integer", "minimum": 1000, "maximum": 604800000 },
+        "leaseMs": { "type": "integer", "minimum": 5000, "maximum": 600000 },
+        "outerStepIds": { "type": "array", "uniqueItems": true, "items": { "$ref": "#/$defs/publicId" } },
+        "metadata": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": { "name": { "type": "string", "minLength": 1 }, "description": { "type": "string", "minLength": 1 } }
+        }
+      }
+    }
+  }
+}

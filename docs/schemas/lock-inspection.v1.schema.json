@@ -1,0 +1,24 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://woml.dev/schemas/lock-inspection/v1",
+  "title": "WOML Lock Inspection v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["profile", "runId", "lockId", "key", "status", "registeredAt"],
+  "properties": {
+    "profile": { "const": "woml.lock-inspection/v1" },
+    "runId": { "type": "string", "minLength": 1 },
+    "lockId": { "type": "string", "minLength": 1 },
+    "key": { "type": "string", "minLength": 1, "maxLength": 256 },
+    "status": { "enum": ["waiting", "held", "released", "timed_out", "cancelled", "lost"] },
+    "registeredAt": { "type": "string", "format": "date-time" },
+    "acquiredAt": { "type": "string", "format": "date-time" },
+    "releasedAt": { "type": "string", "format": "date-time" },
+    "deadline": { "type": "string", "format": "date-time" },
+    "expiresAt": { "type": "string", "format": "date-time" },
+    "fencingToken": { "type": "string", "pattern": "^(0|[1-9][0-9]*)$" },
+    "waitedMs": { "type": "integer", "minimum": 0 },
+    "heldMs": { "type": "integer", "minimum": 0 },
+    "failureCode": { "type": "string", "minLength": 1 }
+  }
+}

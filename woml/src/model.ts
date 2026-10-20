@@ -400,6 +400,28 @@ export interface CompiledWorkflowGraphV17 extends CompiledWorkflowGraphV16 {
   readonly waits: readonly CompiledWaitV1[];
 }
 
+export interface CompiledLockV1 {
+  readonly lockId: string;
+  readonly acquireNodeId: string;
+  readonly releaseNodeId: string;
+  readonly resultNodeId: string;
+  readonly bodyEntryNodeId: string;
+  readonly bodyTerminalNodeId: string;
+  readonly key: ValueExpression;
+  readonly acquireTimeoutMs: number;
+  readonly leaseMs: number;
+  readonly outerStepIds: readonly string[];
+  readonly metadata?: Readonly<{
+    readonly name?: string;
+    readonly description?: string;
+  }>;
+}
+
+/** Model v18 adds durable exclusive lock scopes and renewable leases. */
+export interface CompiledWorkflowGraphV18 extends CompiledWorkflowGraphV17 {
+  readonly locks: readonly CompiledLockV1[];
+}
+
 interface CompiledWorkflowDefinitionBase {
   readonly workflowId: string;
   readonly metadata?: CompiledWorkflowMetadata;
@@ -531,6 +553,14 @@ export interface CompiledWorkflowDefinitionV17 extends Omit<
   readonly graph: CompiledWorkflowGraphV17;
 }
 
+export interface CompiledWorkflowDefinitionV18 extends Omit<
+  CompiledWorkflowDefinitionV16,
+  'schemaVersion' | 'graph'
+> {
+  readonly schemaVersion: 18;
+  readonly graph: CompiledWorkflowGraphV18;
+}
+
 export type CompiledWorkflowDefinition =
   | CompiledWorkflowDefinitionV1
   | CompiledWorkflowDefinitionV2
@@ -548,7 +578,8 @@ export type CompiledWorkflowDefinition =
   | CompiledWorkflowDefinitionV14
   | CompiledWorkflowDefinitionV15
   | CompiledWorkflowDefinitionV16
-  | CompiledWorkflowDefinitionV17;
+  | CompiledWorkflowDefinitionV17
+  | CompiledWorkflowDefinitionV18;
 
 export interface CompiledGraphIssue {
   readonly code:
@@ -571,7 +602,8 @@ export interface CompiledGraphIssue {
     | 'INVALID_CONTEXT_VISIBILITY'
     | 'INVALID_WORKFLOW_SETTLEMENT'
     | 'INVALID_FOR_EACH'
-    | 'INVALID_DURABLE_WAIT';
+    | 'INVALID_DURABLE_WAIT'
+    | 'INVALID_LOCK';
   readonly message: string;
 }
 
@@ -579,8 +611,8 @@ export interface InspectCompiledGraphOptions {
   readonly requireSingleTerminal?: boolean;
 }
 
-export function inspectCompiledWorkflowGraph(
-  graph: CompiledWorkflowGraph,
+export function inspectCompiledWorkflowGraph<TGraph extends CompiledWorkflowGraph>(
+  graph: TGraph,
   options: InspectCompiledGraphOptions = {}
 ): readonly CompiledGraphIssue[] {
   const issues: CompiledGraphIssue[] = [];
@@ -706,6 +738,7 @@ export function inspectCompiledWorkflowGraph(
   inspectApprovalGroups(graph, issues);
   inspectForkGraph(graph, issues);
   inspectDurableWaitGraph(graph, issues);
+  inspectLockGraph(graph, issues);
 
   return issues;
 }
@@ -1440,6 +1473,83 @@ function inspectDurableWaitGraph(
       issues.push({
         code: 'INVALID_DURABLE_WAIT',
         message: `Durable wait "${wait.waitId}" does not match the frozen Model v17 contract.`,
+      });
+    }
+  }
+}
+
+function inspectLockGraph(
+  graph: CompiledWorkflowGraph,
+  issues: CompiledGraphIssue[]
+): void {
+  const locks = (graph as Partial<CompiledWorkflowGraphV18>).locks;
+  const loops = (graph as Partial<CompiledWorkflowGraphV16>).forEach ?? [];
+  const allNodes = [
+    ...graph.nodes,
+    ...loops.flatMap(loop => loop.body.nodes),
+  ];
+  const allEdges = [
+    ...graph.edges,
+    ...loops.flatMap(loop => loop.body.edges),
+  ];
+  const acquireNodes = allNodes.filter(
+    node => node.handler === 'engine.lock-acquire'
+  );
+  if (locks === undefined && acquireNodes.length === 0) return;
+  if (locks === undefined || locks.length !== acquireNodes.length) {
+    issues.push({
+      code: 'INVALID_LOCK',
+      message:
+        'Model v18 locks must describe every engine.lock-acquire scope exactly once.',
+    });
+    return;
+  }
+  const nodeById = new Map(allNodes.map(node => [node.id, node]));
+  const edges = new Set(allEdges.map(edge => `${edge.from}\0${edge.to}`));
+  const seen = new Set<string>();
+  for (const lock of locks) {
+    const acquire = nodeById.get(lock.acquireNodeId);
+    const release = nodeById.get(lock.releaseNodeId);
+    const result = nodeById.get(lock.resultNodeId);
+    const literalKeyValid =
+      lock.key.kind !== 'literal' ||
+      (typeof lock.key.value === 'string' &&
+        lock.key.value.length > 0 &&
+        new TextEncoder().encode(lock.key.value).byteLength <= 256);
+    const keyValid =
+      literalKeyValid &&
+      (lock.key.kind === 'literal' ||
+        lock.key.kind === 'contextReference' ||
+        (lock.key.kind === 'template' &&
+          lock.key.parts.length > 0 &&
+          lock.key.parts.every(
+            part => part.kind === 'text' || part.kind === 'contextReference'
+          )));
+    const valid =
+      !seen.has(lock.lockId) &&
+      lock.resultNodeId === lock.lockId &&
+      emptyEngineNode(acquire, 'engine.lock-acquire') &&
+      emptyEngineNode(release, 'engine.lock-release') &&
+      result?.handler === 'engine.lock-result' &&
+      result.inputs.kind === 'object' &&
+      Object.keys(result.inputs.fields).length === 0 &&
+      nodeById.has(lock.bodyEntryNodeId) &&
+      nodeById.has(lock.bodyTerminalNodeId) &&
+      edges.has(`${lock.acquireNodeId}\0${lock.bodyEntryNodeId}`) &&
+      edges.has(`${lock.bodyTerminalNodeId}\0${lock.releaseNodeId}`) &&
+      edges.has(`${lock.releaseNodeId}\0${lock.resultNodeId}`) &&
+      Number.isSafeInteger(lock.acquireTimeoutMs) &&
+      lock.acquireTimeoutMs >= 1_000 &&
+      lock.acquireTimeoutMs <= 604_800_000 &&
+      Number.isSafeInteger(lock.leaseMs) &&
+      lock.leaseMs >= 5_000 &&
+      lock.leaseMs <= 600_000 &&
+      keyValid;
+    seen.add(lock.lockId);
+    if (!valid) {
+      issues.push({
+        code: 'INVALID_LOCK',
+        message: `Lock "${lock.lockId}" does not match the frozen Model v18 contract.`,
       });
     }
   }

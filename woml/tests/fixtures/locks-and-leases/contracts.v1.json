@@ -1,0 +1,54 @@
+{
+  "profile": "woml.locks-and-leases/v1",
+  "modelVersion": 18,
+  "eventVersion": 17,
+  "storeVersion": 16,
+  "inspectionVersion": 1,
+  "mode": "exclusive",
+  "authority": "durable-state-authority-plus-canonical-key",
+  "queue": "durable-fifo-oldest-eligible-first",
+  "key": {
+    "minimumUtf8Bytes": 1,
+    "maximumUtf8Bytes": 256,
+    "caseSensitive": true,
+    "operatorVisible": true,
+    "secretReferences": false,
+    "emptySlashSegments": false
+  },
+  "timing": {
+    "minimumAcquireTimeoutMs": 1000,
+    "maximumAcquireTimeoutMs": 604800000,
+    "minimumLeaseMs": 5000,
+    "defaultLeaseMs": 30000,
+    "maximumLeaseMs": 600000,
+    "renewalTarget": "one-third-of-lease"
+  },
+  "limits": {
+    "waitersPerKey": 1024,
+    "waitingAcquisitionsPerStore": 10000,
+    "simultaneouslyHeldLocksPerExecution": 1,
+    "inspectionPageSize": 100
+  },
+  "unsupported": [
+    "shared-locks",
+    "semaphores",
+    "priority",
+    "nested-locks",
+    "reentrant-locks",
+    "atomic-multi-key-locks",
+    "force-unlock",
+    "multi-host-local-sqlite"
+  ],
+  "fencing": {
+    "serialization": "unsigned-decimal-string",
+    "monotonicPerKey": true,
+    "managedEffectsCheckAuthority": true,
+    "targetSideEnforcementRequiredForStrongGuarantee": true,
+    "arbitraryCodeAutomaticallyFenced": false
+  },
+  "result": {
+    "successStatus": "released",
+    "required": ["status", "key", "fencingToken", "acquiredAt", "releasedAt", "waitedMs"],
+    "publishedOnTimeoutOrLoss": false
+  }
+}

@@ -1,0 +1,33 @@
+<woml>
+  <workflow id="lock-model" name="Reviewed lock model" version="1.0.0">
+    <triggers><manual id="start" /></triggers>
+    <steps>
+      <step id="prepare" name="Prepare resource">
+        <script>return { service: "payments" };</script>
+      </step>
+      <lock
+        id="deployment"
+        name="Production deployment"
+        description="Serialize deployments for one service."
+        key="production/{{context.steps.prepare.service}}"
+        acquire-timeout="10m"
+        lease="30s"
+      >
+        <step id="deploy" name="Deploy service">
+          <script>
+            return {
+              service: context.steps.prepare.service,
+              fencingToken: context.lock.fencingToken
+            };
+          </script>
+        </step>
+        <step id="verify" name="Verify deployment">
+          <script>return { healthy: true };</script>
+        </step>
+      </lock>
+      <step id="summary" name="Build summary">
+        <script>return context.steps.deployment;</script>
+      </step>
+    </steps>
+  </workflow>
+</woml>

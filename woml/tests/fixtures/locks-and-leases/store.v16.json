@@ -1,0 +1,17 @@
+{
+  "schemaVersion": 16,
+  "profile": "woml.durable-store/v16",
+  "tables": {
+    "lockResources": ["key", "fencingHighWater", "ownerLeaseId", "ownerRunId", "ownerNodeExecutionId", "ownerFencingToken", "acquiredAt", "expiresAt", "updatedAt"],
+    "lockWaiters": ["waiterId", "key", "runId", "nodeExecutionId", "sequence", "registeredAt", "deadline", "status", "inputDigest"]
+  },
+  "invariants": [
+    "one-live-owner-per-key",
+    "one-active-waiter-per-execution",
+    "monotonic-fencing-high-water",
+    "atomic-expiry-and-next-grant",
+    "oldest-eligible-waiter-first"
+  ],
+  "migration": { "from": 15, "additive": true, "futureVersionsFailClosed": true },
+  "restore": { "preserveFencingHighWater": true, "clearLiveOwnership": true, "oldAuthorityMustBeRetired": true }
+}

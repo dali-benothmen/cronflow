@@ -19,6 +19,7 @@ import type {
   ExecuteMessageV7,
   ExecuteMessageV8,
   ExecuteMessageV9,
+  ExecuteMessageV10,
   FetchObservationMessage,
   JsonValue,
   ScriptAttempt,
@@ -2425,6 +2426,207 @@ return {
     });
   });
 
+  test('Locks v1 exposes a frozen callback lease and always releases it', async () => {
+    const completed: CompletedMessage[] = [];
+    const calls: CapabilityCallMessage[] = [];
+    let host!: ScriptHost;
+    host = new ScriptHost({
+      workerUrl: new URL('../src/script-host-worker.ts', import.meta.url),
+      protocolVersion: 4,
+      send: async message => {
+        if (message.messageType === 'completed') {
+          completed.push(message);
+          return;
+        }
+        if (message.messageType !== 'capability_call') return;
+        calls.push(message);
+        const result =
+          message.call.operation === 'acquire'
+            ? {
+                contract: 'woml.locks-capability',
+                contractVersion: 1,
+                kind: 'acquired',
+                sessionId: 'lock_session_1',
+                key: 'inventory/customer-42',
+                fencingToken: '7',
+                acquiredAt: '2026-10-20T10:00:00.000Z',
+              }
+            : message.call.operation === 'assert-current'
+              ? {
+                  contract: 'woml.locks-capability',
+                  contractVersion: 1,
+                  kind: 'current',
+                  key: 'inventory/customer-42',
+                }
+              : {
+                  contract: 'woml.locks-capability',
+                  contractVersion: 1,
+                  kind: 'released',
+                  key: 'inventory/customer-42',
+                };
+        host.accept({
+          protocol: 'woml.script-host',
+          protocolVersion: 4,
+          messageType: 'capability_result',
+          invocationId: message.invocationId,
+          callId: message.callId,
+          result: {
+            contract: 'woml.capability-call',
+            contractVersion: 1,
+            messageType: 'result',
+            invocationId: message.invocationId,
+            callId: message.callId,
+            outcome: 'succeeded',
+            resultContractVersion: 1,
+            resultBytes: Buffer.byteLength(JSON.stringify(result)),
+            durationMs: 1,
+            result,
+          },
+        });
+      },
+    });
+
+    host.accept(
+      executeV4(
+        'inv_v4_locks',
+        `
+          const facadeFrozen = Object.isFrozen(services.locks);
+          const methodFrozen = Object.isFrozen(services.locks.withLease);
+          const value = await services.locks.withLease(
+            'inventory/customer-42',
+            { acquireTimeout: '5s', lease: '5s', name: 'reserve-customer' },
+            async lease => {
+              await lease.assertCurrent();
+              return {
+                leaseFrozen: Object.isFrozen(lease),
+                assertionFrozen: Object.isFrozen(lease.assertCurrent),
+                key: lease.key,
+                fencingToken: lease.fencingToken,
+                acquiredAt: lease.acquiredAt
+              };
+            }
+          );
+          return { facadeFrozen, methodFrozen, value };
+        `
+      )
+    );
+    await host.drain();
+
+    expect(calls.map(call => call.call.operation)).toEqual([
+      'acquire',
+      'assert-current',
+      'release',
+    ]);
+    expect(calls[0]?.call).toMatchObject({
+      capability: 'locks',
+      identity: {
+        mode: 'named',
+        operationName: 'locks.acquire.reserve-customer',
+      },
+      input: {
+        key: 'inventory/customer-42',
+        acquireTimeoutMs: 5_000,
+        leaseMs: 5_000,
+        operationIdentity: 'locks.acquire.reserve-customer',
+      },
+    });
+    expect(calls[1]?.call.input).toEqual({ sessionId: 'lock_session_1' });
+    expect(calls[2]?.call.input).toEqual({ sessionId: 'lock_session_1' });
+    expect(completed[0]?.outcome).toEqual({
+      kind: 'success',
+      value: {
+        facadeFrozen: true,
+        methodFrozen: true,
+        value: {
+          leaseFrozen: true,
+          assertionFrozen: true,
+          key: 'inventory/customer-42',
+          fencingToken: '7',
+          acquiredAt: '2026-10-20T10:00:00.000Z',
+        },
+      },
+    });
+  });
+
+  test('Locks v1 releases before propagating a callback failure', async () => {
+    const completed: CompletedMessage[] = [];
+    const operations: string[] = [];
+    let host!: ScriptHost;
+    host = new ScriptHost({
+      workerUrl: new URL('../src/script-host-worker.ts', import.meta.url),
+      protocolVersion: 4,
+      send: async message => {
+        if (message.messageType === 'completed') {
+          completed.push(message);
+          return;
+        }
+        if (message.messageType !== 'capability_call') return;
+        operations.push(message.call.operation);
+        const result =
+          message.call.operation === 'acquire'
+            ? {
+                contract: 'woml.locks-capability',
+                contractVersion: 1,
+                kind: 'acquired',
+                sessionId: 'lock_session_failure',
+                key: 'deploy/api',
+                fencingToken: '8',
+                acquiredAt: '2026-10-20T10:00:00.000Z',
+              }
+            : {
+                contract: 'woml.locks-capability',
+                contractVersion: 1,
+                kind: 'released',
+                key: 'deploy/api',
+              };
+        host.accept({
+          protocol: 'woml.script-host',
+          protocolVersion: 4,
+          messageType: 'capability_result',
+          invocationId: message.invocationId,
+          callId: message.callId,
+          result: {
+            contract: 'woml.capability-call',
+            contractVersion: 1,
+            messageType: 'result',
+            invocationId: message.invocationId,
+            callId: message.callId,
+            outcome: 'succeeded',
+            resultContractVersion: 1,
+            resultBytes: Buffer.byteLength(JSON.stringify(result)),
+            durationMs: 1,
+            result,
+          },
+        });
+      },
+    });
+
+    host.accept(
+      executeV4(
+        'inv_v4_locks_failure',
+        `
+          try {
+            await services.locks.withLease(
+              'deploy/api',
+              { acquireTimeout: '5s', lease: '5s', name: 'deploy-api' },
+              async () => { throw new Error('deployment failed'); }
+            );
+            return { caught: false };
+          } catch (error) {
+            return { caught: true, message: error.message };
+          }
+        `
+      )
+    );
+    await host.drain();
+
+    expect(operations).toEqual(['acquire', 'release']);
+    expect(completed[0]?.outcome).toEqual({
+      kind: 'success',
+      value: { caught: true, message: 'deployment failed' },
+    });
+  });
+
   test('Artifact v1 normalizes calls and exposes immutable bounded public values', async () => {
     const completed: CompletedMessage[] = [];
     const calls: CapabilityCallMessage[] = [];
@@ -3115,6 +3317,64 @@ describe('Reusable custom-step Script Host v8', () => {
       error: { kind: 'invalid_script_result' },
     });
     expect(JSON.stringify(result.messages)).not.toContain(secret);
+  });
+});
+
+describe('Durable Lock Script Host v10', () => {
+  test('exposes a deeply read-only durable lock binding', async () => {
+    const message: ExecuteMessageV10 = {
+      ...executeStepV7(
+        'inv_lock_binding',
+        `
+          let mutationBlocked = false;
+          try { context.lock.key = 'changed'; } catch { mutationBlocked = true; }
+          return {
+            id: context.lock.id,
+            key: context.lock.key,
+            fencingToken: context.lock.fencingToken,
+            acquiredAt: context.lock.acquiredAt,
+            frozen: Object.isFrozen(context.lock),
+            mutationBlocked,
+          };
+        `
+      ),
+      protocolVersion: 10,
+      context: {
+        trigger: {},
+        steps: {},
+        lock: {
+          id: 'deployment',
+          key: 'production/payments',
+          fencingToken: '42',
+          acquiredAt: '2026-10-20T12:00:00.000Z',
+        },
+      },
+    };
+    const result = await runHost([message], {
+      WOML_SCRIPT_HOST_PROTOCOL_VERSION: '10',
+    });
+    expect(
+      byInvocation(result.messages).get(message.invocationId)?.outcome
+    ).toEqual({
+      kind: 'success',
+      value: {
+        id: 'deployment',
+        key: 'production/payments',
+        fencingToken: '42',
+        acquiredAt: '2026-10-20T12:00:00.000Z',
+        frozen: true,
+        mutationBlocked: true,
+      },
+    });
+    expect(
+      isScriptHostMessage({
+        ...message,
+        context: {
+          ...message.context,
+          lock: { ...message.context.lock, fencingToken: '0' },
+        },
+      })
+    ).toBe(false);
   });
 });
 

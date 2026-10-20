@@ -23,6 +23,8 @@ export const expectedNativeExports = [
   'inspectWomlRunPresentation',
   'inspectWomlRunV2',
   'inspectWomlWaitsV1',
+  'inspectWomlLocksV1',
+  'observeWomlLocksV1',
   'inspectWomlRunArtifacts',
   'inspectWomlStoredRunRequirements',
   'listWomlRunPresentations',

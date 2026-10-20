@@ -216,7 +216,7 @@ function decodeArtifact(
     !object(value.workflow) ||
     !Number.isSafeInteger(value.workflow.schemaVersion) ||
     Number(value.workflow.schemaVersion) < 1 ||
-    Number(value.workflow.schemaVersion) > 17 ||
+    Number(value.workflow.schemaVersion) > 18 ||
     typeof value.workflow.workflowId !== 'string' ||
     !object(value.workflow.graph) ||
     !Array.isArray(value.workflow.graph.nodes) ||

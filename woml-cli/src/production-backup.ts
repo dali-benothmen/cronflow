@@ -253,7 +253,7 @@ function decodeManifest(value: unknown): BackupManifestV1 {
     item.deploymentId.length < 1 ||
     item.deploymentId.length > 320 ||
     !isDigest(item.activationId) ||
-    ![13, 14, 15].includes(Number(item.storeVersion)) ||
+    ![13, 14, 15, 16].includes(Number(item.storeVersion)) ||
     database === null ||
     typeof database !== 'object' ||
     Array.isArray(database) ||
@@ -613,7 +613,7 @@ export async function restoreProductionBackup(
       throw error;
     }
     if (
-      prepared.storeVersion !== 15 ||
+      prepared.storeVersion !== 16 ||
       JSON.stringify(prepared.definitionHashes) !== JSON.stringify(manifest.definitionHashes)
     ) {
       throw new ProductionBackupError(

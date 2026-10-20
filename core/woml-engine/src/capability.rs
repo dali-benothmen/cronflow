@@ -667,11 +667,28 @@ fn operation_with_iteration_scope(
 pub struct DurableCapabilityAuthority {
   registry: Arc<CapabilityRegistry>,
   store: Arc<AsyncMutex<DurableEventStore>>,
+  locks: Arc<crate::ManagedLocksService>,
 }
 
 impl DurableCapabilityAuthority {
   pub fn new(registry: Arc<CapabilityRegistry>, store: Arc<AsyncMutex<DurableEventStore>>) -> Self {
-    Self { registry, store }
+    Self {
+      registry,
+      store,
+      locks: Arc::new(crate::ManagedLocksService::default()),
+    }
+  }
+
+  pub fn new_with_locks(
+    registry: Arc<CapabilityRegistry>,
+    store: Arc<AsyncMutex<DurableEventStore>>,
+    locks: Arc<crate::ManagedLocksService>,
+  ) -> Self {
+    Self {
+      registry,
+      store,
+      locks,
+    }
   }
 
   pub fn registry(&self) -> &Arc<CapabilityRegistry> {
@@ -682,13 +699,20 @@ impl DurableCapabilityAuthority {
     &self.store
   }
 
+  /// Called only after the host has reported the invocation terminal or the
+  /// host connection itself has ended. At that point Bun can no longer issue
+  /// protected work, so Rust may safely stop renewal and release the session.
+  pub fn close_programmatic_lock_sessions(&self, invocation_id: &str) {
+    self.locks.close_invocation(invocation_id);
+  }
+
   pub async fn execute(
     &self,
     request: CapabilityCallRequest,
     cancellation: CapabilityCancellationToken,
   ) -> Result<CapabilityCallResult, DurableCapabilityAuthorityError> {
     let (workflow_scope, iteration_scope) = {
-      let store = self.store.lock().await;
+      let mut store = self.store.lock().await;
       let projection = store.projection(&request.run_id)?;
       let binding = store.run_binding(&request.run_id)?;
       let attempt = projection.attempts.iter().find(|attempt| {
@@ -735,8 +759,45 @@ impl DurableCapabilityAuthority {
           .into(),
         );
       }
+      if !store.managed_effect_has_current_lock(
+        &request.run_id,
+        &request.node_id,
+        &request.invocation_id,
+        Utc::now(),
+      )? {
+        return Ok(failed_result(
+          &request,
+          Instant::now(),
+          failure(
+            CapabilityFailureKind::ServiceRejected,
+            "WOML_LOCK_STALE_OWNER",
+            "The managed effect was rejected because its lock lease is no longer current.",
+            false,
+            false,
+          ),
+        ));
+      }
       (binding.workflow_id, iteration_scope)
     };
+    match self.locks.managed_effect_is_current(&request.invocation_id) {
+      Ok(true) => {}
+      Ok(false) => {
+        return Ok(failed_result(
+          &request,
+          Instant::now(),
+          failure(
+            CapabilityFailureKind::ServiceRejected,
+            "WOML_LOCK_STALE_OWNER",
+            "The managed effect was rejected because its programmatic lease is no longer current.",
+            false,
+            false,
+          ),
+        ));
+      }
+      Err(error) => {
+        return Ok(failed_result(&request, Instant::now(), error));
+      }
+    }
     let metadata = match self.registry.safe_metadata(&request) {
       Ok(metadata) => metadata,
       Err(error) => {

@@ -1,0 +1,12 @@
+{
+  "profile": "woml.locks-capability/v1",
+  "method": "services.locks.withLease",
+  "frames": ["acquire", "assert-current", "release"],
+  "sessionOwner": "rust",
+  "multiplexed": true,
+  "callbackDurable": false,
+  "request": { "required": ["key", "acquireTimeoutMs", "leaseMs", "operationIdentity"] },
+  "lease": { "required": ["key", "fencingToken", "acquiredAt"] },
+  "result": "json-compatible",
+  "crashBehavior": "attempt-fails-closed-and-lease-releases-or-expires"
+}

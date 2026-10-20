@@ -35,6 +35,7 @@ import type {
   CompiledWorkflowDefinitionV15,
   CompiledWorkflowDefinitionV16,
   CompiledWorkflowDefinitionV17,
+  CompiledWorkflowDefinitionV18,
   CompiledWorkflowDefinitionV9,
 } from './model';
 import type { WomlReusableDefinitionGraph } from './reusable-definitions';
@@ -71,6 +72,8 @@ export const WOML_FOR_EACH_DEFINITION_PACKAGE_PROFILE =
   'woml.definition-package/v11' as const;
 export const WOML_DURABLE_WAIT_DEFINITION_PACKAGE_PROFILE =
   'woml.definition-package/v12' as const;
+export const WOML_LOCK_DEFINITION_PACKAGE_PROFILE =
+  'woml.definition-package/v13' as const;
 
 export interface WomlModuleResolverOptions {
   /** Absolute or working-directory-relative path of the importing WOML file. */
@@ -393,6 +396,20 @@ export interface WomlDefinitionPackageV12 extends Omit<
     readonly source: string;
     readonly modelDigest: string;
     readonly model: CompiledWorkflowDefinitionV17;
+  };
+}
+
+export interface WomlDefinitionPackageV13 extends Omit<
+  WomlDefinitionPackageV9,
+  'schemaVersion' | 'profile' | 'workflow'
+> {
+  readonly schemaVersion: 13;
+  readonly profile: typeof WOML_LOCK_DEFINITION_PACKAGE_PROFILE;
+  readonly workflow: {
+    readonly id: string;
+    readonly source: string;
+    readonly modelDigest: string;
+    readonly model: CompiledWorkflowDefinitionV18;
   };
 }
 
@@ -1175,6 +1192,7 @@ export async function buildWomlExecutableDefinitionPackage(
   | WomlDefinitionPackageV10
   | WomlDefinitionPackageV11
   | WomlDefinitionPackageV12
+  | WomlDefinitionPackageV13
 > {
   const resolved = buildWomlDefinitionPackage(document, options);
   if (resolved.modules.length === 0) {
@@ -1353,6 +1371,16 @@ export async function buildWomlExecutableDefinitionPackage(
     },
     permissions: resolved.permissions,
   };
+  if (model.schemaVersion === 18) {
+    const unsigned = {
+      schemaVersion: 13 as const,
+      profile: WOML_LOCK_DEFINITION_PACKAGE_PROFILE,
+      ...common,
+      workflow: { ...common.workflow, model },
+      definitions: [] as const,
+    };
+    return { ...unsigned, rootHash: sha256(canonicalJson(unsigned)) };
+  }
   if (model.schemaVersion === 17) {
     const unsigned = {
       schemaVersion: 12 as const,
@@ -1452,6 +1480,7 @@ export async function buildWomlReusableDefinitionPackage(
   | WomlDefinitionPackageV10
   | WomlDefinitionPackageV11
   | WomlDefinitionPackageV12
+  | WomlDefinitionPackageV13
 > {
   if (graph.root.kind !== 'workflow') {
     throw compileDiagnostic(
@@ -1675,7 +1704,15 @@ export async function buildWomlReusableDefinitionPackage(
         provider.provider === 'whatsapp'
     );
   const unsigned =
-    model.schemaVersion === 17
+    model.schemaVersion === 18
+      ? {
+          schemaVersion: 13 as const,
+          profile: WOML_LOCK_DEFINITION_PACKAGE_PROFILE,
+          runtimeReady: false,
+          ...common,
+          workflow: { ...common.workflow, model },
+        }
+      : model.schemaVersion === 17
       ? {
           schemaVersion: 12 as const,
           profile: WOML_DURABLE_WAIT_DEFINITION_PACKAGE_PROFILE,
@@ -1724,12 +1761,15 @@ export async function buildWomlRuntimeDefinitionPackage(
   | WomlDefinitionPackageV10
   | WomlDefinitionPackageV11
   | WomlDefinitionPackageV12
+  | WomlDefinitionPackageV13
 > {
   const compiled = await buildWomlExecutableDefinitionPackage(
     document,
     options
   );
-  if (compiled.schemaVersion === 12) return compiled;
+  if (compiled.schemaVersion === 13 || compiled.schemaVersion === 12) {
+    return compiled;
+  }
   if (compiled.schemaVersion === 11) {
     const { rootHash: _compilationRootHash, ...rest } = compiled;
     const unsigned = { ...rest, runtimeReady: true as const };
@@ -1831,6 +1871,7 @@ export function canonicalizeWomlDefinitionPackage(
     | WomlDefinitionPackageV10
     | WomlDefinitionPackageV11
     | WomlDefinitionPackageV12
+    | WomlDefinitionPackageV13
 ): string {
   return canonicalJson(definitionPackage);
 }

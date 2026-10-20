@@ -52,6 +52,7 @@ import {
   type WomlDefinitionPackageV10,
   type WomlDefinitionPackageV11,
   type WomlDefinitionPackageV12,
+  type WomlDefinitionPackageV13,
 } from '@woml/compiler';
 import {
   compiledDefinitionHash,
@@ -73,9 +74,11 @@ import {
   inspectRunPresentationWithRust,
   inspectRunV2WithRust,
   inspectWaitsV1WithRust,
+  inspectLocksV1WithRust,
   listRunPresentationsWithRust,
   listRunsWithRust,
   observeRuntimeWithRust,
+  observeLocksV1WithRust,
   BackupOperationError,
   ArtifactOperationError,
   RetentionOperationError,
@@ -97,6 +100,7 @@ import {
   type RustRunCancellationResultV1,
   type RustRunInspectionV2,
   type RustWaitInspectionV1,
+  type RustLockInspectionV1,
   type RustRunListV1,
   type ScheduleProgressV1,
   type TriggerProgressV1,
@@ -286,7 +290,10 @@ function listUsage(): string {
 }
 
 function getUsage(): string {
-  return 'Usage: woml get <runId> [--state <path>] [--json]';
+  return [
+    'Usage: woml get <runId> [--state <path>] [--json]',
+    'Shows the run together with durable waits, artifacts, and lock/lease state.',
+  ].join('\n');
 }
 
 function artifactsUsage(): string {
@@ -1047,7 +1054,8 @@ function formatRunInspection(
   inspection: RustRunInspectionV2,
   artifacts?: readonly RustArtifactInspectionV1[],
   artifactsTruncated = false,
-  waitInspection?: RustWaitInspectionV1
+  waitInspection?: RustWaitInspectionV1,
+  locks: readonly RustLockInspectionV1[] = []
 ): string {
   const lines = [
     `Run: ${inspection.runId}`,
@@ -1103,6 +1111,38 @@ function formatRunInspection(
         `Pending waits: ${waitInspection.pendingWaits}${waitInspection.oldestPendingWaitAgeMs === undefined ? '' : ` · oldest ${waitInspection.oldestPendingWaitAgeMs} ms`}`
       );
       lines.push(`Cancel safely: woml cancel ${inspection.runId}`);
+    }
+  }
+  if (locks.length > 0) {
+    lines.push('Locks:');
+    for (const lock of locks) {
+      const timing =
+        lock.status === 'waiting'
+          ? lock.waitedMs === undefined
+            ? ''
+            : ` · waiting ${lock.waitedMs} ms`
+          : lock.heldMs === undefined
+            ? ''
+            : ` · held ${lock.heldMs} ms`;
+      const fence =
+        lock.fencingToken === undefined
+          ? ''
+          : ` · fence ${lock.fencingToken}`;
+      lines.push(`  ${lock.lockId}: ${lock.status}${timing}${fence}`);
+      lines.push(`    Resource: ${lock.key}`);
+      if (lock.deadline !== undefined && lock.status === 'waiting') {
+        lines.push(`    Acquisition deadline: ${lock.deadline}`);
+      }
+      if (lock.expiresAt !== undefined && lock.status === 'held') {
+        lines.push(`    Lease expires: ${lock.expiresAt}`);
+      }
+      if (lock.failureCode !== undefined) {
+        lines.push(`    Failure: ${lock.failureCode}`);
+      }
+    }
+    if (locks.some(lock => lock.status === 'waiting' || lock.status === 'held')) {
+      lines.push(`Cancel safely: woml cancel ${inspection.runId}`);
+      lines.push('WOML intentionally provides no force-unlock command.');
     }
   }
   if (inspection.hooks.length > 0) {
@@ -1752,7 +1792,8 @@ function promoteForLifecycleAuthority(
     workflow.schemaVersion === 14 ||
     workflow.schemaVersion === 15 ||
     workflow.schemaVersion === 16 ||
-    workflow.schemaVersion === 17
+    workflow.schemaVersion === 17 ||
+    workflow.schemaVersion === 18
   ) {
     return workflow;
   }
@@ -1833,6 +1874,7 @@ function runtimeModulesFromPackage(
     | WomlDefinitionPackageV10
     | WomlDefinitionPackageV11
     | WomlDefinitionPackageV12
+    | WomlDefinitionPackageV13
 ): readonly RustRuntimeModuleArtifact[] {
   const modules = definitionPackage.modules.map(module => {
     const bundle = definitionPackage.artifacts.find(
@@ -1859,7 +1901,8 @@ function runtimeModulesFromPackage(
     definitionPackage.schemaVersion !== 9 &&
     definitionPackage.schemaVersion !== 10 &&
     definitionPackage.schemaVersion !== 11 &&
-    definitionPackage.schemaVersion !== 12
+    definitionPackage.schemaVersion !== 12 &&
+    definitionPackage.schemaVersion !== 13
   )
     return modules;
   const seen = new Set<string>();
@@ -2683,6 +2726,12 @@ async function runSingleCheckCommand(
         child => child.kind === 'element' && declaresDurableWait(child)
       );
     const hasDurableWait = declaresDurableWait(document.root);
+    const declaresLock = (element: WomlSourceElement): boolean =>
+      element.name === 'lock' ||
+      element.children.some(
+        child => child.kind === 'element' && declaresLock(child)
+      );
+    const hasLock = declaresLock(document.root);
     if (
       reusableGraph.root.kind !== 'workflow' ||
       reusableGraph.definitions.length > 0
@@ -2733,7 +2782,9 @@ async function runSingleCheckCommand(
         );
       }
       io.stdout(
-        reusablePackage?.schemaVersion === 11
+        reusablePackage?.schemaVersion === 13
+          ? `Compiled Model v18 package: ${reusablePackage.rootHash}\nExecution: lock authoring and lowering are validated; the durable lock runtime begins in LL2–LL4.\n`
+          : reusablePackage?.schemaVersion === 11
           ? `Compiled Model v16 package: ${reusablePackage.rootHash}\nExecution: <for-each>, modules, and reusable steps are runnable together.\n`
           : reusablePackage?.schemaVersion === 10 &&
               reusablePackage.workflow.model.communication.providers.some(
@@ -2747,6 +2798,59 @@ async function runSingleCheckCommand(
                 : reusableGraph.root.kind === 'workflow'
                   ? 'Execution: reusable provider source is validated; custom notification providers begin in SCP5.\n'
                   : 'Execution: reusable definitions are imported by workflows and are not independently runnable.\n'
+      );
+      return 0;
+    }
+    if (hasLock) {
+      const inspectionPackage = buildWomlDefinitionPackage(document, {
+        sourcePath: filePath,
+        projectRoot,
+      });
+      const executablePackage =
+        inspectionPackage.modules.length === 0
+          ? undefined
+          : await buildWomlExecutableDefinitionPackage(document, {
+              sourcePath: filePath,
+              projectRoot,
+            });
+      const compiled =
+        executablePackage?.workflow.model ?? compileWoml(document);
+      if (compiled.schemaVersion !== 18) {
+        throw new CliInputError(
+          'WOML_LOCK_MODEL_INVALID',
+          '<lock> did not lower to the frozen compiled Model v18 contract.'
+        );
+      }
+      const workflowElement = document.root.children.find(
+        (child): child is WomlSourceElement =>
+          child.kind === 'element' && child.name === 'workflow'
+      );
+      if (executablePackage !== undefined) {
+        await refreshEditorTypes(filePath, executablePackage.modules, io);
+      }
+      if (options[0] === '--json') {
+        io.stdout(
+          `${JSON.stringify(
+            {
+              profile: 'woml.model-validation/v1',
+              valid: true,
+              workflowId: workflowElement?.attributes.id?.value,
+              feature: 'locks-and-leases',
+              executable: true,
+              modelVersion: compiled.schemaVersion,
+              runtimePhase: 'LL3',
+            },
+            null,
+            2
+          )}\n`
+        );
+        return 0;
+      }
+      io.stdout(
+        `WOML check passed for workflow "${workflowElement?.attributes.id?.value ?? filePath}".\n`
+      );
+      io.stdout(
+        'Compiled Model v18 passed frontend and durable Rust lock validation.\n'
       );
       return 0;
     }
@@ -3485,7 +3589,11 @@ function workflowSecretReferences(
       references.push({ kind: 'secretReference', name });
     }
   }
-  if (workflow.schemaVersion === 16 || workflow.schemaVersion === 17) {
+  if (
+    workflow.schemaVersion === 16 ||
+    workflow.schemaVersion === 17 ||
+    workflow.schemaVersion === 18
+  ) {
     for (const descriptor of workflow.graph.forEach) {
       for (const node of descriptor.body.nodes) {
         collectSecretReferences(node.inputs, references);
@@ -3498,7 +3606,8 @@ function workflowSecretReferences(
   for (const definition of workflow.schemaVersion === 14 ||
   workflow.schemaVersion === 15 ||
   workflow.schemaVersion === 16 ||
-  workflow.schemaVersion === 17
+  workflow.schemaVersion === 17 ||
+  workflow.schemaVersion === 18
     ? (workflow.reusableDefinitions ?? [])
     : []) {
     for (const prop of definition.props) {
@@ -3522,6 +3631,12 @@ function workflowHasApproval(workflow: CompiledWorkflowDefinition): boolean {
 function workflowHasDurableWait(workflow: CompiledWorkflowDefinition): boolean {
   return workflow.graph.nodes.some(
     node => node.handler === 'engine.durable-wait'
+  );
+}
+
+function workflowHasDurableLock(workflow: CompiledWorkflowDefinition): boolean {
+  return workflow.graph.nodes.some(
+    node => node.handler === 'engine.lock-acquire'
   );
 }
 
@@ -3961,6 +4076,7 @@ async function executeOneShot(
   }
   const hasApproval = workflowHasApproval(workflow);
   const hasDurableWait = workflowHasDurableWait(workflow);
+  const hasDurableLock = workflowHasDurableLock(workflow);
   const hasNotifications = workflowHasNotifications(workflow);
   if (
     args.resumeRunId !== undefined &&
@@ -3975,7 +4091,8 @@ async function executeOneShot(
     workflow.schemaVersion !== 14 &&
     workflow.schemaVersion !== 15 &&
     workflow.schemaVersion !== 16 &&
-    workflow.schemaVersion !== 17
+    workflow.schemaVersion !== 17 &&
+    workflow.schemaVersion !== 18
   ) {
     throw new CliInputError(
       'WOML_RESUME_REQUIRES_DURABLE_WORKFLOW',
@@ -3992,7 +4109,7 @@ async function executeOneShot(
     );
     return;
   }
-  if (hasApproval || hasDurableWait) {
+  if (hasApproval || hasDurableWait || hasDurableLock) {
     await runApprovalWorkflow(workflow, args, io, dependencies, runtimeModules);
     return;
   }
@@ -4007,7 +4124,8 @@ async function executeOneShot(
     workflow.schemaVersion === 14 ||
     workflow.schemaVersion === 15 ||
     workflow.schemaVersion === 16 ||
-    workflow.schemaVersion === 17
+    workflow.schemaVersion === 17 ||
+    workflow.schemaVersion === 18
   ) {
     await mkdir(dirname(args.statePath), { recursive: true });
     const onProgress = durableRetryProgress(io, args);
@@ -5171,6 +5289,10 @@ async function activateWorkflows(
               ),
             observeDurable: () =>
               observeRuntimeWithRust(args.statePath, {
+                nativeCorePath: dependencies.nativeCorePath,
+              }),
+            observeLocks: () =>
+              observeLocksV1WithRust(args.statePath, {
                 nativeCorePath: dependencies.nativeCorePath,
               }),
             ...(artifactAuthority === undefined ||
@@ -6744,7 +6866,20 @@ async function runCliUnprofiled(
         get.runId,
         { nativeCorePath: dependencies.nativeCorePath }
       );
-      const publicResult = waitInspection.waits.length === 0 ? {
+      const lockInspection = inspectLocksV1WithRust(
+        get.statePath,
+        get.runId,
+        { nativeCorePath: dependencies.nativeCorePath }
+      );
+      const publicResult = lockInspection.length > 0 ? {
+        ...result,
+        profile: 'woml.run-inspection/v9' as const,
+        artifacts: artifactInspection,
+        ...(waitInspection.waits.length === 0
+          ? {}
+          : { durableWaits: waitInspection }),
+        locks: lockInspection,
+      } : waitInspection.waits.length === 0 ? {
         ...result,
         profile: 'woml.run-inspection/v7' as const,
         artifacts: artifactInspection,
@@ -6761,7 +6896,8 @@ async function runCliUnprofiled(
               result,
               artifactInspection.artifacts,
               artifactInspection.truncated,
-              waitInspection
+              waitInspection,
+              lockInspection
             )
       );
       return 0;

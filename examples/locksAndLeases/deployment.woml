@@ -1,0 +1,23 @@
+<woml>
+  <workflow id="serialized-deployment" name="Serialized production deployment" description="Deploy and verify one service without overlapping another deployment." version="1.0.0">
+    <triggers><manual id="start" /></triggers>
+    <steps>
+      <step id="plan" name="Prepare deployment"><script>return { service: "payments-api", environment: "production" };</script></step>
+      <lock id="deployment" name="Own deployment slot" key="{{context.steps.plan.environment}}/{{context.steps.plan.service}}" acquire-timeout="15m" lease="45s">
+        <step id="deploy" name="Apply deployment">
+          <script>
+            const result = await services.process.run({ executable: "deploy-service", args: [context.steps.plan.service, context.lock.fencingToken] }, { name: "apply-deployment" });
+            return { exitCode: result.exitCode, fencingToken: context.lock.fencingToken };
+          </script>
+        </step>
+        <step id="verify" name="Verify rollout">
+          <script>
+            const result = await services.process.run({ executable: "verify-rollout", args: [context.steps.plan.service] }, { name: "verify-deployment" });
+            return { healthy: result.exitCode === 0 };
+          </script>
+        </step>
+      </lock>
+      <step id="summary" name="Publish deployment result"><script>return { service: context.steps.plan.service, result: context.steps.deployment };</script></step>
+    </steps>
+  </workflow>
+</woml>

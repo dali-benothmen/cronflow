@@ -1,0 +1,24 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://woml.dev/schemas/locks-and-leases/v1",
+  "title": "WOML Locks and Leases Contract v1",
+  "type": "object",
+  "additionalProperties": true,
+  "required": ["profile", "modelVersion", "eventVersion", "storeVersion", "inspectionVersion", "mode", "authority", "queue", "key", "timing", "limits", "unsupported", "fencing", "result"],
+  "properties": {
+    "profile": { "const": "woml.locks-and-leases/v1" },
+    "modelVersion": { "const": 18 },
+    "eventVersion": { "const": 17 },
+    "storeVersion": { "const": 16 },
+    "inspectionVersion": { "const": 1 },
+    "mode": { "const": "exclusive" },
+    "authority": { "const": "durable-state-authority-plus-canonical-key" },
+    "queue": { "const": "durable-fifo-oldest-eligible-first" },
+    "key": { "type": "object" },
+    "timing": { "type": "object" },
+    "limits": { "type": "object" },
+    "unsupported": { "type": "array", "minItems": 1, "uniqueItems": true },
+    "fencing": { "type": "object" },
+    "result": { "type": "object" }
+  }
+}

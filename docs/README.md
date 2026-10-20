@@ -28,6 +28,7 @@ or schema documents to write and run a workflow.
 | Durable objects | [Storage](woml-storage.md) |
 | Immutable files and evidence | [Durable Artifacts](woml-durable-artifacts.md) |
 | Timers and external callbacks | [Durable Waits and External Signals](woml-durable-waits.md) |
+| Shared-resource coordination | [Locks and Leases](woml-locks-and-leases.md) |
 | Temporary acceleration | [Cache](woml-cache.md) |
 | Durable workflow memory | [Durable state](woml-durable-state.md) |
 | Internal workflow events | [Events service](woml-events-service.md) |
@@ -49,6 +50,7 @@ or schema documents to write and run a workflow.
 | Retention and pruning | [Retention and maintenance](woml-retention-and-maintenance.md) |
 | Secrets and local data | [Data security](woml-data-security.md) |
 | Choosing storage/state/cache/database | [Data guide](woml-data-guide.md) |
+| Lock contention and recovery | [Locks operations runbook](woml-lock-operations.md) |
 
 Provider-specific setup is available for [Telegram](telegram.md),
 [Discord](discord.md), and [WhatsApp](whatsapp.md).

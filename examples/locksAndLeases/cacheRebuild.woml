@@ -1,0 +1,21 @@
+<woml>
+  <workflow id="cache-rebuild" name="Exclusive cache rebuild" description="Rebuild one shared cache namespace without overlapping publishers." version="1.0.0">
+    <triggers><manual id="start" /></triggers>
+    <steps>
+      <step id="plan" name="Select cache namespace"><script>return { namespace: "catalog-v3", segments: ["products", "prices", "availability"] };</script></step>
+      <lock id="rebuild" name="Own cache rebuild" key="cache/{{context.steps.plan.namespace}}" acquire-timeout="10m" lease="45s">
+        <for-each id="segments" name="Build cache segments" items="{{context.steps.plan.segments}}" concurrency="3">
+          <step id="buildSegment" name="Build segment">
+            <script>
+              await services.cache.set(`${context.steps.plan.namespace}:${context.item}`, { rebuiltAt: new Date().toISOString(), fencingToken: context.lock.fencingToken }, { ttl: "1h" });
+              return { segment: context.item };
+            </script>
+          </step>
+          <result value="{{context.steps.buildSegment}}" />
+        </for-each>
+        <step id="publish" name="Publish rebuilt cache"><script>return { namespace: context.steps.plan.namespace, fencingToken: context.lock.fencingToken };</script></step>
+      </lock>
+      <step id="done" name="Return rebuild result"><script>return context.steps.rebuild;</script></step>
+    </steps>
+  </workflow>
+</woml>

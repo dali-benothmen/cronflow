@@ -229,6 +229,68 @@ fn restore_upgrades_v13_on_the_temporary_copy_and_rejects_future_stores() {
 }
 
 #[test]
+fn restore_clears_live_lock_ownership_without_reusing_fencing_tokens() {
+  let directory = TestDirectory::new("lock-epoch");
+  let restored = directory.join("restored.sqlite");
+  seed(&restored);
+  let now = Utc::now();
+  let connection = Connection::open(&restored).unwrap();
+  connection
+    .execute(
+      "INSERT INTO woml_lock_resources(
+         key, fencing_high_water, owner_lease_id, owner_run_id,
+         owner_node_execution_id, owner_fencing_token, acquired_at,
+         expires_at, updated_at
+       ) VALUES ('deployment/payments', 42, 'lease_before_restore', 'run_pro7',
+         'deploy', 42, ?1, ?2, ?1)",
+      params![now.to_rfc3339(), (now + Duration::minutes(5)).to_rfc3339()],
+    )
+    .unwrap();
+  connection
+    .execute(
+      "INSERT INTO woml_lock_waiters(
+         waiter_id, key, run_id, node_execution_id, sequence, registered_at,
+         deadline, status, input_digest
+       ) VALUES ('waiter_before_restore', 'deployment/payments', 'run_pro7',
+         'deploy', 1, ?1, ?2, 'held', ?3)",
+      params![
+        now.to_rfc3339(),
+        (now + Duration::minutes(10)).to_rfc3339(),
+        format!("sha256:{}", "a".repeat(64))
+      ],
+    )
+    .unwrap();
+  drop(connection);
+
+  prepare_restored_store(
+    &restored,
+    &[HELLO_HASH.to_string()],
+    "backup_with_live_lock",
+    now + Duration::seconds(1),
+  )
+  .unwrap();
+  let connection = Connection::open(&restored).unwrap();
+  let (high_water, owner): (i64, Option<String>) = connection
+    .query_row(
+      "SELECT fencing_high_water, owner_lease_id FROM woml_lock_resources
+       WHERE key = 'deployment/payments'",
+      [],
+      |row| Ok((row.get(0)?, row.get(1)?)),
+    )
+    .unwrap();
+  let waiter_status: String = connection
+    .query_row(
+      "SELECT status FROM woml_lock_waiters WHERE waiter_id = 'waiter_before_restore'",
+      [],
+      |row| row.get(0),
+    )
+    .unwrap();
+  assert_eq!(high_water, 42);
+  assert!(owner.is_none());
+  assert_eq!(waiter_status, "lost");
+}
+
+#[test]
 fn maintenance_conflict_fails_without_leaving_a_partial_database() {
   let directory = TestDirectory::new("lease");
   let source = directory.join("source.sqlite");

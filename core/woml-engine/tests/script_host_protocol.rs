@@ -35,6 +35,7 @@ fn context() -> WorkflowContext {
   WorkflowContext {
     trigger: Map::new(),
     steps: Map::new(),
+    lock: None,
   }
 }
 

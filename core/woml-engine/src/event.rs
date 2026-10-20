@@ -7,10 +7,10 @@ use crate::{
   capability::{validate_safe_metadata, CapabilityFailure},
   RUN_EVENT_SCHEMA_VERSION_V1, RUN_EVENT_SCHEMA_VERSION_V10, RUN_EVENT_SCHEMA_VERSION_V11,
   RUN_EVENT_SCHEMA_VERSION_V12, RUN_EVENT_SCHEMA_VERSION_V13, RUN_EVENT_SCHEMA_VERSION_V14,
-  RUN_EVENT_SCHEMA_VERSION_V15, RUN_EVENT_SCHEMA_VERSION_V16, RUN_EVENT_SCHEMA_VERSION_V2,
-  RUN_EVENT_SCHEMA_VERSION_V3, RUN_EVENT_SCHEMA_VERSION_V4, RUN_EVENT_SCHEMA_VERSION_V5,
-  RUN_EVENT_SCHEMA_VERSION_V6, RUN_EVENT_SCHEMA_VERSION_V7, RUN_EVENT_SCHEMA_VERSION_V8,
-  RUN_EVENT_SCHEMA_VERSION_V9,
+  RUN_EVENT_SCHEMA_VERSION_V15, RUN_EVENT_SCHEMA_VERSION_V16, RUN_EVENT_SCHEMA_VERSION_V17,
+  RUN_EVENT_SCHEMA_VERSION_V2, RUN_EVENT_SCHEMA_VERSION_V3, RUN_EVENT_SCHEMA_VERSION_V4,
+  RUN_EVENT_SCHEMA_VERSION_V5, RUN_EVENT_SCHEMA_VERSION_V6, RUN_EVENT_SCHEMA_VERSION_V7,
+  RUN_EVENT_SCHEMA_VERSION_V8, RUN_EVENT_SCHEMA_VERSION_V9,
 };
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -83,6 +83,12 @@ pub enum RunEventPayload {
   WaitSatisfied(WaitSatisfiedData),
   WaitTimedOut(WaitTimedOutData),
   WaitCancelled(WaitCancelledData),
+  LockWaitRegistered(LockWaitRegisteredData),
+  LockAcquired(LockAcquiredData),
+  LockReleased(LockReleasedData),
+  LockAcquireTimedOut(LockAcquireTimedOutData),
+  LockAcquisitionCancelled(LockAcquisitionCancelledData),
+  LockLeaseLost(LockLeaseLostData),
   RunOutcomeDecided(RunOutcomeDecidedData),
   RunFinalized(RunFinalizedData),
   RunSucceeded(RunSucceededData),
@@ -165,6 +171,70 @@ pub struct WaitCancelledData {
   pub wait_id: String,
   pub cancelled_at: DateTime<Utc>,
   pub cancellation_id: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct LockWaitRegisteredData {
+  pub lock_id: String,
+  pub key: String,
+  pub waiter_sequence: u64,
+  pub registered_at: DateTime<Utc>,
+  pub deadline: DateTime<Utc>,
+  pub execution_identity: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct LockAcquiredData {
+  pub lock_id: String,
+  pub key: String,
+  pub lease_id: String,
+  pub fencing_token: String,
+  pub acquired_at: DateTime<Utc>,
+  pub expires_at: DateTime<Utc>,
+  pub execution_identity: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct LockReleasedData {
+  pub lock_id: String,
+  pub key: String,
+  pub lease_id: String,
+  pub fencing_token: String,
+  pub released_at: DateTime<Utc>,
+  pub result: Value,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct LockAcquireTimedOutData {
+  pub lock_id: String,
+  pub key: String,
+  pub deadline: DateTime<Utc>,
+  pub resolved_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct LockAcquisitionCancelledData {
+  pub lock_id: String,
+  pub key: String,
+  pub cancelled_at: DateTime<Utc>,
+  pub cancellation_id: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct LockLeaseLostData {
+  pub lock_id: String,
+  pub key: String,
+  pub lease_id: String,
+  pub fencing_token: String,
+  pub expired_at: DateTime<Utc>,
+  pub detected_at: DateTime<Utc>,
+  pub ambiguous: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -1256,6 +1326,22 @@ fn valid_signal_name(value: &str) -> bool {
     })
 }
 
+fn valid_lock_key(value: &str) -> bool {
+  !value.is_empty()
+    && value.len() <= 256
+    && value.trim() == value
+    && !value.chars().any(char::is_control)
+    && !value.split('/').any(str::is_empty)
+}
+
+fn valid_fencing_token(value: &str) -> bool {
+  !value.is_empty()
+    && value.len() <= 20
+    && value.bytes().all(|byte| byte.is_ascii_digit())
+    && (value == "0" || !value.starts_with('0'))
+    && value.parse::<u64>().is_ok_and(|token| token > 0)
+}
+
 fn validate_operation_base(
   event_schema_version: u32,
   node_id: &str,
@@ -1583,6 +1669,7 @@ impl RunEvent {
         | RUN_EVENT_SCHEMA_VERSION_V14
         | RUN_EVENT_SCHEMA_VERSION_V15
         | RUN_EVENT_SCHEMA_VERSION_V16
+        | RUN_EVENT_SCHEMA_VERSION_V17
     ) {
       return Err(EventValidationError::UnsupportedSchemaVersion(
         self.event_schema_version,
@@ -1612,6 +1699,29 @@ impl RunEvent {
         | RunEventPayload::WaitTimedOut(_)
         | RunEventPayload::WaitCancelled(_)
     );
+    let lock_event = matches!(
+      self.payload,
+      RunEventPayload::LockWaitRegistered(_)
+        | RunEventPayload::LockAcquired(_)
+        | RunEventPayload::LockReleased(_)
+        | RunEventPayload::LockAcquireTimedOut(_)
+        | RunEventPayload::LockAcquisitionCancelled(_)
+        | RunEventPayload::LockLeaseLost(_)
+    );
+    if self.event_schema_version == RUN_EVENT_SCHEMA_VERSION_V17 && !lock_event {
+      let mut inherited = self.clone();
+      inherited.event_schema_version = RUN_EVENT_SCHEMA_VERSION_V16;
+      return inherited.validate();
+    }
+    if self.event_schema_version == RUN_EVENT_SCHEMA_VERSION_V17
+      && self.iteration.as_ref().is_some_and(|scope| {
+        !valid_public_structural_id(&scope.for_each_id) || scope.index >= 10_000
+      })
+    {
+      return Err(EventValidationError::Invalid(
+        "Event v17 lock iteration scope is invalid.".to_string(),
+      ));
+    }
     if self.event_schema_version == RUN_EVENT_SCHEMA_VERSION_V16 && !wait_event {
       let mut inherited = self.clone();
       inherited.event_schema_version = RUN_EVENT_SCHEMA_VERSION_V15;
@@ -1666,7 +1776,7 @@ impl RunEvent {
     }
     if !matches!(
       self.event_schema_version,
-      RUN_EVENT_SCHEMA_VERSION_V15 | RUN_EVENT_SCHEMA_VERSION_V16
+      RUN_EVENT_SCHEMA_VERSION_V15 | RUN_EVENT_SCHEMA_VERSION_V16 | RUN_EVENT_SCHEMA_VERSION_V17
     ) && self.iteration.is_some()
     {
       return Err(EventValidationError::Invalid(
@@ -2574,6 +2684,88 @@ impl RunEvent {
         {
           return Err(EventValidationError::Invalid(
             "wait_cancelled does not match the frozen Event v16 cancellation contract.".to_string(),
+          ));
+        }
+      }
+      RunEventPayload::LockWaitRegistered(data) => {
+        if self.event_schema_version != RUN_EVENT_SCHEMA_VERSION_V17
+          || !valid_public_structural_id(&data.lock_id)
+          || !valid_lock_key(&data.key)
+          || data.waiter_sequence == 0
+          || data.registered_at != self.occurred_at
+          || data.deadline < data.registered_at
+          || !valid_id(&data.execution_identity)
+        {
+          return Err(EventValidationError::Invalid(
+            "lock_wait_registered does not match the frozen Event v17 contract.".to_string(),
+          ));
+        }
+      }
+      RunEventPayload::LockAcquired(data) => {
+        if self.event_schema_version != RUN_EVENT_SCHEMA_VERSION_V17
+          || !valid_public_structural_id(&data.lock_id)
+          || !valid_lock_key(&data.key)
+          || !valid_prefixed_id(&data.lease_id, "lease_", 7)
+          || !valid_fencing_token(&data.fencing_token)
+          || data.acquired_at != self.occurred_at
+          || data.expires_at <= data.acquired_at
+          || !valid_id(&data.execution_identity)
+        {
+          return Err(EventValidationError::Invalid(
+            "lock_acquired does not match the frozen Event v17 contract.".to_string(),
+          ));
+        }
+      }
+      RunEventPayload::LockReleased(data) => {
+        if self.event_schema_version != RUN_EVENT_SCHEMA_VERSION_V17
+          || !valid_public_structural_id(&data.lock_id)
+          || !valid_lock_key(&data.key)
+          || !valid_prefixed_id(&data.lease_id, "lease_", 7)
+          || !valid_fencing_token(&data.fencing_token)
+          || data.released_at != self.occurred_at
+          || !data.result.is_object()
+          || serde_json::to_vec(&data.result).map_or(true, |result| result.len() > 1_048_576)
+        {
+          return Err(EventValidationError::Invalid(
+            "lock_released does not match the frozen Event v17 contract.".to_string(),
+          ));
+        }
+      }
+      RunEventPayload::LockAcquireTimedOut(data) => {
+        if self.event_schema_version != RUN_EVENT_SCHEMA_VERSION_V17
+          || !valid_public_structural_id(&data.lock_id)
+          || !valid_lock_key(&data.key)
+          || data.resolved_at != self.occurred_at
+          || data.resolved_at < data.deadline
+        {
+          return Err(EventValidationError::Invalid(
+            "lock_acquire_timed_out does not match the frozen Event v17 contract.".to_string(),
+          ));
+        }
+      }
+      RunEventPayload::LockAcquisitionCancelled(data) => {
+        if self.event_schema_version != RUN_EVENT_SCHEMA_VERSION_V17
+          || !valid_public_structural_id(&data.lock_id)
+          || !valid_lock_key(&data.key)
+          || data.cancelled_at != self.occurred_at
+          || !valid_id(&data.cancellation_id)
+        {
+          return Err(EventValidationError::Invalid(
+            "lock_acquisition_cancelled does not match the frozen Event v17 contract.".to_string(),
+          ));
+        }
+      }
+      RunEventPayload::LockLeaseLost(data) => {
+        if self.event_schema_version != RUN_EVENT_SCHEMA_VERSION_V17
+          || !valid_public_structural_id(&data.lock_id)
+          || !valid_lock_key(&data.key)
+          || !valid_prefixed_id(&data.lease_id, "lease_", 7)
+          || !valid_fencing_token(&data.fencing_token)
+          || data.detected_at != self.occurred_at
+          || data.detected_at < data.expired_at
+        {
+          return Err(EventValidationError::Invalid(
+            "lock_lease_lost does not match the frozen Event v17 contract.".to_string(),
           ));
         }
       }

@@ -1,0 +1,25 @@
+<woml>
+  <imports>
+    <module name="increment" from="./increment.woml" />
+  </imports>
+
+  <workflow id="lock-reusable">
+    <triggers>
+      <manual id="start" />
+    </triggers>
+
+    <steps>
+      <step id="prepare">
+        <script>return { value: 41 };</script>
+      </step>
+
+      <lock id="counterLock" key="counter/main" acquire-timeout="1m">
+        <increment id="incrementValue" value="{{context.steps.prepare.value}}" />
+      </lock>
+
+      <step id="done">
+        <script>return context.steps.counterLock;</script>
+      </step>
+    </steps>
+  </workflow>
+</woml>

@@ -1,0 +1,25 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://woml.dev/schemas/run-event/v17",
+  "title": "WOML Lock Run Event v17",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schemaVersion", "type", "runId", "sequence", "at", "data"],
+  "properties": {
+    "schemaVersion": { "const": 17 },
+    "type": { "enum": ["lock_wait_registered", "lock_acquired", "lock_released", "lock_acquire_timed_out", "lock_acquisition_cancelled", "lock_lease_lost"] },
+    "runId": { "type": "string", "minLength": 1 },
+    "sequence": { "type": "integer", "minimum": 1 },
+    "at": { "type": "string", "format": "date-time" },
+    "data": {
+      "type": "object",
+      "additionalProperties": true,
+      "required": ["lockId", "key"],
+      "properties": {
+        "lockId": { "type": "string", "pattern": "^[a-z][A-Za-z0-9]*$" },
+        "key": { "type": "string", "minLength": 1, "maxLength": 256 },
+        "fencingToken": { "type": "string", "pattern": "^(0|[1-9][0-9]*)$" }
+      }
+    }
+  }
+}

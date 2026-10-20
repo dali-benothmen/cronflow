@@ -1,5 +1,6 @@
 import type {
   RustArtifactObservationV1,
+  RustLockObservationV1,
   RustRunListV1,
   RustRuntimeObservationV1,
 } from './rust-executor';
@@ -183,6 +184,7 @@ export class RuntimeObservability implements RuntimeObservabilitySurface {
   readonly #listRuns: () => RustRunListV1;
   readonly #observeDurable?: () => RustRuntimeObservationV1;
   readonly #observeArtifacts?: () => RustArtifactObservationV1;
+  readonly #observeLocks?: () => RustLockObservationV1;
   readonly #storeSize: () => Promise<number>;
   readonly #emitLog: (text: string) => void;
   readonly #logFormat: 'text' | 'json';
@@ -211,6 +213,7 @@ export class RuntimeObservability implements RuntimeObservabilitySurface {
     readonly listRuns: () => RustRunListV1;
     readonly observeDurable?: () => RustRuntimeObservationV1;
     readonly observeArtifacts?: () => RustArtifactObservationV1;
+    readonly observeLocks?: () => RustLockObservationV1;
     readonly storeSize: () => Promise<number>;
     readonly logFormat: 'text' | 'json';
     readonly emitLog: (text: string) => void;
@@ -227,6 +230,7 @@ export class RuntimeObservability implements RuntimeObservabilitySurface {
     this.#listRuns = options.listRuns;
     this.#observeDurable = options.observeDurable;
     this.#observeArtifacts = options.observeArtifacts;
+    this.#observeLocks = options.observeLocks;
     this.#storeSize = options.storeSize;
     this.#logFormat = options.logFormat;
     this.#emitLog = options.emitLog;
@@ -554,6 +558,7 @@ export class RuntimeObservability implements RuntimeObservabilitySurface {
     });
     const durable = this.#observeDurable?.();
     const artifacts = this.#observeArtifacts?.();
+    const locks = this.#observeLocks?.();
     const statusTotal = (status: string): number =>
       durable?.statusTotals[status] ??
       snapshot.runs.filter(run => run.status === status).length;
@@ -608,6 +613,36 @@ export class RuntimeObservability implements RuntimeObservabilitySurface {
         artifactMetric('woml_artifact_orphans_total', 'gauge', artifacts.orphanBlobs, artifacts.backend),
         artifactMetric('woml_artifacts_live', 'gauge', artifacts.liveArtifacts, artifacts.backend),
         artifactMetric('woml_artifact_live_bytes', 'gauge', artifacts.liveBytes, artifacts.backend)
+      );
+    }
+    if (locks !== undefined) {
+      results.push(
+        metric('woml_locks_held', 'gauge', locks.heldLocks),
+        metric(
+          'woml_lock_acquisitions_waiting',
+          'gauge',
+          locks.waitingAcquisitions
+        ),
+        metric(
+          'woml_lock_oldest_waiter_age_seconds',
+          'gauge',
+          (locks.oldestWaiterAgeMs ?? 0) / 1000
+        ),
+        metric(
+          'woml_lock_renewal_failures_total',
+          'counter',
+          locks.renewalFailures
+        ),
+        metric(
+          'woml_lock_expired_takeovers_total',
+          'counter',
+          locks.expiredTakeovers
+        ),
+        metric(
+          'woml_lock_acquisition_timeouts_total',
+          'counter',
+          locks.acquisitionTimeouts
+        )
       );
     }
     for (const [operation, status] of [

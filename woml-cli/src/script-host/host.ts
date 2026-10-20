@@ -82,7 +82,7 @@ function moduleRegisteredMessage(
   return request.protocolVersion === 6 ||
     request.protocolVersion === 7 ||
     request.protocolVersion === 8 ||
-    request.protocolVersion === 9
+    (request.protocolVersion === 9 || request.protocolVersion === 10)
     ? {
         ...base,
         protocolVersion: request.protocolVersion,
@@ -233,7 +233,7 @@ export class ScriptHost {
       message.protocolVersion === 6 ||
       message.protocolVersion === 7 ||
       message.protocolVersion === 8 ||
-      message.protocolVersion === 9
+      (message.protocolVersion === 9 || message.protocolVersion === 10)
         ? `sha256:${new Bun.CryptoHasher('sha256')
             .update(message.sourceMap)
             .digest('hex')}`
@@ -243,7 +243,7 @@ export class ScriptHost {
       ((message.protocolVersion === 6 ||
         message.protocolVersion === 7 ||
         message.protocolVersion === 8 ||
-        message.protocolVersion === 9) &&
+        (message.protocolVersion === 9 || message.protocolVersion === 10)) &&
         sourceMapDigest !== message.sourceMapDigest);
     if (digestMismatch) {
       void this.#send(
@@ -263,7 +263,7 @@ export class ScriptHost {
         ((message.protocolVersion === 6 ||
           message.protocolVersion === 7 ||
           message.protocolVersion === 8 ||
-          message.protocolVersion === 9) &&
+          (message.protocolVersion === 9 || message.protocolVersion === 10)) &&
           (existing.sourceMap !== message.sourceMap ||
             existing.sourceMapDigest !== message.sourceMapDigest)))
     ) {
@@ -276,7 +276,7 @@ export class ScriptHost {
       (message.protocolVersion === 6 ||
       message.protocolVersion === 7 ||
       message.protocolVersion === 8 ||
-      message.protocolVersion === 9
+      (message.protocolVersion === 9 || message.protocolVersion === 10)
         ? Buffer.byteLength(message.sourceMap, 'utf8')
         : 0);
     const individualLimitExceeded =
@@ -284,7 +284,7 @@ export class ScriptHost {
       ((message.protocolVersion === 6 ||
         message.protocolVersion === 7 ||
         message.protocolVersion === 8 ||
-        message.protocolVersion === 9) &&
+        (message.protocolVersion === 9 || message.protocolVersion === 10)) &&
         Buffer.byteLength(message.sourceMap, 'utf8') >
           MAX_MODULE_ARTIFACT_BYTES);
     if (
@@ -308,7 +308,7 @@ export class ScriptHost {
         ...(message.protocolVersion === 6 ||
         message.protocolVersion === 7 ||
         message.protocolVersion === 8 ||
-        message.protocolVersion === 9
+        (message.protocolVersion === 9 || message.protocolVersion === 10)
           ? {
               sourceMap: message.sourceMap,
               sourceMapDigest: message.sourceMapDigest,
@@ -527,7 +527,7 @@ export class ScriptHost {
           request.protocolVersion === 6 ||
           request.protocolVersion === 7 ||
           request.protocolVersion === 8 ||
-          request.protocolVersion === 9) &&
+          (request.protocolVersion === 9 || request.protocolVersion === 10)) &&
         containsKnownSecret(
           response.result,
           Object.values(request.bindings.secrets)
@@ -554,7 +554,7 @@ export class ScriptHost {
         request.protocolVersion === 6 ||
         request.protocolVersion === 7 ||
         request.protocolVersion === 8 ||
-        request.protocolVersion === 9) &&
+        (request.protocolVersion === 9 || request.protocolVersion === 10)) &&
       includesSecret
     ) {
       await this.#send(
@@ -706,7 +706,7 @@ export class ScriptHost {
               request.protocolVersion !== 6 &&
               request.protocolVersion !== 7 &&
               request.protocolVersion !== 8 &&
-              request.protocolVersion !== 9) ||
+              (request.protocolVersion !== 9 && request.protocolVersion !== 10)) ||
             observation.invocationId !== request.invocationId
           ) {
             finish({
@@ -757,7 +757,7 @@ export class ScriptHost {
             request.protocolVersion !== 6 &&
             request.protocolVersion !== 7 &&
             request.protocolVersion !== 8 &&
-            request.protocolVersion !== 9) ||
+            (request.protocolVersion !== 9 && request.protocolVersion !== 10)) ||
           call.invocationId !== request.invocationId ||
           call.runId !== request.runId ||
           call.nodeId !== request.nodeId ||
@@ -821,7 +821,7 @@ export class ScriptHost {
           request.protocolVersion === 6 ||
           request.protocolVersion === 7 ||
           request.protocolVersion === 8 ||
-          request.protocolVersion === 9
+          (request.protocolVersion === 9 || request.protocolVersion === 10)
             ? request.attempt
             : undefined;
         profileSync('host', 'host.post_worker_request', measurements => {
@@ -842,7 +842,7 @@ export class ScriptHost {
             context: request.context,
             ...(request.protocolVersion === 7 ||
             request.protocolVersion === 8 ||
-            request.protocolVersion === 9
+            (request.protocolVersion === 9 || request.protocolVersion === 10)
               ? {
                   mode: request.mode,
                   ...(request.mode === 'lifecycle'
@@ -850,7 +850,7 @@ export class ScriptHost {
                     : {}),
                 }
               : {}),
-            ...((request.protocolVersion === 8 || request.protocolVersion === 9) &&
+            ...((request.protocolVersion === 8 || (request.protocolVersion === 9 || request.protocolVersion === 10)) &&
             request.reusable !== undefined
               ? {
                   reusable: request.reusable,
@@ -865,14 +865,14 @@ export class ScriptHost {
             request.protocolVersion === 6 ||
             request.protocolVersion === 7 ||
             request.protocolVersion === 8 ||
-            request.protocolVersion === 9
+            (request.protocolVersion === 9 || request.protocolVersion === 10)
               ? { bindings: request.bindings }
               : {}),
             ...(request.protocolVersion === 5 ||
             request.protocolVersion === 6 ||
             request.protocolVersion === 7 ||
             request.protocolVersion === 8 ||
-            request.protocolVersion === 9
+            (request.protocolVersion === 9 || request.protocolVersion === 10)
               ? {
                   modules: request.modules.map(module => {
                     const artifact = this.#moduleBundles.get(
@@ -889,7 +889,7 @@ export class ScriptHost {
                       ...(request.protocolVersion === 6 ||
                       request.protocolVersion === 7 ||
                       request.protocolVersion === 8 ||
-                      request.protocolVersion === 9
+                      (request.protocolVersion === 9 || request.protocolVersion === 10)
                         ? {
                             sourceMap: artifact.sourceMap,
                             sourceMapDigest: artifact.sourceMapDigest,
