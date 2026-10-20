@@ -48,6 +48,7 @@ describe('WOML release automation', () => {
       'cli',
       'documentation',
       'frontend',
+      'lock-authority',
       'package',
       'process-containment',
       'rust',
