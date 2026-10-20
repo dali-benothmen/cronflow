@@ -22,7 +22,7 @@ use sha2::{Digest, Sha256};
 use crate::{
   CapabilityCallRequest, CapabilityCancellationToken, CapabilityDescriptor, CapabilityEffect,
   CapabilityFailure, CapabilityFailureKind, CapabilityHandler, DurableEventStore,
-  LockLeaseMaintenance, ProgrammaticLockAcquireState,
+  DurableStoreError, LockLeaseMaintenance, ProgrammaticLockAcquireState,
 };
 
 pub const LOCKS_CAPABILITY_CONTRACT: &str = "woml.locks-capability";
@@ -161,7 +161,7 @@ impl ManagedLocksService {
       Ok(state) => state,
       Err(error) => {
         self.release_reservation(&request.invocation_id, &session_id);
-        return Err(map_store_error(&error.to_string()));
+        return Err(map_store_error(&error));
       }
     };
 
@@ -202,7 +202,7 @@ impl ManagedLocksService {
       }
       state = store
         .programmatic_lock_state(&request.run_id, &session_id, input.lease_ms, Utc::now())
-        .map_err(|error| map_store_error(&error.to_string()))?;
+        .map_err(|error| map_store_error(&error))?;
     }
 
     let lease = state.lease.ok_or_else(stale)?;
@@ -283,7 +283,7 @@ impl ManagedLocksService {
         session.lease_ms,
         Utc::now(),
       )
-      .map_err(|error| map_store_error(&error.to_string()))?;
+      .map_err(|error| map_store_error(&error))?;
     if state.state != ProgrammaticLockAcquireState::Held {
       return Err(stale());
     }
@@ -311,7 +311,7 @@ impl ManagedLocksService {
         session.lease_ms,
         released_at,
       )
-      .map_err(|error| map_store_error(&error.to_string()))?;
+      .map_err(|error| map_store_error(&error))?;
     self
       .sessions
       .lock()
@@ -406,7 +406,7 @@ impl ManagedLocksService {
     let state = self
       .open_store()?
       .programmatic_lock_state(&session.run_id, &session_id, session.lease_ms, Utc::now())
-      .map_err(|error| map_store_error(&error.to_string()))?;
+      .map_err(|error| map_store_error(&error))?;
     Ok(state.state == ProgrammaticLockAcquireState::Held)
   }
 
@@ -605,7 +605,24 @@ fn lock_session_ref(session_id: &str) -> String {
   )
 }
 
-fn map_store_error(message: &str) -> CapabilityFailure {
+fn map_store_error(error: &DurableStoreError) -> CapabilityFailure {
+  if matches!(error, DurableStoreError::LockWaitLimit) {
+    return failure(
+      CapabilityFailureKind::ServiceRejected,
+      "WOML_LOCK_WAIT_LIMIT",
+      "The durable lock wait queue reached its safety limit. Retry after current holders or waiters finish, or reduce contention on this key.",
+      true,
+    );
+  }
+  if matches!(error, DurableStoreError::LockFencingExhausted) {
+    return failure(
+      CapabilityFailureKind::ServiceRejected,
+      "WOML_LOCK_FENCING_EXHAUSTED",
+      "The lock exhausted its fencing-token space. Stop using this key and restore service with operator review; token reuse is forbidden.",
+      false,
+    );
+  }
+  let message = error.to_string();
   if message.contains("inside a markup <lock>") {
     return failure(
       CapabilityFailureKind::ServiceRejected,

@@ -12,7 +12,7 @@ use thiserror::Error;
 use crate::{DurableEventStore, DurableStateStore, DURABLE_STORE_SCHEMA_VERSION};
 
 const MAINTENANCE_LEASE_SECONDS: i64 = 300;
-const SUPPORTED_BACKUP_STORE_VERSIONS: [u32; 3] = [13, 14, 15];
+const SUPPORTED_BACKUP_STORE_VERSIONS: [u32; 4] = [13, 14, 15, 16];
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -350,6 +350,21 @@ pub fn prepare_restored_store(
   transaction.execute("DELETE FROM woml_maintenance_lease", [])?;
   transaction.execute("DELETE FROM woml_scheduler_claims", [])?;
   transaction.execute("DELETE FROM woml_workflow_runtime_routes", [])?;
+  // A restored database is a new runtime epoch. Never resurrect an owner
+  // whose process may still be alive against the source store. Waiting
+  // acquisitions remain durable, while held acquisitions become explicitly
+  // lost and the monotonic fencing high-water is preserved on each resource.
+  transaction.execute(
+    "UPDATE woml_lock_waiters SET status = 'lost' WHERE status = 'held'",
+    [],
+  )?;
+  transaction.execute(
+    "UPDATE woml_lock_resources SET owner_lease_id = NULL, owner_run_id = NULL,
+       owner_node_execution_id = NULL, owner_fencing_token = NULL,
+       acquired_at = NULL, expires_at = NULL, updated_at = ?1
+     WHERE owner_lease_id IS NOT NULL",
+    [restored_at.to_rfc3339()],
+  )?;
   transaction.execute(
     "INSERT INTO woml_last_verified_backup(singleton, backup_id, completed_at, verified)
      VALUES (1, ?1, ?2, 1)

@@ -100,8 +100,8 @@ pub use durable::{
   InspectedWaitStatusV1, InspectedWaitV1, InternalEventAdmissionOutcome,
   InternalEventAdmissionRequest, IntervalCursor, IntervalCursorRegistration,
   IntervalCursorRegistrationOutcome, IssuedApprovalToken, LockInspectionV1, LockLeaseMaintenance,
-  LockObservationV1, NotificationDeliveryWork, NotificationDispatchReport,
-  NotificationProviderAdapter, NotificationProviderDeliveryResult,
+  LockObservationV1, LockRecoveryCandidateV1, LockRecoveryKindV1, NotificationDeliveryWork,
+  NotificationDispatchReport, NotificationProviderAdapter, NotificationProviderDeliveryResult,
   NotificationProviderUpdateResult, NotificationUpdateWork, PolicyClaimWaitReason,
   PolicyExecutionClaimResult, PolicyWaitingFor, ProgrammaticLockAcquire,
   ProgrammaticLockAcquireState, ProgrammaticLockLease, PublicRunStatus, RecoveryReport,
@@ -117,7 +117,8 @@ pub use durable::{
   TriggerAdmissionOutcome, TriggerAdmissionRequest, TriggerOccurrence, TriggerRecoveryWork,
   WaitInspectionV1, DURABLE_STORE_SCHEMA_VERSION, EXTERNAL_SIGNAL_ADMISSION_PROFILE,
   EXTERNAL_SIGNAL_MAX_EARLY_PER_RUN, EXTERNAL_SIGNAL_MAX_PAYLOAD_BYTES,
-  EXTERNAL_SIGNAL_MAX_PAYLOAD_DEPTH, EXTERNAL_SIGNAL_RESULT_PROFILE, RUNTIME_POLICY_QUEUE_CEILING,
+  EXTERNAL_SIGNAL_MAX_PAYLOAD_DEPTH, EXTERNAL_SIGNAL_RESULT_PROFILE, LOCK_RECOVERY_BATCH_LIMIT,
+  LOCK_WAITERS_PER_KEY_LIMIT, LOCK_WAITERS_PER_STORE_LIMIT, RUNTIME_POLICY_QUEUE_CEILING,
 };
 pub use durable_state::{
   DurableStateError, DurableStateExecution, DurableStateLimits, DurableStateStore, FixedStateClock,

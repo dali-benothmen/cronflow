@@ -1,5 +1,5 @@
 use chrono::{Duration, Utc};
-use rusqlite::Connection;
+use rusqlite::{params, Connection};
 use serde_json::{json, Map, Value};
 use std::path::{Path, PathBuf};
 use uuid::Uuid;
@@ -143,6 +143,35 @@ fn admitted_runs(count: usize, now: chrono::DateTime<Utc>) -> (DurableDagEngine,
     prepare_run(&mut engine, run_id, now);
   }
   (engine, run_ids)
+}
+
+fn admitted_run_on_disk(path: &Path, now: chrono::DateTime<Utc>) -> (String, DurableDagEngine) {
+  let workflow = model();
+  let mut store = DurableEventStore::open(path).unwrap();
+  store.register_definition(&workflow, HASH).unwrap();
+  let run_id = store
+    .admit_trigger_occurrence(TriggerAdmissionRequest {
+      workflow_id: workflow.workflow_id.clone(),
+      definition_hash: HASH.to_string(),
+      trigger_id: "start".to_string(),
+      trigger_handler: "trigger.manual".to_string(),
+      source_identity: format!("hardening-{}", Uuid::new_v4().simple()),
+      payload: Map::new(),
+      received_at: now,
+    })
+    .unwrap()
+    .run_id;
+  store
+    .claim_policy_run(
+      &run_id,
+      "hardening-owner",
+      now,
+      std::time::Duration::from_secs(30),
+    )
+    .unwrap();
+  let mut engine = DurableDagEngine::resume(store, &run_id).unwrap();
+  prepare_run(&mut engine, &run_id, now);
+  (run_id, engine)
 }
 
 #[test]
@@ -1019,4 +1048,242 @@ async fn a_failed_lock_body_releases_before_the_run_fails() {
   }
   tokens.sort();
   assert_eq!(tokens, vec!["1", "2"]);
+}
+
+#[test]
+fn hostile_keys_are_rejected_and_clock_rollback_never_shortens_a_lease() {
+  let now = Utc::now();
+  let (mut engine, runs) = admitted_runs(1, now);
+  let error = engine
+    .register_lock_waiter(
+      &runs[0],
+      "deployment",
+      "production//payments",
+      now,
+      now + Duration::minutes(10),
+    )
+    .unwrap_err();
+  assert!(matches!(
+    error,
+    woml_engine::DurableEngineError::Store(woml_engine::DurableStoreError::Contract(_))
+  ));
+
+  engine
+    .register_lock_waiter(
+      &runs[0],
+      "deployment",
+      "production/payments",
+      now,
+      now + Duration::minutes(10),
+    )
+    .unwrap();
+  engine
+    .renew_lock_lease(&runs[0], "deployment", now + Duration::seconds(10))
+    .unwrap();
+  let store = engine.into_store();
+  let first_expiry = store.inspect_locks_v1(&runs[0]).unwrap()[0]
+    .expires_at
+    .unwrap();
+  let mut engine = DurableDagEngine::resume(store, &runs[0]).unwrap();
+  engine
+    .renew_lock_lease(&runs[0], "deployment", now + Duration::seconds(5))
+    .unwrap();
+  let second_expiry = engine.into_store().inspect_locks_v1(&runs[0]).unwrap()[0]
+    .expires_at
+    .unwrap();
+  assert_eq!(second_expiry, first_expiry);
+}
+
+#[test]
+fn wait_limits_fail_closed_while_an_uncontended_key_can_still_start() {
+  let now = Utc::now();
+  let database = TemporaryDatabase::new();
+  let (run_id, engine) = admitted_run_on_disk(database.path(), now);
+  drop(engine);
+  let mut connection = Connection::open(database.path()).unwrap();
+  let transaction = connection.transaction().unwrap();
+  for key_index in 0..10 {
+    let key = format!("backlog/{key_index}");
+    transaction
+      .execute(
+        "INSERT INTO woml_lock_resources(key, fencing_high_water, updated_at)
+         VALUES (?1, 0, ?2)",
+        params![key, now.to_rfc3339()],
+      )
+      .unwrap();
+    for waiter_index in 0..1_000 {
+      let ordinal = key_index * 1_000 + waiter_index;
+      transaction
+        .execute(
+          "INSERT INTO woml_lock_waiters(
+             waiter_id, key, run_id, node_execution_id, sequence,
+             registered_at, deadline, status, input_digest
+           ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 'waiting', ?8)",
+          params![
+            format!("seed_waiter_{ordinal}"),
+            key,
+            run_id,
+            format!("seed_execution_{ordinal}"),
+            waiter_index + 1,
+            now.to_rfc3339(),
+            (now + Duration::minutes(10)).to_rfc3339(),
+            format!("sha256:{ordinal:064x}")
+          ],
+        )
+        .unwrap();
+    }
+  }
+  transaction.commit().unwrap();
+  drop(connection);
+
+  let store = DurableEventStore::open(database.path()).unwrap();
+  let mut engine = DurableDagEngine::resume(store, &run_id).unwrap();
+  let acquired = engine
+    .register_lock_waiter(
+      &run_id,
+      "deployment",
+      "uncontended/deployment",
+      now,
+      now + Duration::minutes(10),
+    )
+    .unwrap();
+  assert_eq!(acquired.locks["deployment"].status, LockStatus::Held);
+}
+
+#[test]
+fn ten_thousand_due_waiters_are_recovered_in_bounded_batches() {
+  let now = Utc::now();
+  let database = TemporaryDatabase::new();
+  let (run_id, engine) = admitted_run_on_disk(database.path(), now);
+  drop(engine);
+  let mut connection = Connection::open(database.path()).unwrap();
+  let transaction = connection.transaction().unwrap();
+  for key_index in 0..10 {
+    let key = format!("recovery/{key_index}");
+    transaction
+      .execute(
+        "INSERT INTO woml_lock_resources(key, fencing_high_water, updated_at)
+         VALUES (?1, 0, ?2)",
+        params![key, now.to_rfc3339()],
+      )
+      .unwrap();
+    for waiter_index in 0..1_000 {
+      let ordinal = key_index * 1_000 + waiter_index;
+      transaction
+        .execute(
+          "INSERT INTO woml_lock_waiters(
+             waiter_id, key, run_id, node_execution_id, sequence,
+             registered_at, deadline, status, input_digest
+           ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 'waiting', ?8)",
+          params![
+            format!("recovery_waiter_{ordinal}"),
+            key,
+            run_id,
+            format!("recovery_execution_{ordinal}"),
+            waiter_index + 1,
+            (now - Duration::seconds(2)).to_rfc3339(),
+            (now - Duration::seconds(1)).to_rfc3339(),
+            format!("sha256:{ordinal:064x}")
+          ],
+        )
+        .unwrap();
+    }
+  }
+  transaction.commit().unwrap();
+  drop(connection);
+
+  let store = DurableEventStore::open(database.path()).unwrap();
+  let mut samples = Vec::with_capacity(30);
+  let mut batch = Vec::new();
+  for _ in 0..30 {
+    let started = std::time::Instant::now();
+    batch = store.lock_recovery_batch_v1(now).unwrap();
+    samples.push(started.elapsed());
+  }
+  samples.sort();
+  let p95 = samples[28];
+  println!("10,000-waiter recovery scan p95: {p95:?}");
+  assert!(p95 <= std::time::Duration::from_millis(100));
+  assert_eq!(batch.len(), woml_engine::LOCK_RECOVERY_BATCH_LIMIT);
+  assert!(batch
+    .iter()
+    .all(|candidate| { candidate.kind == woml_engine::LockRecoveryKindV1::AcquisitionTimeout }));
+}
+
+#[test]
+fn queue_and_fencing_exhaustion_have_distinct_durable_failures() {
+  let now = Utc::now();
+  let queue_database = TemporaryDatabase::new();
+  let (run_id, engine) = admitted_run_on_disk(queue_database.path(), now);
+  drop(engine);
+  let mut connection = Connection::open(queue_database.path()).unwrap();
+  let transaction = connection.transaction().unwrap();
+  transaction
+    .execute(
+      "INSERT INTO woml_lock_resources(key, fencing_high_water, updated_at)
+       VALUES ('hot/key', 0, ?1)",
+      [now.to_rfc3339()],
+    )
+    .unwrap();
+  for index in 0..woml_engine::LOCK_WAITERS_PER_KEY_LIMIT {
+    transaction
+      .execute(
+        "INSERT INTO woml_lock_waiters(
+           waiter_id, key, run_id, node_execution_id, sequence,
+           registered_at, deadline, status, input_digest
+         ) VALUES (?1, 'hot/key', ?2, ?3, ?4, ?5, ?6, 'waiting', ?7)",
+        params![
+          format!("hot_waiter_{index}"),
+          run_id,
+          format!("hot_execution_{index}"),
+          index + 1,
+          now.to_rfc3339(),
+          (now + Duration::minutes(10)).to_rfc3339(),
+          format!("sha256:{index:064x}")
+        ],
+      )
+      .unwrap();
+  }
+  transaction.commit().unwrap();
+  drop(connection);
+  let store = DurableEventStore::open(queue_database.path()).unwrap();
+  let mut engine = DurableDagEngine::resume(store, &run_id).unwrap();
+  assert!(matches!(
+    engine.register_lock_waiter(
+      &run_id,
+      "deployment",
+      "hot/key",
+      now,
+      now + Duration::minutes(10),
+    ),
+    Err(woml_engine::DurableEngineError::Store(
+      woml_engine::DurableStoreError::LockWaitLimit
+    ))
+  ));
+
+  let fence_database = TemporaryDatabase::new();
+  let (run_id, engine) = admitted_run_on_disk(fence_database.path(), now);
+  drop(engine);
+  Connection::open(fence_database.path())
+    .unwrap()
+    .execute(
+      "INSERT INTO woml_lock_resources(key, fencing_high_water, updated_at)
+       VALUES ('exhausted/key', ?1, ?2)",
+      params![i64::MAX, now.to_rfc3339()],
+    )
+    .unwrap();
+  let store = DurableEventStore::open(fence_database.path()).unwrap();
+  let mut engine = DurableDagEngine::resume(store, &run_id).unwrap();
+  assert!(matches!(
+    engine.register_lock_waiter(
+      &run_id,
+      "deployment",
+      "exhausted/key",
+      now,
+      now + Duration::minutes(10),
+    ),
+    Err(woml_engine::DurableEngineError::Store(
+      woml_engine::DurableStoreError::LockFencingExhausted
+    ))
+  ));
 }

@@ -1,0 +1,16 @@
+{
+  "profile": "woml.locks-and-leases-performance-budgets/v1",
+  "authority": "local-sqlite",
+  "budgets": {
+    "uncontendedAdmissionP95Ms": 25,
+    "renewalP95Ms": 20,
+    "expiredTakeoverP95Ms": 40,
+    "tenThousandWaiterScanP95Ms": 100,
+    "maximumRecoveryBatch": 250
+  },
+  "notes": [
+    "Budgets measure Rust durable-store operations after store startup.",
+    "They do not include Bun CLI startup, script execution, or terminal rendering.",
+    "Release automation treats regression as a review failure, not permission to weaken durability or fencing."
+  ]
+}

@@ -290,7 +290,10 @@ function listUsage(): string {
 }
 
 function getUsage(): string {
-  return 'Usage: woml get <runId> [--state <path>] [--json]';
+  return [
+    'Usage: woml get <runId> [--state <path>] [--json]',
+    'Shows the run together with durable waits, artifacts, and lock/lease state.',
+  ].join('\n');
 }
 
 function artifactsUsage(): string {

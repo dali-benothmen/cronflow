@@ -281,6 +281,23 @@ fn load_inventory(
     }
   }
 
+  // Lock resources deliberately outlive individual runs because their
+  // fencing high-water must never move backwards. Runs that still own or are
+  // queued for a lock are therefore protected from retention.
+  let mut statement = connection
+    .prepare(
+      "SELECT owner_run_id FROM woml_lock_resources WHERE owner_run_id IS NOT NULL
+       UNION
+       SELECT run_id FROM woml_lock_waiters WHERE status IN ('waiting', 'held')",
+    )
+    .map_err(map_sqlite)?;
+  for run_id in statement
+    .query_map([], |row| row.get::<_, String>(0))
+    .map_err(map_sqlite)?
+  {
+    inventory.protected.insert(run_id.map_err(map_sqlite)?);
+  }
+
   let mut statement = connection
     .prepare("SELECT run_id, received_at FROM woml_trigger_occurrences")
     .map_err(map_sqlite)?;
@@ -638,6 +655,7 @@ fn delete_batch(
     "DELETE FROM woml_runtime_policy_bindings WHERE run_id IN (SELECT run_id FROM woml_retention_candidates)",
     "DELETE FROM woml_notification_capabilities WHERE run_id IN (SELECT run_id FROM woml_retention_candidates)",
     "DELETE FROM woml_approval_tokens WHERE run_id IN (SELECT run_id FROM woml_retention_candidates)",
+    "DELETE FROM woml_lock_waiters WHERE run_id IN (SELECT run_id FROM woml_retention_candidates)",
     "DELETE FROM woml_internal_event_deliveries WHERE run_id IN (SELECT run_id FROM woml_retention_candidates) OR publication_id IN (SELECT publication_id FROM woml_internal_event_publications WHERE parent_run_id IN (SELECT run_id FROM woml_retention_candidates))",
     "DELETE FROM woml_internal_event_publications WHERE parent_run_id IN (SELECT run_id FROM woml_retention_candidates)",
     "DELETE FROM woml_workflow_calls WHERE parent_run_id IN (SELECT run_id FROM woml_retention_candidates) OR child_run_id IN (SELECT run_id FROM woml_retention_candidates)",

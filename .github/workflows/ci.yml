@@ -91,6 +91,11 @@ jobs:
         run: >-
           bun run benchmark:durable-waits &&
           bun scripts/verify-durable-waits-release.ts
+      - name: Enforce Locks and Leases publication contracts
+        working-directory: woml-cli
+        run: >-
+          bun run benchmark:locks-and-leases &&
+          bun scripts/verify-locks-and-leases-release.ts
       - name: Test for-each presentation and clean package
         working-directory: woml-cli
         run: >-
@@ -164,6 +169,8 @@ jobs:
           --test for_each_recovery
           --test backup_restore
           --test durable_wait_runtime
+          --test locks_and_leases
+          --test retention
           --test webhook_runtime
           -- --test-threads=1
       - name: Failure diagnostics
@@ -218,6 +225,39 @@ jobs:
           cargo test --config profile.dev.debug=0
           --config profile.dev.incremental=false -j 1 --locked
           -p woml-engine --test durable_wait_runtime -- --test-threads=1
+      - name: Failure diagnostics
+        if: failure()
+        run: |
+          rustc --version
+          cargo --version
+          git status --short
+
+  lock-authority:
+    name: Lock authority (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, macos-15, windows-2022]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v6
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: ${{ env.BUN_VERSION }}
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Install locked runtime dependencies
+        working-directory: woml-cli
+        run: bun install --frozen-lockfile
+      - name: Install compiler dependencies
+        working-directory: woml
+        run: bun install --frozen-lockfile
+      - name: Test lock races, limits, recovery, restore, and retention serially
+        working-directory: core
+        run: >-
+          cargo test --config profile.dev.debug=0
+          --config profile.dev.incremental=false -j 1 --locked
+          -p woml-engine --test locks_and_leases --test backup_restore
+          --test retention -- --test-threads=1
       - name: Failure diagnostics
         if: failure()
         run: |
@@ -305,6 +345,9 @@ jobs:
       - name: Test Durable Waits from the clean release package
         working-directory: woml-cli
         run: bun test tests/durable-waits-packaged-release.test.ts --max-concurrency=1
+      - name: Test Locks and Leases from the clean release package
+        working-directory: woml-cli
+        run: bun test tests/locks-and-leases-packaged-release.test.ts --max-concurrency=1
       - name: Pack, seal, and reverify the main artifact
         run: |
           bun woml-cli/scripts/release-artifact.ts pack --root release/main

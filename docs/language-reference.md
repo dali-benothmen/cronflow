@@ -1276,6 +1276,35 @@ duplicate and cannot resume the run again. Read
 [Durable Waits and External Signals](woml-durable-waits.md) for the tutorial,
 limits, restart behavior, and current composition boundaries.
 
+### 11.4 `<lock>` and `services.locks.withLease()`
+
+`<lock>` is a durable flow item that serializes a multi-step scope by key:
+
+```xml
+<lock id="deployment" key="production/{{context.steps.plan.service}}" acquire-timeout="15m" lease="45s">
+  <step id="deploy"><script>
+    return { fencingToken: context.lock.fencingToken };
+  </script></step>
+</lock>
+```
+
+`id` and `key` are required. Optional `name` and `description` are display
+metadata. `acquire-timeout` accepts one second through seven days; `lease`
+accepts five seconds through ten minutes. Keys are 1–256 characters and cannot
+have surrounding whitespace, control characters, or empty slash segments.
+
+Inside the protected scope, `context.lock` exposes `id`, `key`,
+`fencingToken`, `acquiredAt`, and `expiresAt`. After release the bounded scope
+result is available at `context.steps.<lockId>`. Nested locks, reentrant locks,
+and atomic multi-key acquisition are rejected in v1.
+
+For one short callback inside a script,
+`services.locks.withLease(key, options, callback)` provides the same Rust-owned
+authority. The callback API is attempt-scoped and does not promise durable
+JavaScript closure recovery. Use markup for multi-step or restart-resumable
+coordination. See [Locks and Leases](woml-locks-and-leases.md) and the
+[fencing guide](woml-lock-fencing.md).
+
 ## 12. `<approval>`, `<notify>`, and Decision Arms
 
 `<approval>` is a first-class durable control-flow item. It records that a run

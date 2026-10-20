@@ -93,7 +93,7 @@ Contains one or more trigger tags. Omit the entire container for a call-only wor
 
 ### `<steps>`
 
-Contains one or more flow items in source order: `<step>`, `<parallel>`, `<for-each>`, `<choose>`, `<switch>`, `<fork>`, or `<approval>`. Ordinary adjacent items form sequential dependencies.
+Contains one or more flow items in source order: `<step>`, `<parallel>`, `<for-each>`, `<choose>`, `<switch>`, `<fork>`, `<lock>`, or `<approval>`. Ordinary adjacent items form sequential dependencies.
 
 ## Trigger tags
 
@@ -295,6 +295,24 @@ External systems use the authenticated signal HTTP endpoint; local operators
 may use `woml signal`. Reuse one idempotency key only for an identical logical
 delivery. Per-iteration waits inside `<for-each>` and waiting synchronous child
 calls are not released yet.
+
+### `<lock>`
+
+```xml
+<lock id="deployment" key="production/{{context.steps.plan.service}}" acquire-timeout="15m" lease="45s">
+  <step id="deploy"><script>
+    return { fencingToken: context.lock.fencingToken };
+  </script></step>
+</lock>
+```
+
+`id` and `key` are required. Optional `name`, `description`,
+`acquire-timeout`, and `lease` follow the released limits. Inside the scope use
+`context.lock.id`, `.key`, `.fencingToken`, `.acquiredAt`, and `.expiresAt`.
+After release read the scope result through `context.steps.<lockId>`. Never put
+secrets or payload data in keys. Nested/reentrant locks and multi-key atomic
+acquisition are not released. Prefer markup locks for durable multi-step work;
+use `services.locks.withLease()` only for one short script-local callback.
 
 ### `<approval>`, `<notify>`, `<when-approved>`, and `<when-rejected>`
 

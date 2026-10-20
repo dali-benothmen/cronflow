@@ -20,6 +20,7 @@ commands work in your own project with copied files.
 | Durable per-item processing | [`forEachWorkflow.woml`](forEachWorkflow.woml) | `woml run examples/forEachWorkflow.woml` |
 | Workflow/step lifecycle hooks | [`lifecycleWorkflow.woml`](lifecycleWorkflow.woml) | `woml run examples/lifecycleWorkflow.woml` |
 | Durable timers and external callbacks | [`durableWaits/`](durableWaits/) | `woml run examples/durableWaits/timer.woml` |
+| Durable locks, leases, and fencing | [`locksAndLeases/`](locksAndLeases/) | `woml run examples/locksAndLeases/deployment.woml` |
 
 Use `woml test <file>` instead when you intentionally want one manual run that
 prints the result and exits.

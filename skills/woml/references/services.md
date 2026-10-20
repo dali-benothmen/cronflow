@@ -12,6 +12,7 @@ Use this reference before generating a `services.*` call. Built-in services exec
 | Files and larger durable values | `services.storage` |
 | Disposable expiring optimization data | `services.cache` |
 | Small permanent workflow-owned memory | `services.state` |
+| Serialize one short script-local critical section | `services.locks.withLease()` |
 | Approved local or infrastructure command | `services.process.run()` |
 | Fan out a named fact to subscribers | `services.events.emit()` |
 | Wait for one child workflow's result | `services.workflows.call()` |
@@ -185,6 +186,26 @@ Operations:
 - `setIfAbsent(key, value, { name })` → `{ stored, value, version, updatedAt }`.
 
 Every mutation requires a stable `name`. Use `ifVersion` for compare-and-set when multiple runs may update the same key. State is small, permanent workflow-owned JSON; it is not encrypted secret storage, cache, a general database, or run context.
+
+## Attempt-scoped locks
+
+```js
+return await services.locks.withLease(
+  `customer/${context.payload.customerId}`,
+  { name: "reserve-customer", acquireTimeout: "10s", lease: "15s" },
+  async lease => {
+    await lease.assertCurrent();
+    return { fencingToken: lease.fencingToken };
+  }
+);
+```
+
+The Rust authority owns admission, FIFO waiting, renewal, fencing, timeout,
+cancellation, and release. The callback is attempt-scoped JavaScript, not a
+durable closure. Use markup `<lock>` for multi-step coordination, waits,
+approvals, and restart-resumable protected work. Give every operation a stable
+`name`, pass fencing tokens to targets that enforce them, and never put secrets
+in the key.
 
 ## Supervised local processes
 

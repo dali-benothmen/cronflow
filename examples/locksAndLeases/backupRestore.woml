@@ -1,0 +1,23 @@
+<woml>
+  <workflow id="backup-restore-cutover" name="Safe backup restore cutover" description="Verify a backup and perform one restore cutover at a time." version="1.0.0">
+    <triggers><manual id="start" /></triggers>
+    <steps>
+      <step id="plan" name="Prepare restore plan"><script>return { system: "billing", backupId: "nightly-2026-10-20" };</script></step>
+      <lock id="restore" name="Own restore cutover" key="restore/{{context.steps.plan.system}}" acquire-timeout="20m" lease="1m">
+        <step id="verifyBackup" name="Verify backup">
+          <script>
+            const result = await services.process.run({ executable: "verify-backup", args: [context.steps.plan.backupId] }, { name: "verify-restore-source" });
+            return { verified: result.exitCode === 0 };
+          </script>
+        </step>
+        <step id="restoreBackup" name="Restore backup">
+          <script>
+            const result = await services.process.run({ executable: "restore-backup", args: [context.steps.plan.backupId, context.lock.fencingToken] }, { name: "perform-restore-cutover" });
+            return { restored: result.exitCode === 0, fencingToken: context.lock.fencingToken };
+          </script>
+        </step>
+      </lock>
+      <step id="report" name="Return restore report"><script>return context.steps.restore;</script></step>
+    </steps>
+  </workflow>
+</woml>

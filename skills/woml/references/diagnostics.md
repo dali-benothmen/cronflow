@@ -69,6 +69,9 @@ Managed service errors expose `code`, `service`, `operation`, `retryable`, and `
 - Database statement failures: inspect parameterized SQL and driver-specific placeholder syntax.
 - Storage not-found/conflict/path-unsafe: verify the logical key and `ifVersion`/overwrite contract; never convert it to a raw filesystem path.
 - Cache miss is a successful normal result, not an error.
+- `WOML_LOCK_WAIT_LIMIT`: one key or the store reached its bounded waiter ceiling; inspect contention and retry only after backlog falls.
+- `WOML_LOCK_LEASE_LOST`: protected work is stale; stop it and reconcile the target with fencing evidence.
+- `WOML_LOCK_FENCING_EXHAUSTED`: stop using the key and require operator review; never reset fencing high-water.
 - `WOML_STATE_CONFLICT`: another writer changed the version. Read again and make a new named decision.
 - State quota/corruption/unavailable errors require operational review; never edit internal tables to silence them.
 

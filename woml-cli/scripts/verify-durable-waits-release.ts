@@ -74,7 +74,7 @@ for (const marker of [
   'WOML_SIGNAL_PAYLOAD_TOO_LARGE',
   'woml.wait-inspection/v1',
   'woml.run-inspection/v8',
-  'SUPPORTED_BACKUP_STORE_VERSIONS: [u32; 3] = [13, 14, 15]',
+  'SUPPORTED_BACKUP_STORE_VERSIONS: [u32; 4] = [13, 14, 15, 16]',
   'Usage: woml signal <name>',
 ]) {
   if (!joined.includes(marker)) {

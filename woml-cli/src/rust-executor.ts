@@ -2095,7 +2095,7 @@ function executionResult(value: unknown): value is RustWorkflowExecutionResult {
       ]) &&
       Number.isSafeInteger(event.eventSchemaVersion) &&
       Number(event.eventSchemaVersion) >= 1 &&
-      Number(event.eventSchemaVersion) <= 16 &&
+      Number(event.eventSchemaVersion) <= 17 &&
       typeof event.eventId === 'string' &&
       typeof event.runId === 'string' &&
       Number.isSafeInteger(event.sequence) &&
@@ -2174,7 +2174,7 @@ function parseApprovalRuntimeOutcome(json: string): RustApprovalRuntimeOutcome {
     value.contract !== 'woml.runtime-outcome' ||
     value.version !== 1
   ) {
-    throw new Error('The native core returned an invalid approval outcome.');
+    throw new Error('The native core returned an invalid runtime outcome.');
   }
   if (
     value.status === 'succeeded' &&
@@ -2237,7 +2237,7 @@ function parseApprovalRuntimeOutcome(json: string): RustApprovalRuntimeOutcome {
   ) {
     return value as unknown as RustApprovalRuntimeOutcome;
   }
-  throw new Error('The native core returned an invalid approval outcome.');
+  throw new Error('The native core returned an invalid runtime outcome.');
 }
 
 export function settleTimerWaitWithRust(

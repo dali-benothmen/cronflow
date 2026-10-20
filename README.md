@@ -345,6 +345,7 @@ Provider examples require their documented credentials. Browse the [complete exa
 - **Retries and idempotency** — declare retry behavior with the `retry` attribute while preserving durable attempt and operation identities.
 - **Human-in-the-loop** — pause durably for approval and continue through approved or rejected routes.
 - **Durable waits and signals** — suspend without holding a worker, survive restarts, and resume the same run from timers or authenticated callbacks.
+- **Locks, leases, and fencing** — serialize shared-resource work across runs and local processes, then reject stale owners with monotonic fencing tokens.
 - **Managed capabilities** — use supervised HTTP, SQLite/PostgreSQL, storage, cache, state, events, workflow calls, and communication services.
 - **Reusable building blocks** — import local JavaScript or TypeScript modules and define reusable WOML steps or notification providers.
 - **Lifecycle and runtime policy** — observe workflow and step events while controlling concurrency, rate limits, queues, and timeouts.
@@ -428,6 +429,7 @@ cp -R skills/woml .agents/skills/woml
 - [Language reference](./docs/language-reference.md)
 - [CLI reference](./docs/cli-reference.md)
 - [Services and capabilities](./docs/woml-services.md)
+- [Locks and leases](./docs/woml-locks-and-leases.md)
 - [Run local tools safely](./docs/woml-process.md)
 - [Preserve files as Durable Artifacts](./docs/woml-durable-artifacts.md)
 - [Modules](./docs/woml-modules.md)

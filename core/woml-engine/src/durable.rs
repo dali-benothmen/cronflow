@@ -1490,6 +1490,27 @@ pub struct LockObservationV1 {
   pub acquisition_timeouts: u64,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LockRecoveryKindV1 {
+  AcquisitionTimeout,
+  LeaseExpiry,
+}
+
+/// Internal scheduler work exposed as a bounded, deterministic batch. It
+/// contains coordination identities only; lease credentials, input digests,
+/// script data, and payloads never cross this boundary.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LockRecoveryCandidateV1 {
+  pub profile: &'static str,
+  pub kind: LockRecoveryKindV1,
+  pub key: String,
+  pub run_id: String,
+  pub execution_identity: String,
+  pub due_at: DateTime<Utc>,
+}
+
 pub const EXTERNAL_SIGNAL_ADMISSION_PROFILE: &str = "woml.external-signal-admission/v1";
 pub const EXTERNAL_SIGNAL_RESULT_PROFILE: &str = "woml.signal-result/v1";
 pub const EXTERNAL_SIGNAL_MAX_PAYLOAD_BYTES: usize = 1_048_576;
@@ -1729,6 +1750,10 @@ pub enum DurableStoreError {
   ApprovalDecisionConflict,
   #[error("the lock acquisition identity is already bound to different input")]
   LockIdempotencyConflict,
+  #[error("the durable lock wait queue reached its safety ceiling")]
+  LockWaitLimit,
+  #[error("the durable lock fencing-token space is exhausted")]
+  LockFencingExhausted,
   #[error("stored lock history is contradictory: {0}")]
   LockHistoryInvalid(String),
   #[error("approval timeout settlement requires a request with a deadline")]
@@ -1782,6 +1807,13 @@ pub struct ProgrammaticLockAcquire {
   pub state: ProgrammaticLockAcquireState,
   pub lease: Option<ProgrammaticLockLease>,
 }
+
+/// Frozen Store v16 safety ceilings. These limits bound one hot resource and
+/// the total local durable backlog without preventing an uncontended lock
+/// from being acquired immediately.
+pub const LOCK_WAITERS_PER_KEY_LIMIT: usize = 1_024;
+pub const LOCK_WAITERS_PER_STORE_LIMIT: usize = 10_000;
+pub const LOCK_RECOVERY_BATCH_LIMIT: usize = 250;
 
 pub const MAX_MODULE_ARTIFACT_BYTES: usize = 3 * 1024 * 1024;
 pub const MAX_MODULE_ARTIFACT_SET_BYTES: usize = 32 * 1024 * 1024;
@@ -5960,6 +5992,65 @@ impl DurableEventStore {
     })
   }
 
+  /// Returns at most one frozen recovery batch. Repeated calls after settling
+  /// the returned work drain large backlogs without loading the whole queue
+  /// into memory or monopolizing the durable store.
+  pub fn lock_recovery_batch_v1(
+    &self,
+    now: DateTime<Utc>,
+  ) -> Result<Vec<LockRecoveryCandidateV1>, DurableStoreError> {
+    let limit = i64::try_from(LOCK_RECOVERY_BATCH_LIMIT)
+      .map_err(|_| DurableStoreError::Contract("Lock recovery limit is invalid.".to_string()))?;
+    let mut statement = self.connection.prepare(
+      "SELECT kind, key, run_id, node_execution_id, due_at FROM (
+         SELECT 'acquisition_timeout' AS kind, key, run_id, node_execution_id,
+                deadline AS due_at
+         FROM woml_lock_waiters
+         WHERE status = 'waiting' AND deadline <= ?1
+         UNION ALL
+         SELECT 'lease_expiry' AS kind, key, owner_run_id AS run_id,
+                owner_node_execution_id AS node_execution_id, expires_at AS due_at
+         FROM woml_lock_resources
+         WHERE owner_lease_id IS NOT NULL AND expires_at <= ?1
+       )
+       ORDER BY due_at, kind, key, run_id, node_execution_id
+       LIMIT ?2",
+    )?;
+    let rows = statement
+      .query_map(params![now.to_rfc3339(), limit], |row| {
+        Ok((
+          row.get::<_, String>(0)?,
+          row.get::<_, String>(1)?,
+          row.get::<_, String>(2)?,
+          row.get::<_, String>(3)?,
+          row.get::<_, String>(4)?,
+        ))
+      })?
+      .collect::<Result<Vec<_>, _>>()?;
+    rows
+      .into_iter()
+      .map(|(kind, key, run_id, execution_identity, due_at)| {
+        let kind = match kind.as_str() {
+          "acquisition_timeout" => LockRecoveryKindV1::AcquisitionTimeout,
+          "lease_expiry" => LockRecoveryKindV1::LeaseExpiry,
+          _ => {
+            return Err(DurableStoreError::LockHistoryInvalid(
+              "lock recovery found an unsupported work kind".to_string(),
+            ))
+          }
+        };
+        Ok(LockRecoveryCandidateV1 {
+          profile: "woml.lock-recovery-candidate/v1",
+          kind,
+          key,
+          run_id,
+          execution_identity,
+          due_at: parse_stored_timestamp(&due_at)?,
+        })
+      })
+      .collect()
+  }
+
   pub fn fork_recovery_work_v1(
     &self,
     run_id: &str,
@@ -8103,13 +8194,7 @@ impl DurableEventStore {
     registered_at: DateTime<Utc>,
     deadline: DateTime<Utc>,
   ) -> Result<RunProjection, DurableStoreError> {
-    if key.is_empty()
-      || key.len() > 256
-      || key.trim() != key
-      || key.chars().any(char::is_control)
-      || execution_identity.is_empty()
-      || deadline < registered_at
-    {
+    if !valid_lock_key(key) || execution_identity.is_empty() || deadline < registered_at {
       return Err(DurableStoreError::Contract(
         "Lock acquisition input is invalid.".to_string(),
       ));
@@ -8172,6 +8257,7 @@ impl DurableEventStore {
          ON CONFLICT(key) DO NOTHING",
         params![key, registered_at.to_rfc3339()],
       )?;
+      ensure_lock_wait_capacity(&transaction, key)?;
       let sequence: i64 = transaction.query_row(
         "SELECT COALESCE(MAX(sequence), 0) + 1 FROM woml_lock_waiters WHERE key = ?1",
         [key],
@@ -8298,6 +8384,7 @@ impl DurableEventStore {
          ON CONFLICT(key) DO NOTHING",
         params![key, registered_at.to_rfc3339()],
       )?;
+      ensure_lock_wait_capacity(&transaction, key)?;
       let sequence: i64 = transaction.query_row(
         "SELECT COALESCE(MAX(sequence), 0) + 1 FROM woml_lock_waiters WHERE key = ?1",
         [key],
@@ -8389,27 +8476,30 @@ impl DurableEventStore {
       transaction.commit()?;
       return Ok(LockLeaseMaintenance::NotHeld);
     };
-    if parse_stored_timestamp(&expires_at)? <= now {
+    let stored_expiry = parse_stored_timestamp(&expires_at)?;
+    if stored_expiry <= now {
       expire_lock_owner(&transaction, &key, now)?;
       grant_oldest_lock_waiter(&transaction, &key, now)?;
       transaction.commit()?;
       return Ok(LockLeaseMaintenance::Lost);
     }
-    let next_expiry = now
+    let requested_expiry = now
       + chrono::Duration::milliseconds(i64::try_from(lease_ms).map_err(|_| {
         DurableStoreError::Contract("Lock lease exceeds the runtime clock.".to_string())
       })?);
+    let next_expiry = requested_expiry.max(stored_expiry);
     let changed = transaction.execute(
       "UPDATE woml_lock_resources SET expires_at = ?1, updated_at = ?2
        WHERE key = ?3 AND owner_run_id = ?4 AND owner_node_execution_id = ?5
-         AND owner_lease_id = ?6 AND expires_at > ?2",
+         AND owner_lease_id = ?6 AND expires_at = ?7",
       params![
         next_expiry.to_rfc3339(),
         now.to_rfc3339(),
         key,
         run_id,
         identity,
-        lease_id
+        lease_id,
+        expires_at
       ],
     )?;
     transaction.commit()?;
@@ -8691,7 +8781,8 @@ impl DurableEventStore {
       transaction.commit()?;
       return Ok(LockLeaseMaintenance::Lost);
     };
-    if parse_stored_timestamp(&stored_expiry)? <= now {
+    let parsed_stored_expiry = parse_stored_timestamp(&stored_expiry)?;
+    if parsed_stored_expiry <= now {
       expire_lock_owner(&transaction, &held.key, now)?;
       grant_oldest_lock_waiter(&transaction, &held.key, now)?;
       transaction.commit()?;
@@ -8701,15 +8792,16 @@ impl DurableEventStore {
       transaction.commit()?;
       return Ok(LockLeaseMaintenance::NotHeld);
     }
-    let next_expiry = now
+    let requested_expiry = now
       + chrono::Duration::milliseconds(i64::try_from(descriptor.lease_ms).map_err(|_| {
         DurableStoreError::Contract("Lock lease exceeds the runtime clock.".to_string())
       })?);
+    let next_expiry = requested_expiry.max(parsed_stored_expiry);
     let changed = transaction.execute(
       "UPDATE woml_lock_resources SET expires_at = ?1, updated_at = ?2
        WHERE key = ?3 AND owner_run_id = ?4 AND owner_node_execution_id = ?5
          AND owner_lease_id = ?6 AND CAST(owner_fencing_token AS TEXT) = ?7
-         AND expires_at > ?2",
+         AND expires_at = ?8",
       params![
         next_expiry.to_rfc3339(),
         now.to_rfc3339(),
@@ -8717,7 +8809,8 @@ impl DurableEventStore {
         run_id,
         held.execution_identity,
         lease_id,
-        fencing_token
+        fencing_token,
+        stored_expiry
       ],
     )?;
     transaction.commit()?;
@@ -13240,6 +13333,46 @@ fn resolve_lock_execution<'a>(
 
 const PROGRAMMATIC_LOCK_IDENTITY_PREFIX: &str = "capability:";
 
+fn valid_lock_key(key: &str) -> bool {
+  !key.is_empty()
+    && key.len() <= 256
+    && key.trim() == key
+    && !key.chars().any(char::is_control)
+    && !key.split('/').any(str::is_empty)
+}
+
+fn ensure_lock_wait_capacity(
+  transaction: &Transaction<'_>,
+  key: &str,
+) -> Result<(), DurableStoreError> {
+  let occupied: bool = transaction.query_row(
+    "SELECT owner_lease_id IS NOT NULL OR EXISTS(
+       SELECT 1 FROM woml_lock_waiters WHERE key = ?1 AND status = 'waiting'
+     ) FROM woml_lock_resources WHERE key = ?1",
+    [key],
+    |row| row.get(0),
+  )?;
+  if !occupied {
+    return Ok(());
+  }
+  let key_waiters: i64 = transaction.query_row(
+    "SELECT COUNT(*) FROM woml_lock_waiters WHERE key = ?1 AND status = 'waiting'",
+    [key],
+    |row| row.get(0),
+  )?;
+  let store_waiters: i64 = transaction.query_row(
+    "SELECT COUNT(*) FROM woml_lock_waiters WHERE status = 'waiting'",
+    [],
+    |row| row.get(0),
+  )?;
+  if key_waiters >= LOCK_WAITERS_PER_KEY_LIMIT as i64
+    || store_waiters >= LOCK_WAITERS_PER_STORE_LIMIT as i64
+  {
+    return Err(DurableStoreError::LockWaitLimit);
+  }
+  Ok(())
+}
+
 fn validate_programmatic_lock_input(
   node_id: &str,
   invocation_id: &str,
@@ -13248,7 +13381,6 @@ fn validate_programmatic_lock_input(
   acquire_timeout_ms: u64,
   lease_ms: u64,
 ) -> Result<(), DurableStoreError> {
-  let invalid_segment = key.split('/').any(str::is_empty);
   if node_id.is_empty()
     || invocation_id.is_empty()
     || session_id.is_empty()
@@ -13256,11 +13388,7 @@ fn validate_programmatic_lock_input(
     || !session_id
       .bytes()
       .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-'))
-    || key.is_empty()
-    || key.len() > 256
-    || key.trim() != key
-    || key.chars().any(char::is_control)
-    || invalid_segment
+    || !valid_lock_key(key)
     || !(1_000..=604_800_000).contains(&acquire_timeout_ms)
     || !(5_000..=600_000).contains(&lease_ms)
   {
@@ -13419,9 +13547,9 @@ fn grant_oldest_lock_waiter(
     [key],
     |row| row.get(0),
   )?;
-  let next_token = current_high_water.checked_add(1).ok_or_else(|| {
-    DurableStoreError::Contract("Lock fencing-token space is exhausted.".to_string())
-  })?;
+  let next_token = current_high_water
+    .checked_add(1)
+    .ok_or(DurableStoreError::LockFencingExhausted)?;
   let lease_id = format!("lease_{}", Uuid::new_v4().simple());
   let expires_at = now
     + chrono::Duration::milliseconds(i64::try_from(lease_ms).map_err(|_| {

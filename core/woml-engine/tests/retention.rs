@@ -369,3 +369,110 @@ fn an_empty_successful_pass_still_records_a_durable_audit_result() {
     Some(execution.result)
   );
 }
+
+#[test]
+fn retention_protects_live_lock_runs_and_preserves_fencing_high_water() {
+  let database = TestDatabase::new("locks");
+  let now = Utc.with_ymd_and_hms(2026, 8, 12, 12, 0, 0).unwrap();
+  let old = now - Duration::days(90);
+  let mut store = store(database.path());
+  succeed_run(&mut store, "run_lock_owner", old);
+  succeed_run(&mut store, "run_lock_closed", old);
+  drop(store);
+  let connection = Connection::open(database.path()).unwrap();
+  connection
+    .execute(
+      "INSERT INTO woml_lock_resources(
+         key, fencing_high_water, owner_lease_id, owner_run_id,
+         owner_node_execution_id, owner_fencing_token, acquired_at,
+         expires_at, updated_at
+       ) VALUES ('retention/live', 7, 'lease_live', 'run_lock_owner',
+         'deploy', 7, ?1, ?2, ?1)",
+      params![now.to_rfc3339(), (now + Duration::minutes(5)).to_rfc3339()],
+    )
+    .unwrap();
+  connection
+    .execute(
+      "INSERT INTO woml_lock_waiters(
+         waiter_id, key, run_id, node_execution_id, sequence, registered_at,
+         deadline, status, input_digest
+       ) VALUES ('waiter_live', 'retention/live', 'run_lock_owner', 'deploy',
+         1, ?1, ?2, 'held', ?3)",
+      params![
+        now.to_rfc3339(),
+        (now + Duration::minutes(10)).to_rfc3339(),
+        format!("sha256:{}", "7".repeat(64))
+      ],
+    )
+    .unwrap();
+  connection
+    .execute(
+      "INSERT INTO woml_lock_resources(key, fencing_high_water, updated_at)
+       VALUES ('retention/closed', 11, ?1)",
+      [old.to_rfc3339()],
+    )
+    .unwrap();
+  connection
+    .execute(
+      "INSERT INTO woml_lock_waiters(
+         waiter_id, key, run_id, node_execution_id, sequence, registered_at,
+         deadline, status, input_digest
+       ) VALUES ('waiter_closed', 'retention/closed', 'run_lock_closed',
+         'deploy', 1, ?1, ?2, 'released', ?3)",
+      params![
+        old.to_rfc3339(),
+        (old + Duration::minutes(10)).to_rfc3339(),
+        format!("sha256:{}", "b".repeat(64))
+      ],
+    )
+    .unwrap();
+  drop(connection);
+
+  let plan = plan_retention(database.path(), &policy(now), now).unwrap();
+  assert_eq!(plan.eligible_runs, 1);
+  execute_retention(
+    database.path(),
+    &policy(now),
+    "lease_pro8_locks",
+    "test_pro8",
+    false,
+    now,
+  )
+  .unwrap();
+  let connection = Connection::open(database.path()).unwrap();
+  let live_exists: bool = connection
+    .query_row(
+      "SELECT EXISTS(SELECT 1 FROM woml_runs WHERE run_id = 'run_lock_owner')",
+      [],
+      |row| row.get(0),
+    )
+    .unwrap();
+  let closed_exists: bool = connection
+    .query_row(
+      "SELECT EXISTS(SELECT 1 FROM woml_runs WHERE run_id = 'run_lock_closed')",
+      [],
+      |row| row.get(0),
+    )
+    .unwrap();
+  let high_water: i64 = connection
+    .query_row(
+      "SELECT fencing_high_water FROM woml_lock_resources
+       WHERE key = 'retention/closed'",
+      [],
+      |row| row.get(0),
+    )
+    .unwrap();
+  assert!(live_exists);
+  assert!(!closed_exists);
+  assert_eq!(high_water, 11);
+  assert_eq!(
+    connection
+      .query_row(
+        "SELECT COUNT(*) FROM woml_lock_waiters WHERE waiter_id = 'waiter_closed'",
+        [],
+        |row| row.get::<_, i64>(0),
+      )
+      .unwrap(),
+    0
+  );
+}
