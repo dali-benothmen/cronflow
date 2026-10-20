@@ -91,5 +91,5 @@ for (const prefix of ['woml-wait', 'woml-wait-until', 'woml-wait-for']) {
 
 console.log(
   `Durable Waits release gate passed: ${required.length} public artifacts, ` +
-    'Store v15 backup compatibility, bounded ingress, payload-free inspection, and editor/agent surfaces verified.'
+    'Store v16 backup compatibility, bounded ingress, payload-free inspection, and editor/agent surfaces verified.'
 );

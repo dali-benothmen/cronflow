@@ -550,7 +550,7 @@ export interface RustRuntimeObservationV1 {
 }
 
 export interface RustBackupStoreInspection {
-  readonly storeVersion: 13 | 14 | 15;
+  readonly storeVersion: 13 | 14 | 15 | 16;
   readonly definitionHashes: readonly string[];
   readonly deploymentId?: string;
   readonly activationId?: string;
@@ -3620,7 +3620,7 @@ function backupInspection(value: unknown): RustBackupStoreInspection {
       ['storeVersion', 'definitionHashes'],
       ['deploymentId', 'activationId', 'runtimeInstanceId', 'runtimeLeaseExpiresAt']
     ) ||
-    ![13, 14, 15].includes(Number(value.storeVersion)) ||
+    ![13, 14, 15, 16].includes(Number(value.storeVersion)) ||
     !Array.isArray(value.definitionHashes) ||
     value.definitionHashes.length < 1 ||
     value.definitionHashes.length > 10_000 ||
