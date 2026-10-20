@@ -133,15 +133,16 @@ pub use event::{
   JsonValueType, LifecycleActionFailedData, LifecycleActionIdentityData, LifecycleFailure,
   LifecycleFailureKind, LifecycleHookCompletedData, LifecycleHookCompletionStatus,
   LifecycleHookRequestedData, LifecycleSubject, LifecycleSubjectKind, LifecycleWarning,
-  NotificationDecisionAcceptedData, NotificationDeliveryAttemptStartedData,
-  NotificationDeliveryFailedData, NotificationDeliveryRequestedData,
-  NotificationDeliverySucceededData, NotificationMessageUpdateAttemptStartedData,
-  NotificationMessageUpdateFailedData, NotificationMessageUpdateRequestedData,
-  NotificationMessageUpdatedData, NotificationResolution, NotificationRunFailure,
-  NotificationSafeFailure, OperationExecutionMode, OperationFailedData, OperationStartedData,
-  OperationSucceededData, ParallelFailure, ParallelFailurePolicy, ParallelGroupCompletedData,
-  ParallelGroupOutcome, ParallelGroupStartedData, ProviderMessageIdentity,
-  ReusableLifecycleActionFailedData, ReusableLifecycleActionStartedData,
+  LockAcquireTimedOutData, LockAcquiredData, LockAcquisitionCancelledData, LockLeaseLostData,
+  LockReleasedData, LockWaitRegisteredData, NotificationDecisionAcceptedData,
+  NotificationDeliveryAttemptStartedData, NotificationDeliveryFailedData,
+  NotificationDeliveryRequestedData, NotificationDeliverySucceededData,
+  NotificationMessageUpdateAttemptStartedData, NotificationMessageUpdateFailedData,
+  NotificationMessageUpdateRequestedData, NotificationMessageUpdatedData, NotificationResolution,
+  NotificationRunFailure, NotificationSafeFailure, OperationExecutionMode, OperationFailedData,
+  OperationStartedData, OperationSucceededData, ParallelFailure, ParallelFailurePolicy,
+  ParallelGroupCompletedData, ParallelGroupOutcome, ParallelGroupStartedData,
+  ProviderMessageIdentity, ReusableLifecycleActionFailedData, ReusableLifecycleActionStartedData,
   ReusableLifecycleActionSucceededData, ReusableLifecycleCompletedData, ReusableLifecycleHook,
   ReusableLifecycleOutcome, ReusableLifecycleRequestedData, RunAdmissionQueue, RunAdmissionTrigger,
   RunAdmittedData, RunCancellationRequestedData, RunEvent, RunEventPayload,
@@ -164,7 +165,7 @@ pub use interval::{
   INTERVAL_PROGRESS_CONTRACT, INTERVAL_PROGRESS_CONTRACT_VERSION, MAX_INTERVAL_MS, MIN_INTERVAL_MS,
 };
 pub use model::{
-  CompiledLifecycleAction, CompiledLifecycleDefinition, CompiledLifecycleHook,
+  CompiledLifecycleAction, CompiledLifecycleDefinition, CompiledLifecycleHook, CompiledLock,
   CompiledModuleBinding, CompiledModuleRuntime, CompiledQueuePolicy, CompiledRateLimitPolicy,
   CompiledReusableInvocation, CompiledRuntimePolicy, CompiledWait, CompiledWaitSignal,
   CompiledWorkflowDefinition, LifecycleEventName, ModelIssue, ModelIssueCode, ModelValidationError,
@@ -206,11 +207,11 @@ pub use projection::{
   fold_events, ApprovalRequestProjection, ApprovalRequestStatus, DurableWaitProjection,
   DurableWaitStatus, FoldError, ForkBranchProjection, ForkJoinStatus, ForkProjection,
   LifecycleActionProjection, LifecycleActionStatus, LifecycleHookProjection, LifecycleHookStatus,
-  LifecycleStatus, NotificationDeliveryProjection, NotificationDeliveryStatus,
-  NotificationMessageUpdateProjection, NotificationMessageUpdateStatus, OperationIdentity,
-  OperationProjection, OperationStatus, ParallelGroupProjection, ParallelGroupStatus,
-  RetryScheduleProjection, ReusableLifecycleProjection, ReusableLifecycleStatus, RunFailure,
-  RunProjection, RunStatus, WorkflowContext,
+  LifecycleStatus, LockContext, LockProjection, LockStatus, NotificationDeliveryProjection,
+  NotificationDeliveryStatus, NotificationMessageUpdateProjection, NotificationMessageUpdateStatus,
+  OperationIdentity, OperationProjection, OperationStatus, ParallelGroupProjection,
+  ParallelGroupStatus, RetryScheduleProjection, ReusableLifecycleProjection,
+  ReusableLifecycleStatus, RunFailure, RunProjection, RunStatus, WorkflowContext,
 };
 pub use retention::{
   execute_retention, last_retention_result, plan_retention, RetentionError, RetentionExecutionV1,
@@ -277,7 +278,8 @@ pub const COMPILED_MODEL_SCHEMA_VERSION_V14: u32 = 14;
 pub const COMPILED_MODEL_SCHEMA_VERSION_V15: u32 = 15;
 pub const COMPILED_MODEL_SCHEMA_VERSION_V16: u32 = 16;
 pub const COMPILED_MODEL_SCHEMA_VERSION_V17: u32 = 17;
-pub const COMPILED_MODEL_SCHEMA_VERSION: u32 = COMPILED_MODEL_SCHEMA_VERSION_V17;
+pub const COMPILED_MODEL_SCHEMA_VERSION_V18: u32 = 18;
+pub const COMPILED_MODEL_SCHEMA_VERSION: u32 = COMPILED_MODEL_SCHEMA_VERSION_V18;
 pub const RUN_EVENT_SCHEMA_VERSION_V1: u32 = 1;
 pub const RUN_EVENT_SCHEMA_VERSION_V2: u32 = 2;
 pub const RUN_EVENT_SCHEMA_VERSION_V3: u32 = 3;
@@ -294,10 +296,13 @@ pub const RUN_EVENT_SCHEMA_VERSION_V13: u32 = 13;
 pub const RUN_EVENT_SCHEMA_VERSION_V14: u32 = 14;
 pub const RUN_EVENT_SCHEMA_VERSION_V15: u32 = 15;
 pub const RUN_EVENT_SCHEMA_VERSION_V16: u32 = 16;
-pub const RUN_EVENT_SCHEMA_VERSION: u32 = RUN_EVENT_SCHEMA_VERSION_V16;
+pub const RUN_EVENT_SCHEMA_VERSION_V17: u32 = 17;
+pub const RUN_EVENT_SCHEMA_VERSION: u32 = RUN_EVENT_SCHEMA_VERSION_V17;
 
 pub const fn run_event_schema_version_for_model(model_schema_version: u32) -> u32 {
-  if model_schema_version >= COMPILED_MODEL_SCHEMA_VERSION_V17 {
+  if model_schema_version >= COMPILED_MODEL_SCHEMA_VERSION_V18 {
+    RUN_EVENT_SCHEMA_VERSION_V17
+  } else if model_schema_version >= COMPILED_MODEL_SCHEMA_VERSION_V17 {
     RUN_EVENT_SCHEMA_VERSION_V16
   } else if model_schema_version >= COMPILED_MODEL_SCHEMA_VERSION_V16 {
     RUN_EVENT_SCHEMA_VERSION_V15

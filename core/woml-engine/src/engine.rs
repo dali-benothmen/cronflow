@@ -532,6 +532,36 @@ pub(crate) fn node_is_complete(
           .is_some_and(|predecessor| node_is_complete(workflow, predecessor, projection))
       });
   }
+  if node.handler == "engine.lock-acquire" {
+    return workflow
+      .graph
+      .locks
+      .as_deref()
+      .unwrap_or_default()
+      .iter()
+      .find(|lock| lock.acquire_node_id == node.id)
+      .and_then(|lock| projection.locks.get(&lock.lock_id))
+      .is_some_and(|lock| {
+        matches!(
+          lock.status,
+          crate::LockStatus::Held | crate::LockStatus::Released
+        )
+      });
+  }
+  if node.handler == "engine.lock-release" {
+    return workflow
+      .graph
+      .locks
+      .as_deref()
+      .unwrap_or_default()
+      .iter()
+      .find(|lock| lock.release_node_id == node.id)
+      .and_then(|lock| projection.locks.get(&lock.lock_id))
+      .is_some_and(|lock| lock.status == crate::LockStatus::Released);
+  }
+  if node.handler == "engine.lock-result" {
+    return projection.context.steps.contains_key(&node.id);
+  }
   projection.context.steps.contains_key(&node.id)
 }
 
@@ -793,6 +823,7 @@ pub(crate) fn validate_payload_against_definition(
           | crate::COMPILED_MODEL_SCHEMA_VERSION_V15
           | crate::COMPILED_MODEL_SCHEMA_VERSION_V16
           | crate::COMPILED_MODEL_SCHEMA_VERSION_V17
+          | crate::COMPILED_MODEL_SCHEMA_VERSION_V18
       ) || data.definition_hash != definition_hash
         || workflow.runtime_policy_hash().as_deref() != Some(data.policy_hash.as_str())
         || workflow.runtime_policy_queue_name().as_deref() != Some(data.queue.name.as_str())
@@ -825,6 +856,7 @@ pub(crate) fn validate_payload_against_definition(
           | crate::COMPILED_MODEL_SCHEMA_VERSION_V15
           | crate::COMPILED_MODEL_SCHEMA_VERSION_V16
           | crate::COMPILED_MODEL_SCHEMA_VERSION_V17
+          | crate::COMPILED_MODEL_SCHEMA_VERSION_V18
       ) {
         return Err("Event v11+ runtime-policy events require compiled Model v12+.".to_string());
       }
@@ -852,6 +884,7 @@ pub(crate) fn validate_payload_against_definition(
           | crate::COMPILED_MODEL_SCHEMA_VERSION_V15
           | crate::COMPILED_MODEL_SCHEMA_VERSION_V16
           | crate::COMPILED_MODEL_SCHEMA_VERSION_V17
+          | crate::COMPILED_MODEL_SCHEMA_VERSION_V18
       ) {
         return Err("Event v11+ runtime-policy events require compiled Model v12+.".to_string());
       }
@@ -1322,6 +1355,36 @@ pub(crate) fn validate_payload_against_definition(
         return Err("wait_cancelled references an unknown durable wait.".to_string());
       }
     }
+    RunEventPayload::LockWaitRegistered(data) => {
+      if workflow.durable_lock(&data.lock_id).is_none() {
+        return Err("lock_wait_registered references an unknown Model v18 lock.".to_string());
+      }
+    }
+    RunEventPayload::LockAcquired(data) => {
+      if workflow.durable_lock(&data.lock_id).is_none() {
+        return Err("lock_acquired references an unknown Model v18 lock.".to_string());
+      }
+    }
+    RunEventPayload::LockReleased(data) => {
+      if workflow.durable_lock(&data.lock_id).is_none() {
+        return Err("lock_released references an unknown Model v18 lock.".to_string());
+      }
+    }
+    RunEventPayload::LockAcquireTimedOut(data) => {
+      if workflow.durable_lock(&data.lock_id).is_none() {
+        return Err("lock_acquire_timed_out references an unknown Model v18 lock.".to_string());
+      }
+    }
+    RunEventPayload::LockAcquisitionCancelled(data) => {
+      if workflow.durable_lock(&data.lock_id).is_none() {
+        return Err("lock_acquisition_cancelled references an unknown Model v18 lock.".to_string());
+      }
+    }
+    RunEventPayload::LockLeaseLost(data) => {
+      if workflow.durable_lock(&data.lock_id).is_none() {
+        return Err("lock_lease_lost references an unknown Model v18 lock.".to_string());
+      }
+    }
     RunEventPayload::RunSucceeded(data) => {
       if workflow.schema_version >= crate::COMPILED_MODEL_SCHEMA_VERSION_V11 {
         return Err("Model v11+ finalizes with run_outcome_decided and run_finalized.".to_string());
@@ -1354,6 +1417,7 @@ pub(crate) fn validate_payload_against_definition(
           | crate::COMPILED_MODEL_SCHEMA_VERSION_V15
           | crate::COMPILED_MODEL_SCHEMA_VERSION_V16
           | crate::COMPILED_MODEL_SCHEMA_VERSION_V17
+          | crate::COMPILED_MODEL_SCHEMA_VERSION_V18
       ) {
         return Err("Lifecycle and run-control events require compiled Model v11+.".to_string());
       }
@@ -1368,6 +1432,7 @@ pub(crate) fn validate_payload_against_definition(
           | crate::COMPILED_MODEL_SCHEMA_VERSION_V15
           | crate::COMPILED_MODEL_SCHEMA_VERSION_V16
           | crate::COMPILED_MODEL_SCHEMA_VERSION_V17
+          | crate::COMPILED_MODEL_SCHEMA_VERSION_V18
       ) {
         return Err("Lifecycle hook events require compiled Model v11+.".to_string());
       }
@@ -1406,6 +1471,7 @@ pub(crate) fn validate_payload_against_definition(
           | crate::COMPILED_MODEL_SCHEMA_VERSION_V15
           | crate::COMPILED_MODEL_SCHEMA_VERSION_V16
           | crate::COMPILED_MODEL_SCHEMA_VERSION_V17
+          | crate::COMPILED_MODEL_SCHEMA_VERSION_V18
       ) || !action_exists
       {
         return Err("Lifecycle action event references an unknown Model v11+ action.".to_string());
@@ -1428,6 +1494,7 @@ pub(crate) fn validate_payload_against_definition(
           | crate::COMPILED_MODEL_SCHEMA_VERSION_V15
           | crate::COMPILED_MODEL_SCHEMA_VERSION_V16
           | crate::COMPILED_MODEL_SCHEMA_VERSION_V17
+          | crate::COMPILED_MODEL_SCHEMA_VERSION_V18
       ) || !action_exists
       {
         return Err(
@@ -2445,6 +2512,12 @@ pub(crate) fn validate_event_history_against_definition(
       | RunEventPayload::ForEachSucceeded(_)
       | RunEventPayload::ForEachFailed(_)
       | RunEventPayload::ForEachCancelled(_)
+      | RunEventPayload::LockWaitRegistered(_)
+      | RunEventPayload::LockAcquired(_)
+      | RunEventPayload::LockReleased(_)
+      | RunEventPayload::LockAcquireTimedOut(_)
+      | RunEventPayload::LockAcquisitionCancelled(_)
+      | RunEventPayload::LockLeaseLost(_)
       | RunEventPayload::RunFinalized(_)
       | RunEventPayload::RunFailed(_) => {}
     }
@@ -2484,6 +2557,7 @@ fn validate_reusable_lifecycle_binding(
       | crate::COMPILED_MODEL_SCHEMA_VERSION_V15
       | crate::COMPILED_MODEL_SCHEMA_VERSION_V16
       | crate::COMPILED_MODEL_SCHEMA_VERSION_V17
+      | crate::COMPILED_MODEL_SCHEMA_VERSION_V18
   ) {
     return Err("Reusable lifecycle events require compiled Model v14 or later.".to_string());
   }

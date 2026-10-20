@@ -60,7 +60,7 @@ use crate::{
   RUN_EVENT_SCHEMA_VERSION_V8, RUN_EVENT_SCHEMA_VERSION_V9,
 };
 
-pub const DURABLE_STORE_SCHEMA_VERSION: u32 = 15;
+pub const DURABLE_STORE_SCHEMA_VERSION: u32 = 16;
 const STORE_SCHEMA_VERSION_V1: &str = "1";
 const STORE_SCHEMA_VERSION_V2: &str = "2";
 const STORE_SCHEMA_VERSION_V3: &str = "3";
@@ -76,6 +76,7 @@ const STORE_SCHEMA_VERSION_V12: &str = "12";
 const STORE_SCHEMA_VERSION_V13: &str = "13";
 const STORE_SCHEMA_VERSION_V14: &str = "14";
 const STORE_SCHEMA_VERSION_V15: &str = "15";
+const STORE_SCHEMA_VERSION_V16: &str = "16";
 const DEFAULT_APPROVAL_CREDENTIAL_LIFETIME_HOURS: i64 = 24;
 
 const CREATE_RUN_SUMMARY_SCHEMA_V11: &str = r#"
@@ -305,6 +306,50 @@ CREATE TABLE IF NOT EXISTS woml_signal_idempotency (
   created_at TEXT NOT NULL,
   FOREIGN KEY (signal_id) REFERENCES woml_external_signals(signal_id)
 );
+"#;
+
+const CREATE_LOCK_SCHEMA_V16: &str = r#"
+CREATE TABLE IF NOT EXISTS woml_lock_resources (
+  key TEXT PRIMARY KEY,
+  fencing_high_water INTEGER NOT NULL CHECK (fencing_high_water >= 0),
+  owner_lease_id TEXT UNIQUE,
+  owner_run_id TEXT,
+  owner_node_execution_id TEXT,
+  owner_fencing_token INTEGER,
+  acquired_at TEXT,
+  expires_at TEXT,
+  updated_at TEXT NOT NULL,
+  CHECK (
+    (owner_lease_id IS NULL AND owner_run_id IS NULL AND owner_node_execution_id IS NULL
+      AND owner_fencing_token IS NULL AND acquired_at IS NULL AND expires_at IS NULL)
+    OR
+    (owner_lease_id IS NOT NULL AND owner_run_id IS NOT NULL AND owner_node_execution_id IS NOT NULL
+      AND owner_fencing_token IS NOT NULL AND acquired_at IS NOT NULL AND expires_at IS NOT NULL)
+  ),
+  FOREIGN KEY (owner_run_id) REFERENCES woml_runs(run_id)
+);
+
+CREATE TABLE IF NOT EXISTS woml_lock_waiters (
+  waiter_id TEXT PRIMARY KEY,
+  key TEXT NOT NULL,
+  run_id TEXT NOT NULL,
+  node_execution_id TEXT NOT NULL,
+  sequence INTEGER NOT NULL CHECK (sequence >= 1),
+  registered_at TEXT NOT NULL,
+  deadline TEXT NOT NULL,
+  status TEXT NOT NULL CHECK (status IN ('waiting', 'held', 'released', 'timed_out', 'cancelled', 'lost')),
+  input_digest TEXT NOT NULL,
+  UNIQUE (run_id, node_execution_id),
+  FOREIGN KEY (run_id) REFERENCES woml_runs(run_id),
+  FOREIGN KEY (key) REFERENCES woml_lock_resources(key)
+);
+
+CREATE UNIQUE INDEX IF NOT EXISTS woml_lock_resources_one_owner
+  ON woml_lock_resources(key) WHERE owner_lease_id IS NOT NULL;
+CREATE INDEX IF NOT EXISTS woml_lock_waiters_fair_queue
+  ON woml_lock_waiters(key, status, sequence, waiter_id);
+CREATE INDEX IF NOT EXISTS woml_lock_waiters_recovery
+  ON woml_lock_waiters(status, deadline, run_id, node_execution_id);
 "#;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -1631,6 +1676,10 @@ pub enum DurableStoreError {
   ApprovalExpired,
   #[error("a different human approval decision is already durable")]
   ApprovalDecisionConflict,
+  #[error("the lock acquisition identity is already bound to different input")]
+  LockIdempotencyConflict,
+  #[error("stored lock history is contradictory: {0}")]
+  LockHistoryInvalid(String),
   #[error("approval timeout settlement requires a request with a deadline")]
   ApprovalHasNoDeadline,
   #[error("{0}")]
@@ -2095,6 +2144,23 @@ fn migrate_store_v14_to_v15(connection: &mut Connection) -> Result<(), DurableSt
   if changed != 1 {
     return Err(DurableStoreError::Contract(
       "Store v14-to-v15 migration could not update the schema version atomically.".to_string(),
+    ));
+  }
+  transaction.commit()?;
+  Ok(())
+}
+
+fn migrate_store_v15_to_v16(connection: &mut Connection) -> Result<(), DurableStoreError> {
+  let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+  transaction.execute_batch(CREATE_LOCK_SCHEMA_V16)?;
+  validate_store_v16_schema(&transaction)?;
+  let changed = transaction.execute(
+    "UPDATE woml_store_metadata SET value = ?1 WHERE key = 'schema_version' AND value = ?2",
+    [STORE_SCHEMA_VERSION_V16, STORE_SCHEMA_VERSION_V15],
+  )?;
+  if changed != 1 {
+    return Err(DurableStoreError::Contract(
+      "Store v15-to-v16 migration could not update the schema version atomically.".to_string(),
     ));
   }
   transaction.commit()?;
@@ -2589,6 +2655,75 @@ fn validate_store_v15_schema(connection: &Connection) -> Result<(), DurableStore
   Ok(())
 }
 
+fn validate_store_v16_schema(connection: &Connection) -> Result<(), DurableStoreError> {
+  validate_store_v15_schema(connection)?;
+  for (name, expected_columns) in [
+    (
+      "woml_lock_resources",
+      &[
+        "key",
+        "fencing_high_water",
+        "owner_lease_id",
+        "owner_run_id",
+        "owner_node_execution_id",
+        "owner_fencing_token",
+        "acquired_at",
+        "expires_at",
+        "updated_at",
+      ][..],
+    ),
+    (
+      "woml_lock_waiters",
+      &[
+        "waiter_id",
+        "key",
+        "run_id",
+        "node_execution_id",
+        "sequence",
+        "registered_at",
+        "deadline",
+        "status",
+        "input_digest",
+      ][..],
+    ),
+  ] {
+    let exists: bool = connection.query_row(
+      "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?1)",
+      [name],
+      |row| row.get(0),
+    )?;
+    if !exists {
+      return Err(DurableStoreError::Contract(format!(
+        "Store v16 is missing required table {name:?}."
+      )));
+    }
+    let mut statement = connection.prepare(&format!("PRAGMA table_info({name})"))?;
+    let columns = statement
+      .query_map([], |row| row.get::<_, String>(1))?
+      .collect::<Result<Vec<_>, _>>()?;
+    if columns != expected_columns {
+      return Err(DurableStoreError::Contract(format!("Store v16 {name} columns do not match the frozen schema: expected {expected_columns:?}, found {columns:?}.")));
+    }
+  }
+  for name in [
+    "woml_lock_resources_one_owner",
+    "woml_lock_waiters_fair_queue",
+    "woml_lock_waiters_recovery",
+  ] {
+    let exists: bool = connection.query_row(
+      "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type = 'index' AND name = ?1)",
+      [name],
+      |row| row.get(0),
+    )?;
+    if !exists {
+      return Err(DurableStoreError::Contract(format!(
+        "Store v16 is missing required index {name:?}."
+      )));
+    }
+  }
+  Ok(())
+}
+
 fn runtime_policy_indexes_need_rebuild(connection: &Connection) -> Result<bool, DurableStoreError> {
   let count = |sql: &str| -> Result<i64, DurableStoreError> {
     Ok(connection.query_row(sql, [], |row| row.get(0))?)
@@ -2644,7 +2779,7 @@ impl DurableEventStore {
       [],
       |row| row.get(0),
     )?;
-    if version != STORE_SCHEMA_VERSION_V15 {
+    if version != STORE_SCHEMA_VERSION_V16 {
       return Err(DurableStoreError::UnsupportedStoreVersion(version));
     }
     if let Ok(metadata) = std::fs::metadata(path) {
@@ -2677,6 +2812,7 @@ impl DurableEventStore {
       )
       .optional()?;
     match version.as_deref() {
+      Some(STORE_SCHEMA_VERSION_V16) => validate_store_v16_schema(&connection)?,
       Some(STORE_SCHEMA_VERSION_V15) => validate_store_v15_schema(&connection)?,
       Some(STORE_SCHEMA_VERSION_V14) => validate_store_v14_schema(&connection)?,
       Some(STORE_SCHEMA_VERSION_V13) => validate_store_v13_schema(&connection)?,
@@ -2813,7 +2949,15 @@ impl DurableEventStore {
     if current_version == STORE_SCHEMA_VERSION_V14 {
       migrate_store_v14_to_v15(&mut connection)?;
     }
-    validate_store_v15_schema(&connection)?;
+    let current_version: String = connection.query_row(
+      "SELECT value FROM woml_store_metadata WHERE key = 'schema_version'",
+      [],
+      |row| row.get(0),
+    )?;
+    if current_version == STORE_SCHEMA_VERSION_V15 {
+      migrate_store_v15_to_v16(&mut connection)?;
+    }
+    validate_store_v16_schema(&connection)?;
     if runtime_policy_indexes_need_rebuild(&connection)? {
       let recovery = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
       rebuild_runtime_policy_indexes(&recovery)?;
@@ -3107,7 +3251,7 @@ impl DurableEventStore {
         "The durable WOML store failed its integrity audit: {result}."
       )));
     }
-    validate_store_v15_schema(&self.connection)
+    validate_store_v16_schema(&self.connection)
   }
 
   pub fn runtime_owner(&self) -> Result<Option<RuntimeOwnerLease>, DurableStoreError> {
@@ -4449,6 +4593,7 @@ impl DurableEventStore {
         | crate::RUN_EVENT_SCHEMA_VERSION_V14
         | crate::RUN_EVENT_SCHEMA_VERSION_V15
         | crate::RUN_EVENT_SCHEMA_VERSION_V16
+        | crate::RUN_EVENT_SCHEMA_VERSION_V17
     ) {
       expand_model_v11_payload(&workflow, &run_id, payload)?
     } else {
@@ -4558,6 +4703,7 @@ impl DurableEventStore {
           | crate::RUN_EVENT_SCHEMA_VERSION_V14
           | crate::RUN_EVENT_SCHEMA_VERSION_V15
           | crate::RUN_EVENT_SCHEMA_VERSION_V16
+          | crate::RUN_EVENT_SCHEMA_VERSION_V17
       ) {
         expand_model_v11_payload(&workflow, run_id, payload)?
       } else {
@@ -7565,6 +7711,248 @@ impl DurableEventStore {
     Ok(projection)
   }
 
+  pub fn register_lock_waiter_atomically(
+    &mut self,
+    run_id: &str,
+    lock_id: &str,
+    key: &str,
+    execution_identity: &str,
+    registered_at: DateTime<Utc>,
+    deadline: DateTime<Utc>,
+  ) -> Result<RunProjection, DurableStoreError> {
+    if key.is_empty()
+      || key.len() > 256
+      || key.trim() != key
+      || key.chars().any(char::is_control)
+      || execution_identity.is_empty()
+      || deadline < registered_at
+    {
+      return Err(DurableStoreError::Contract(
+        "Lock acquisition input is invalid.".to_string(),
+      ));
+    }
+    let input_digest = format!(
+      "sha256:{:x}",
+      Sha256::digest(format!("{key}\0{}", deadline.to_rfc3339()).as_bytes())
+    );
+    let waiter_id = format!(
+      "waiter_{:x}",
+      Sha256::digest(format!("{run_id}\0{execution_identity}").as_bytes())
+    );
+    let transaction = self
+      .connection
+      .transaction_with_behavior(TransactionBehavior::Immediate)?;
+    ensure_run_exists(&transaction, run_id)?;
+    let workflow = definition_for_run(&transaction, run_id)?;
+    let descriptor = workflow.durable_lock(lock_id).ok_or_else(|| {
+      DurableStoreError::Contract(
+        "Lock acquisition references an unknown Model v18 lock.".to_string(),
+      )
+    })?;
+    if descriptor.acquire_node_id != execution_identity {
+      return Err(DurableStoreError::Contract(
+        "Lock execution identity does not match the compiled acquire node.".to_string(),
+      ));
+    }
+    let mut events = load_events(&transaction, run_id)?;
+    let event_schema_version = events
+      .first()
+      .map(|event| event.event_schema_version)
+      .ok_or_else(|| {
+        DurableStoreError::Contract("A lock cannot be registered before run_started.".to_string())
+      })?;
+    if event_schema_version != crate::RUN_EVENT_SCHEMA_VERSION_V17 {
+      return Err(DurableStoreError::Contract(
+        "Durable locks require Event v17.".to_string(),
+      ));
+    }
+    let existing: Option<(String, String, String)> = transaction.query_row(
+      "SELECT key, status, input_digest FROM woml_lock_waiters WHERE run_id = ?1 AND node_execution_id = ?2",
+      params![run_id, execution_identity], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+    ).optional()?;
+    if let Some((stored_key, _, stored_digest)) = existing {
+      if stored_key != key || stored_digest != input_digest {
+        return Err(DurableStoreError::LockIdempotencyConflict);
+      }
+    } else {
+      transaction.execute(
+        "INSERT INTO woml_lock_resources(key, fencing_high_water, updated_at) VALUES (?1, 0, ?2)
+         ON CONFLICT(key) DO NOTHING",
+        params![key, registered_at.to_rfc3339()],
+      )?;
+      let sequence: i64 = transaction.query_row(
+        "SELECT COALESCE(MAX(sequence), 0) + 1 FROM woml_lock_waiters WHERE key = ?1",
+        [key],
+        |row| row.get(0),
+      )?;
+      transaction.execute(
+        "INSERT INTO woml_lock_waiters(waiter_id, key, run_id, node_execution_id, sequence, registered_at, deadline, status, input_digest)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 'waiting', ?8)",
+        params![waiter_id, key, run_id, execution_identity, sequence, registered_at.to_rfc3339(), deadline.to_rfc3339(), input_digest],
+      )?;
+      append_to_history(
+        &transaction,
+        &mut events,
+        run_id,
+        generated_event_id(),
+        registered_at,
+        event_schema_version,
+        RunEventPayload::LockWaitRegistered(crate::LockWaitRegisteredData {
+          lock_id: lock_id.to_string(),
+          key: key.to_string(),
+          waiter_sequence: u64::try_from(sequence).map_err(|_| {
+            DurableStoreError::LockHistoryInvalid(
+              "waiter sequence exceeded the public contract".to_string(),
+            )
+          })?,
+          registered_at,
+          deadline,
+          execution_identity: execution_identity.to_string(),
+        }),
+      )?;
+    }
+    grant_oldest_lock_waiter(&transaction, key, registered_at)?;
+    let projection = fold_events(&load_events(&transaction, run_id)?)?;
+    transaction.commit()?;
+    Ok(projection)
+  }
+
+  pub fn release_lock_atomically(
+    &mut self,
+    run_id: &str,
+    lock_id: &str,
+    result: Value,
+    released_at: DateTime<Utc>,
+  ) -> Result<RunProjection, DurableStoreError> {
+    let transaction = self
+      .connection
+      .transaction_with_behavior(TransactionBehavior::Immediate)?;
+    ensure_run_exists(&transaction, run_id)?;
+    let mut events = load_events(&transaction, run_id)?;
+    let projection = fold_events(&events)?;
+    let held = projection.locks.get(lock_id).ok_or_else(|| {
+      DurableStoreError::LockHistoryInvalid("release has no projected lock".to_string())
+    })?;
+    if held.status != crate::LockStatus::Held {
+      return Err(DurableStoreError::LockHistoryInvalid(
+        "release requires one held lease".to_string(),
+      ));
+    }
+    let lease_id = held.lease_id.clone().ok_or_else(|| {
+      DurableStoreError::LockHistoryInvalid("held lock has no lease ID".to_string())
+    })?;
+    let fencing_token = held.fencing_token.clone().ok_or_else(|| {
+      DurableStoreError::LockHistoryInvalid("held lock has no fencing token".to_string())
+    })?;
+    let changed = transaction.execute(
+      "UPDATE woml_lock_resources SET owner_lease_id = NULL, owner_run_id = NULL,
+       owner_node_execution_id = NULL, owner_fencing_token = NULL, acquired_at = NULL,
+       expires_at = NULL, updated_at = ?1 WHERE key = ?2 AND owner_run_id = ?3
+       AND owner_lease_id = ?4 AND CAST(owner_fencing_token AS TEXT) = ?5",
+      params![
+        released_at.to_rfc3339(),
+        held.key,
+        run_id,
+        lease_id,
+        fencing_token
+      ],
+    )?;
+    if changed != 1 {
+      return Err(DurableStoreError::LockHistoryInvalid(
+        "durable owner differs from projected held lease".to_string(),
+      ));
+    }
+    transaction.execute(
+      "UPDATE woml_lock_waiters SET status = 'released' WHERE run_id = ?1 AND node_execution_id = ?2 AND status = 'held'",
+      params![run_id, held.execution_identity],
+    )?;
+    let schema = events
+      .first()
+      .map(|event| event.event_schema_version)
+      .ok_or_else(|| {
+        DurableStoreError::LockHistoryInvalid("release history is empty".to_string())
+      })?;
+    append_to_history(
+      &transaction,
+      &mut events,
+      run_id,
+      generated_event_id(),
+      released_at,
+      schema,
+      RunEventPayload::LockReleased(crate::LockReleasedData {
+        lock_id: lock_id.to_string(),
+        key: held.key.clone(),
+        lease_id,
+        fencing_token,
+        released_at,
+        result,
+      }),
+    )?;
+    grant_oldest_lock_waiter(&transaction, &held.key, released_at)?;
+    let projection = fold_events(&events)?;
+    transaction.commit()?;
+    Ok(projection)
+  }
+
+  pub fn timeout_lock_waiter_atomically(
+    &mut self,
+    run_id: &str,
+    lock_id: &str,
+    resolved_at: DateTime<Utc>,
+  ) -> Result<RunProjection, DurableStoreError> {
+    let transaction = self
+      .connection
+      .transaction_with_behavior(TransactionBehavior::Immediate)?;
+    ensure_run_exists(&transaction, run_id)?;
+    let mut events = load_events(&transaction, run_id)?;
+    let projection = fold_events(&events)?;
+    let waiting = projection.locks.get(lock_id).ok_or_else(|| {
+      DurableStoreError::LockHistoryInvalid("timeout has no projected lock waiter".to_string())
+    })?;
+    if waiting.status == crate::LockStatus::AcquireTimedOut {
+      return Ok(projection);
+    }
+    if waiting.status != crate::LockStatus::Waiting || resolved_at < waiting.deadline {
+      return Err(DurableStoreError::LockHistoryInvalid(
+        "lock timeout requires an expired waiting acquisition".to_string(),
+      ));
+    }
+    if transaction.execute(
+      "UPDATE woml_lock_waiters SET status = 'timed_out'
+       WHERE run_id = ?1 AND node_execution_id = ?2 AND status = 'waiting'",
+      params![run_id, waiting.execution_identity],
+    )? != 1
+    {
+      return Err(DurableStoreError::LockHistoryInvalid(
+        "durable waiter changed before timeout settlement".to_string(),
+      ));
+    }
+    let schema = events
+      .first()
+      .map(|event| event.event_schema_version)
+      .ok_or_else(|| {
+        DurableStoreError::LockHistoryInvalid("timeout history is empty".to_string())
+      })?;
+    append_to_history(
+      &transaction,
+      &mut events,
+      run_id,
+      generated_event_id(),
+      resolved_at,
+      schema,
+      RunEventPayload::LockAcquireTimedOut(crate::LockAcquireTimedOutData {
+        lock_id: lock_id.to_string(),
+        key: waiting.key.clone(),
+        deadline: waiting.deadline,
+        resolved_at,
+      }),
+    )?;
+    grant_oldest_lock_waiter(&transaction, &waiting.key, resolved_at)?;
+    let projection = fold_events(&events)?;
+    transaction.commit()?;
+    Ok(projection)
+  }
+
   pub fn admit_external_signal_atomically(
     &mut self,
     request: ExternalSignalAdmissionRequest,
@@ -8826,6 +9214,7 @@ impl DurableEventStore {
         | crate::RUN_EVENT_SCHEMA_VERSION_V14
         | crate::RUN_EVENT_SCHEMA_VERSION_V15
         | crate::RUN_EVENT_SCHEMA_VERSION_V16
+        | crate::RUN_EVENT_SCHEMA_VERSION_V17
     ) {
       let ambiguous_actions = projection
         .lifecycle_hooks
@@ -9196,6 +9585,7 @@ impl DurableEventStore {
             | crate::RUN_EVENT_SCHEMA_VERSION_V14
             | crate::RUN_EVENT_SCHEMA_VERSION_V15
             | crate::RUN_EVENT_SCHEMA_VERSION_V16
+            | crate::RUN_EVENT_SCHEMA_VERSION_V17
         ) {
           expand_model_v11_payload(&workflow, run_id, payload)?
         } else {
@@ -9250,6 +9640,7 @@ impl DurableEventStore {
           | crate::RUN_EVENT_SCHEMA_VERSION_V14
           | crate::RUN_EVENT_SCHEMA_VERSION_V15
           | crate::RUN_EVENT_SCHEMA_VERSION_V16
+          | crate::RUN_EVENT_SCHEMA_VERSION_V17
       ) {
         expand_model_v11_payload(&workflow, run_id, run_failure)?
       } else {
@@ -9468,6 +9859,7 @@ impl DurableEventStore {
           | crate::RUN_EVENT_SCHEMA_VERSION_V14
           | crate::RUN_EVENT_SCHEMA_VERSION_V15
           | crate::RUN_EVENT_SCHEMA_VERSION_V16
+          | crate::RUN_EVENT_SCHEMA_VERSION_V17
       ) {
         expand_model_v11_payload(&workflow, run_id, run_failure)?
       } else {
@@ -11067,6 +11459,7 @@ fn validate_trigger_occurrence_history(
           | RUN_EVENT_SCHEMA_VERSION_V14
           | crate::RUN_EVENT_SCHEMA_VERSION_V15
           | crate::RUN_EVENT_SCHEMA_VERSION_V16
+          | crate::RUN_EVENT_SCHEMA_VERSION_V17
       ) && admission.definition_hash == occurrence.definition_hash
         && admission.trigger.id == occurrence.trigger_id
         && admission.trigger.handler == occurrence.trigger_handler
@@ -11658,6 +12051,7 @@ fn append_to_history_scoped_incremental(
       | crate::RUN_EVENT_SCHEMA_VERSION_V14
       | crate::RUN_EVENT_SCHEMA_VERSION_V15
       | crate::RUN_EVENT_SCHEMA_VERSION_V16
+      | crate::RUN_EVENT_SCHEMA_VERSION_V17
   ) && matches!(
     payload,
     RunEventPayload::RunSucceeded(_) | RunEventPayload::RunFailed(_)
@@ -11770,6 +12164,117 @@ fn append_to_history(
   )
 }
 
+fn grant_oldest_lock_waiter(
+  transaction: &Transaction<'_>,
+  key: &str,
+  now: DateTime<Utc>,
+) -> Result<Option<String>, DurableStoreError> {
+  let owner: Option<String> = transaction
+    .query_row(
+      "SELECT owner_lease_id FROM woml_lock_resources WHERE key = ?1",
+      [key],
+      |row| row.get(0),
+    )
+    .optional()?
+    .flatten();
+  if owner.is_some() {
+    return Ok(None);
+  }
+  let selected: Option<(String, String, String)> = transaction
+    .query_row(
+      "SELECT waiter_id, run_id, node_execution_id FROM woml_lock_waiters
+     WHERE key = ?1 AND status = 'waiting' AND deadline >= ?2
+     ORDER BY sequence, waiter_id LIMIT 1",
+      params![key, now.to_rfc3339()],
+      |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+    )
+    .optional()?;
+  let Some((waiter_id, run_id, execution_identity)) = selected else {
+    return Ok(None);
+  };
+  let workflow = definition_for_run(transaction, &run_id)?;
+  let descriptor = workflow
+    .graph
+    .locks
+    .as_deref()
+    .unwrap_or_default()
+    .iter()
+    .find(|lock| lock.acquire_node_id == execution_identity)
+    .ok_or_else(|| {
+      DurableStoreError::LockHistoryInvalid(
+        "waiting acquisition has no compiled Model v18 descriptor".to_string(),
+      )
+    })?;
+  let current_high_water: i64 = transaction.query_row(
+    "SELECT fencing_high_water FROM woml_lock_resources WHERE key = ?1",
+    [key],
+    |row| row.get(0),
+  )?;
+  let next_token = current_high_water.checked_add(1).ok_or_else(|| {
+    DurableStoreError::Contract("Lock fencing-token space is exhausted.".to_string())
+  })?;
+  let lease_id = format!("lease_{}", Uuid::new_v4().simple());
+  let expires_at = now
+    + chrono::Duration::milliseconds(i64::try_from(descriptor.lease_ms).map_err(|_| {
+      DurableStoreError::Contract("Lock lease exceeds the runtime clock.".to_string())
+    })?);
+  let changed = transaction.execute(
+    "UPDATE woml_lock_resources SET fencing_high_water = ?1, owner_lease_id = ?2,
+     owner_run_id = ?3, owner_node_execution_id = ?4, owner_fencing_token = ?1,
+     acquired_at = ?5, expires_at = ?6, updated_at = ?5
+     WHERE key = ?7 AND owner_lease_id IS NULL AND fencing_high_water = ?8",
+    params![
+      next_token,
+      lease_id,
+      run_id,
+      execution_identity,
+      now.to_rfc3339(),
+      expires_at.to_rfc3339(),
+      key,
+      current_high_water
+    ],
+  )?;
+  if changed != 1 {
+    return Err(DurableStoreError::LockHistoryInvalid(
+      "atomic lock grant lost ownership race".to_string(),
+    ));
+  }
+  if transaction.execute(
+    "UPDATE woml_lock_waiters SET status = 'held' WHERE waiter_id = ?1 AND status = 'waiting'",
+    [&waiter_id],
+  )? != 1
+  {
+    return Err(DurableStoreError::LockHistoryInvalid(
+      "selected waiter changed before grant".to_string(),
+    ));
+  }
+  let mut events = load_events(transaction, &run_id)?;
+  let schema = events
+    .first()
+    .map(|event| event.event_schema_version)
+    .ok_or_else(|| {
+      DurableStoreError::LockHistoryInvalid("selected waiter run has no event history".to_string())
+    })?;
+  append_to_history(
+    transaction,
+    &mut events,
+    &run_id,
+    generated_event_id(),
+    now,
+    schema,
+    RunEventPayload::LockAcquired(crate::LockAcquiredData {
+      lock_id: descriptor.lock_id.clone(),
+      key: key.to_string(),
+      lease_id,
+      fencing_token: next_token.to_string(),
+      acquired_at: now,
+      expires_at,
+      execution_identity,
+    }),
+  )?;
+  Ok(Some(run_id))
+}
+
 #[allow(clippy::too_many_arguments)]
 fn append_to_history_scoped(
   transaction: &Transaction<'_>,
@@ -11790,6 +12295,7 @@ fn append_to_history_scoped(
       | crate::RUN_EVENT_SCHEMA_VERSION_V14
       | crate::RUN_EVENT_SCHEMA_VERSION_V15
       | crate::RUN_EVENT_SCHEMA_VERSION_V16
+      | crate::RUN_EVENT_SCHEMA_VERSION_V17
   ) && matches!(
     payload,
     RunEventPayload::RunSucceeded(_) | RunEventPayload::RunFailed(_)
@@ -12417,7 +12923,8 @@ fn attempt_run_failed_data(
     | crate::RUN_EVENT_SCHEMA_VERSION_V13
     | crate::RUN_EVENT_SCHEMA_VERSION_V14
     | crate::RUN_EVENT_SCHEMA_VERSION_V15
-    | crate::RUN_EVENT_SCHEMA_VERSION_V16 => RunFailedData::V2(RunFailedDataV2::Attempt {
+    | crate::RUN_EVENT_SCHEMA_VERSION_V16
+    | crate::RUN_EVENT_SCHEMA_VERSION_V17 => RunFailedData::V2(RunFailedDataV2::Attempt {
       node_id,
       attempt,
       invocation_id,
@@ -12575,6 +13082,7 @@ impl DurableDagEngine {
         | crate::RUN_EVENT_SCHEMA_VERSION_V14
         | crate::RUN_EVENT_SCHEMA_VERSION_V15
         | crate::RUN_EVENT_SCHEMA_VERSION_V16
+        | crate::RUN_EVENT_SCHEMA_VERSION_V17
     ) && matches!(
       &payload,
       RunEventPayload::RunSucceeded(_) | RunEventPayload::RunFailed(_)
@@ -12689,6 +13197,38 @@ impl DurableDagEngine {
             } if node_id == &failure.node_id
           )
         });
+    let lock_body = self
+      .workflow
+      .graph
+      .locks
+      .as_deref()
+      .unwrap_or_default()
+      .iter()
+      .any(|lock| {
+        let mut pending = vec![lock.body_entry_node_id.as_str()];
+        let mut visited = HashSet::new();
+        while let Some(candidate) = pending.pop() {
+          if !visited.insert(candidate) {
+            continue;
+          }
+          if candidate == failure.node_id {
+            return true;
+          }
+          if candidate == lock.body_terminal_node_id {
+            continue;
+          }
+          pending.extend(
+            self
+              .workflow
+              .graph
+              .edges
+              .iter()
+              .filter(|edge| edge.from == candidate)
+              .map(|edge| edge.to.as_str()),
+          );
+        }
+        false
+      });
     let projection = self.projection(run_id)?;
     let fork_coordinated = self.workflow.schema_version >= crate::COMPILED_MODEL_SCHEMA_VERSION_V13
       && projection.forks.values().any(|fork| {
@@ -12764,7 +13304,7 @@ impl DurableDagEngine {
         )],
         StepFailureDisposition::StepFailed,
       )
-    } else if reusable_lifecycle {
+    } else if reusable_lifecycle || lock_body {
       (
         vec![(
           generated_event_id(),
@@ -12869,6 +13409,64 @@ impl DurableDagEngine {
       occurred_at,
       registration,
     )?)
+  }
+
+  pub fn register_lock_waiter(
+    &mut self,
+    run_id: &str,
+    lock_id: &str,
+    key: &str,
+    occurred_at: DateTime<Utc>,
+    deadline: DateTime<Utc>,
+  ) -> Result<RunProjection, DurableEngineError> {
+    let descriptor = self
+      .workflow
+      .durable_lock(lock_id)
+      .ok_or_else(|| DurableEngineError::Contract("Unknown Model v18 lock.".to_string()))?;
+    let ready = self.ready_node_ids(run_id)?;
+    if !ready
+      .iter()
+      .any(|node_id| node_id == &descriptor.acquire_node_id)
+    {
+      return Err(DurableEngineError::Contract(format!(
+        "Lock {lock_id:?} is not ready to acquire."
+      )));
+    }
+    Ok(self.store.register_lock_waiter_atomically(
+      run_id,
+      lock_id,
+      key,
+      &descriptor.acquire_node_id,
+      occurred_at,
+      deadline,
+    )?)
+  }
+
+  pub fn release_lock(
+    &mut self,
+    run_id: &str,
+    lock_id: &str,
+    result: Value,
+    occurred_at: DateTime<Utc>,
+  ) -> Result<RunProjection, DurableEngineError> {
+    Ok(
+      self
+        .store
+        .release_lock_atomically(run_id, lock_id, result, occurred_at)?,
+    )
+  }
+
+  pub fn timeout_lock_waiter(
+    &mut self,
+    run_id: &str,
+    lock_id: &str,
+    occurred_at: DateTime<Utc>,
+  ) -> Result<RunProjection, DurableEngineError> {
+    Ok(
+      self
+        .store
+        .timeout_lock_waiter_atomically(run_id, lock_id, occurred_at)?,
+    )
   }
 
   pub fn settle_timer_wait(

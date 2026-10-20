@@ -9,7 +9,7 @@ use crate::{
 };
 
 pub const SCRIPT_HOST_PROTOCOL: &str = "woml.script-host";
-pub const SCRIPT_HOST_PROTOCOL_VERSION: u32 = 9;
+pub const SCRIPT_HOST_PROTOCOL_VERSION: u32 = 10;
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -97,6 +97,8 @@ pub struct ScriptExecutionContext<'a> {
   pub trigger: &'a serde_json::Map<String, Value>,
   pub steps: &'a serde_json::Map<String, Value>,
   #[serde(skip_serializing_if = "Option::is_none")]
+  pub lock: Option<&'a crate::LockContext>,
+  #[serde(skip_serializing_if = "Option::is_none")]
   pub item: Option<&'a Value>,
   #[serde(skip_serializing_if = "Option::is_none")]
   pub iteration: Option<ScriptIterationBinding>,
@@ -107,6 +109,7 @@ impl<'a> ScriptExecutionContext<'a> {
     Self {
       trigger: &context.trigger,
       steps: &context.steps,
+      lock: context.lock.as_ref(),
       item: None,
       iteration: None,
     }
@@ -116,6 +119,7 @@ impl<'a> ScriptExecutionContext<'a> {
     Self {
       trigger: &context.trigger,
       steps: &context.steps,
+      lock: context.lock.as_ref(),
       item: Some(item),
       iteration: Some(ScriptIterationBinding { index, total }),
     }

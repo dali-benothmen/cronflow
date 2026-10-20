@@ -1627,7 +1627,10 @@ pub async fn execute_workflow_durable(
   options: RuntimeExecutionOptions,
   database_path: PathBuf,
 ) -> Result<WorkflowExecutionResult, RuntimeExecutionError> {
-  if workflow_has_approval(&workflow) || workflow_has_durable_wait(&workflow) {
+  if workflow_has_approval(&workflow)
+    || workflow_has_durable_wait(&workflow)
+    || workflow_has_durable_lock(&workflow)
+  {
     return Err(RuntimeExecutionError::InvalidConfiguration(
       "durably waiting workflows require execute_workflow_durable_outcome".to_string(),
     ));
@@ -1645,9 +1648,12 @@ pub async fn execute_workflow_durable_outcome(
   options: RuntimeExecutionOptions,
   database_path: PathBuf,
 ) -> Result<WorkflowRuntimeOutcome, RuntimeExecutionError> {
-  if !workflow_has_approval(&workflow) && !workflow_has_durable_wait(&workflow) {
+  if !workflow_has_approval(&workflow)
+    && !workflow_has_durable_wait(&workflow)
+    && !workflow_has_durable_lock(&workflow)
+  {
     return Err(RuntimeExecutionError::InvalidConfiguration(
-      "the runtime outcome API requires an approval or durable-wait workflow".to_string(),
+      "the runtime outcome API requires an approval, durable-wait, or lock workflow".to_string(),
     ));
   }
   execute_workflow_durable_internal(workflow, definition_hash, trigger, options, database_path)
@@ -1800,12 +1806,13 @@ async fn resume_workflow_durable_internal(
   let workflow = store.definition(&binding.definition_hash)?;
   let has_approval = workflow_has_approval(&workflow);
   let has_durable_wait = workflow_has_durable_wait(&workflow);
-  if approval_outcome_api == Some(true) && !has_approval && !has_durable_wait {
+  let has_durable_lock = workflow_has_durable_lock(&workflow);
+  if approval_outcome_api == Some(true) && !has_approval && !has_durable_wait && !has_durable_lock {
     return Err(RuntimeExecutionError::InvalidConfiguration(
-      "the runtime outcome API requires an approval or durable-wait workflow".to_string(),
+      "the runtime outcome API requires an approval, durable-wait, or lock workflow".to_string(),
     ));
   }
-  if approval_outcome_api == Some(false) && (has_approval || has_durable_wait) {
+  if approval_outcome_api == Some(false) && (has_approval || has_durable_wait || has_durable_lock) {
     return Err(RuntimeExecutionError::InvalidConfiguration(
       "durably waiting workflows require resume_workflow_durable_outcome".to_string(),
     ));
@@ -1946,6 +1953,15 @@ fn workflow_has_durable_wait(workflow: &CompiledWorkflowDefinition) -> bool {
       .nodes
       .iter()
       .any(|node| node.handler == "engine.durable-wait")
+}
+
+fn workflow_has_durable_lock(workflow: &CompiledWorkflowDefinition) -> bool {
+  workflow.schema_version >= crate::COMPILED_MODEL_SCHEMA_VERSION_V18
+    && workflow
+      .graph
+      .locks
+      .as_deref()
+      .is_some_and(|locks| !locks.is_empty())
 }
 
 fn resolved_script_secrets(
@@ -5159,6 +5175,100 @@ async fn continue_runtime_loop<E: RuntimeDagEngine>(
         "no node is ready before the run reached a terminal state".to_string(),
       ));
     };
+    if let Some(lock) = engine
+      .workflow()
+      .graph
+      .locks
+      .as_deref()
+      .unwrap_or_default()
+      .iter()
+      .find(|lock| lock.acquire_node_id == *node_id)
+      .cloned()
+    {
+      let projection = engine.projection(run_id)?;
+      if !projection.locks.contains_key(&lock.lock_id) {
+        let key = resolve_lock_key(&lock.key, &projection.context)?;
+        let now = options.clock.now();
+        let deadline = now
+          + chrono::Duration::milliseconds(i64::try_from(lock.acquire_timeout_ms).map_err(
+            |_| {
+              RuntimeExecutionError::InvalidConfiguration(
+                "Lock acquisition timeout exceeds the runtime clock.".to_string(),
+              )
+            },
+          )?);
+        engine.register_lock_waiter(run_id, &lock.lock_id, &key, now, deadline)?;
+      }
+      options.suspend_policy_execution_slot().await?;
+      loop {
+        let projection = engine.projection(run_id)?;
+        let state = projection.locks.get(&lock.lock_id).ok_or_else(|| {
+          RuntimeExecutionError::Stalled(
+            "Registered lock disappeared from durable projection.".to_string(),
+          )
+        })?;
+        match state.status {
+          crate::LockStatus::Held | crate::LockStatus::Released => break,
+          crate::LockStatus::Waiting => {
+            if options.clock.now() >= state.deadline {
+              let resolved_at = options.clock.now();
+              engine.timeout_lock_waiter(run_id, &lock.lock_id, resolved_at)?;
+              engine.decide_run_failed(
+                run_id,
+                LifecycleFailure {
+                  kind: LifecycleFailureKind::TimedOut,
+                  code: "WOML_LOCK_ACQUIRE_TIMED_OUT".to_string(),
+                  message: format!(
+                    "Lock {:?} was not acquired before its deadline.",
+                    lock.lock_id
+                  ),
+                },
+                resolved_at,
+              )?;
+              return Err(resumed_failure(engine, run_id, engine.projection(run_id)?)?);
+            }
+            tokio::time::sleep(CANCELLATION_POLL_INTERVAL).await;
+          }
+          _ => {
+            return Err(RuntimeExecutionError::Stalled(format!(
+              "Lock {:?} acquisition did not succeed.",
+              lock.lock_id
+            )))
+          }
+        }
+      }
+      execution_order.push(lock.acquire_node_id);
+      continue;
+    }
+    if let Some(lock) = engine
+      .workflow()
+      .graph
+      .locks
+      .as_deref()
+      .unwrap_or_default()
+      .iter()
+      .find(|lock| lock.release_node_id == *node_id)
+      .cloned()
+    {
+      let projection = engine.projection(run_id)?;
+      let held = projection.locks.get(&lock.lock_id).ok_or_else(|| {
+        RuntimeExecutionError::Stalled("Lock release has no projected acquisition.".to_string())
+      })?;
+      let acquired_at = held.acquired_at.ok_or_else(|| {
+        RuntimeExecutionError::Stalled("Lock release has no acquisition timestamp.".to_string())
+      })?;
+      let released_at = options.clock.now();
+      let waited_ms = (acquired_at - held.registered_at).num_milliseconds().max(0);
+      let result = serde_json::json!({
+        "status": "released", "key": held.key, "fencingToken": held.fencing_token,
+        "acquiredAt": acquired_at.to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
+        "releasedAt": released_at.to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
+        "waitedMs": waited_ms,
+      });
+      engine.release_lock(run_id, &lock.lock_id, result, released_at)?;
+      execution_order.push(lock.release_node_id);
+      continue;
+    }
     options.ensure_policy_execution_slot().await?;
     if let Some(mut group) = engine.workflow().parallel_group_for_child(node_id) {
       if ready.iter().any(|ready_id| {
@@ -5812,7 +5922,113 @@ fn runtime_context_for_node(
       .steps
       .retain(|step_id, _| visibility.step_ids.contains(step_id));
   }
+  if let Some(descriptor) = lock_descriptor_for_body_node(workflow, node_id) {
+    if let Some(lock) = projection
+      .locks
+      .get(&descriptor.lock_id)
+      .filter(|lock| lock.status == crate::LockStatus::Held)
+    {
+      context.lock = Some(crate::LockContext {
+        id: lock.lock_id.clone(),
+        key: lock.key.clone(),
+        fencing_token: lock.fencing_token.clone().unwrap_or_default(),
+        acquired_at: lock
+          .acquired_at
+          .map(|value| value.to_rfc3339_opts(chrono::SecondsFormat::Millis, true))
+          .unwrap_or_default(),
+      });
+    }
+  }
   context
+}
+
+fn lock_descriptor_for_body_node<'a>(
+  workflow: &'a CompiledWorkflowDefinition,
+  node_id: &str,
+) -> Option<&'a crate::CompiledLock> {
+  workflow
+    .graph
+    .locks
+    .as_deref()
+    .unwrap_or_default()
+    .iter()
+    .find(|lock| {
+      let mut pending = vec![lock.body_entry_node_id.as_str()];
+      let mut visited = HashSet::new();
+      while let Some(candidate) = pending.pop() {
+        if !visited.insert(candidate) {
+          continue;
+        }
+        if candidate == node_id {
+          return true;
+        }
+        if candidate == lock.body_terminal_node_id {
+          continue;
+        }
+        pending.extend(
+          workflow
+            .graph
+            .edges
+            .iter()
+            .filter(|edge| edge.from == candidate)
+            .map(|edge| edge.to.as_str()),
+        );
+      }
+      false
+    })
+}
+
+fn resolve_lock_key(
+  expression: &ValueExpression,
+  context: &WorkflowContext,
+) -> Result<String, RuntimeExecutionError> {
+  match expression {
+    ValueExpression::Literal { value } => value.as_str().map(str::to_string),
+    ValueExpression::ContextReference { .. } => resolve_context_reference(expression, context)
+      .ok()
+      .and_then(render_template_scalar),
+    ValueExpression::Template { parts } => {
+      let mut rendered = String::new();
+      for part in parts {
+        match part {
+          TemplatePart::Text { text } => rendered.push_str(text),
+          TemplatePart::ContextReference { path } => {
+            let value = resolve_context_reference(
+              &ValueExpression::ContextReference { path: path.clone() },
+              context,
+            )
+            .ok()
+            .and_then(render_template_scalar)
+            .ok_or_else(|| {
+              RuntimeExecutionError::InvalidConfiguration(
+                "A lock-key reference is unavailable or is not scalar.".to_string(),
+              )
+            })?;
+            rendered.push_str(&value);
+          }
+          TemplatePart::LifecycleReference { .. } => {
+            return Err(RuntimeExecutionError::InvalidConfiguration(
+              "Lock keys cannot use lifecycle references.".to_string(),
+            ))
+          }
+        }
+      }
+      Some(rendered)
+    }
+    _ => None,
+  }
+  .filter(|key| {
+    !key.is_empty()
+      && key.len() <= 256
+      && key.trim() == key
+      && !key.chars().any(char::is_control)
+      && !key.split('/').any(str::is_empty)
+  })
+  .ok_or_else(|| {
+    RuntimeExecutionError::InvalidConfiguration(
+      "The lock key did not resolve to a valid scalar key.".to_string(),
+    )
+  })
 }
 
 fn final_attempt_failure_in_nodes(
@@ -10152,6 +10368,7 @@ async fn settle_script_attempt_failure<E: RuntimeDagEngine>(
     )
     .await?;
   }
+  release_held_lock_after_body_failure(engine, run_id, node_id, options.clock.now())?;
   if engine.projection(run_id)?.business_outcome.is_none() {
     engine.append_payload(
       run_id,
@@ -10196,6 +10413,39 @@ async fn settle_script_attempt_failure<E: RuntimeDagEngine>(
       events: engine.events(run_id)?,
     },
   )))
+}
+
+fn release_held_lock_after_body_failure<E: RuntimeDagEngine>(
+  engine: &mut E,
+  run_id: &str,
+  node_id: &str,
+  released_at: chrono::DateTime<chrono::Utc>,
+) -> Result<(), RuntimeExecutionError> {
+  let Some(descriptor) = lock_descriptor_for_body_node(engine.workflow(), node_id).cloned() else {
+    return Ok(());
+  };
+  let projection = engine.projection(run_id)?;
+  let Some(lock) = projection
+    .locks
+    .get(&descriptor.lock_id)
+    .filter(|lock| lock.status == crate::LockStatus::Held)
+    .cloned()
+  else {
+    return Ok(());
+  };
+  let acquired_at = lock.acquired_at.ok_or_else(|| {
+    RuntimeExecutionError::Stalled("A held lock has no acquisition timestamp.".to_string())
+  })?;
+  let result = serde_json::json!({
+    "status": "released",
+    "key": lock.key,
+    "fencingToken": lock.fencing_token,
+    "acquiredAt": acquired_at.to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
+    "releasedAt": released_at.to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
+    "waitedMs": (acquired_at - lock.registered_at).num_milliseconds().max(0),
+  });
+  engine.release_lock(run_id, &descriptor.lock_id, result, released_at)?;
+  Ok(())
 }
 
 fn fail_choice<T, E: RuntimeDagEngine>(
@@ -10372,7 +10622,8 @@ fn attempt_run_failed_data(
     | crate::RUN_EVENT_SCHEMA_VERSION_V13
     | crate::RUN_EVENT_SCHEMA_VERSION_V14
     | crate::RUN_EVENT_SCHEMA_VERSION_V15
-    | crate::RUN_EVENT_SCHEMA_VERSION_V16 => RunFailedData::V2(RunFailedDataV2::Attempt {
+    | crate::RUN_EVENT_SCHEMA_VERSION_V16
+    | crate::RUN_EVENT_SCHEMA_VERSION_V17 => RunFailedData::V2(RunFailedDataV2::Attempt {
       node_id: failure.node_id.clone(),
       attempt: failure.attempt,
       invocation_id: failure.invocation_id.clone(),
@@ -10482,6 +10733,39 @@ trait RuntimeDagEngine {
   ) -> Result<(), RuntimeExecutionError> {
     Err(RuntimeExecutionError::Stalled(
       "durable waits require the durable runtime".to_string(),
+    ))
+  }
+  fn register_lock_waiter(
+    &mut self,
+    _run_id: &str,
+    _lock_id: &str,
+    _key: &str,
+    _occurred_at: chrono::DateTime<chrono::Utc>,
+    _deadline: chrono::DateTime<chrono::Utc>,
+  ) -> Result<(), RuntimeExecutionError> {
+    Err(RuntimeExecutionError::Stalled(
+      "durable locks require the durable runtime".to_string(),
+    ))
+  }
+  fn release_lock(
+    &mut self,
+    _run_id: &str,
+    _lock_id: &str,
+    _result: Value,
+    _occurred_at: chrono::DateTime<chrono::Utc>,
+  ) -> Result<(), RuntimeExecutionError> {
+    Err(RuntimeExecutionError::Stalled(
+      "durable locks require the durable runtime".to_string(),
+    ))
+  }
+  fn timeout_lock_waiter(
+    &mut self,
+    _run_id: &str,
+    _lock_id: &str,
+    _occurred_at: chrono::DateTime<chrono::Utc>,
+  ) -> Result<(), RuntimeExecutionError> {
+    Err(RuntimeExecutionError::Stalled(
+      "durable locks require the durable runtime".to_string(),
     ))
   }
   fn settle_timer_wait(
@@ -10739,6 +11023,7 @@ impl RuntimeDagEngine for InMemoryDagEngine {
         | crate::RUN_EVENT_SCHEMA_VERSION_V14
         | crate::RUN_EVENT_SCHEMA_VERSION_V15
         | crate::RUN_EVENT_SCHEMA_VERSION_V16
+        | crate::RUN_EVENT_SCHEMA_VERSION_V17
     ) {
       crate::durable::expand_model_v11_payload(self.workflow(), run_id, payload)?
     } else {
@@ -10975,6 +11260,39 @@ impl RuntimeDagEngine for DurableDagEngine {
     registration: crate::WaitRegisteredData,
   ) -> Result<(), RuntimeExecutionError> {
     DurableDagEngine::register_durable_wait(self, run_id, occurred_at, registration)?;
+    Ok(())
+  }
+
+  fn register_lock_waiter(
+    &mut self,
+    run_id: &str,
+    lock_id: &str,
+    key: &str,
+    occurred_at: chrono::DateTime<chrono::Utc>,
+    deadline: chrono::DateTime<chrono::Utc>,
+  ) -> Result<(), RuntimeExecutionError> {
+    DurableDagEngine::register_lock_waiter(self, run_id, lock_id, key, occurred_at, deadline)?;
+    Ok(())
+  }
+
+  fn release_lock(
+    &mut self,
+    run_id: &str,
+    lock_id: &str,
+    result: Value,
+    occurred_at: chrono::DateTime<chrono::Utc>,
+  ) -> Result<(), RuntimeExecutionError> {
+    DurableDagEngine::release_lock(self, run_id, lock_id, result, occurred_at)?;
+    Ok(())
+  }
+
+  fn timeout_lock_waiter(
+    &mut self,
+    run_id: &str,
+    lock_id: &str,
+    occurred_at: chrono::DateTime<chrono::Utc>,
+  ) -> Result<(), RuntimeExecutionError> {
+    DurableDagEngine::timeout_lock_waiter(self, run_id, lock_id, occurred_at)?;
     Ok(())
   }
 

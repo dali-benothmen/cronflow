@@ -19,6 +19,7 @@ import type {
   ExecuteMessageV7,
   ExecuteMessageV8,
   ExecuteMessageV9,
+  ExecuteMessageV10,
   FetchObservationMessage,
   JsonValue,
   ScriptAttempt,
@@ -3115,6 +3116,64 @@ describe('Reusable custom-step Script Host v8', () => {
       error: { kind: 'invalid_script_result' },
     });
     expect(JSON.stringify(result.messages)).not.toContain(secret);
+  });
+});
+
+describe('Durable Lock Script Host v10', () => {
+  test('exposes a deeply read-only durable lock binding', async () => {
+    const message: ExecuteMessageV10 = {
+      ...executeStepV7(
+        'inv_lock_binding',
+        `
+          let mutationBlocked = false;
+          try { context.lock.key = 'changed'; } catch { mutationBlocked = true; }
+          return {
+            id: context.lock.id,
+            key: context.lock.key,
+            fencingToken: context.lock.fencingToken,
+            acquiredAt: context.lock.acquiredAt,
+            frozen: Object.isFrozen(context.lock),
+            mutationBlocked,
+          };
+        `
+      ),
+      protocolVersion: 10,
+      context: {
+        trigger: {},
+        steps: {},
+        lock: {
+          id: 'deployment',
+          key: 'production/payments',
+          fencingToken: '42',
+          acquiredAt: '2026-10-20T12:00:00.000Z',
+        },
+      },
+    };
+    const result = await runHost([message], {
+      WOML_SCRIPT_HOST_PROTOCOL_VERSION: '10',
+    });
+    expect(
+      byInvocation(result.messages).get(message.invocationId)?.outcome
+    ).toEqual({
+      kind: 'success',
+      value: {
+        id: 'deployment',
+        key: 'production/payments',
+        fencingToken: '42',
+        acquiredAt: '2026-10-20T12:00:00.000Z',
+        frozen: true,
+        mutationBlocked: true,
+      },
+    });
+    expect(
+      isScriptHostMessage({
+        ...message,
+        context: {
+          ...message.context,
+          lock: { ...message.context.lock, fencingToken: '0' },
+        },
+      })
+    ).toBe(false);
   });
 });
 

@@ -2797,9 +2797,9 @@ async function runSingleCheckCommand(
               valid: true,
               workflowId: workflowElement?.attributes.id?.value,
               feature: 'locks-and-leases',
-              executable: false,
+              executable: true,
               modelVersion: compiled.schemaVersion,
-              runtimePhase: 'LL2–LL4',
+              runtimePhase: 'LL3',
             },
             null,
             2
@@ -2811,7 +2811,7 @@ async function runSingleCheckCommand(
         `WOML check passed for workflow "${workflowElement?.attributes.id?.value ?? filePath}".\n`
       );
       io.stdout(
-        'Compiled Model v18 passed lock authoring and lowering validation. Durable execution begins in LL2–LL4.\n'
+        'Compiled Model v18 passed frontend and durable Rust lock validation.\n'
       );
       return 0;
     }
@@ -3595,6 +3595,12 @@ function workflowHasDurableWait(workflow: CompiledWorkflowDefinition): boolean {
   );
 }
 
+function workflowHasDurableLock(workflow: CompiledWorkflowDefinition): boolean {
+  return workflow.graph.nodes.some(
+    node => node.handler === 'engine.lock-acquire'
+  );
+}
+
 function workflowHasNotifications(
   workflow: CompiledWorkflowDefinition
 ): boolean {
@@ -4031,6 +4037,7 @@ async function executeOneShot(
   }
   const hasApproval = workflowHasApproval(workflow);
   const hasDurableWait = workflowHasDurableWait(workflow);
+  const hasDurableLock = workflowHasDurableLock(workflow);
   const hasNotifications = workflowHasNotifications(workflow);
   if (
     args.resumeRunId !== undefined &&
@@ -4045,7 +4052,8 @@ async function executeOneShot(
     workflow.schemaVersion !== 14 &&
     workflow.schemaVersion !== 15 &&
     workflow.schemaVersion !== 16 &&
-    workflow.schemaVersion !== 17
+    workflow.schemaVersion !== 17 &&
+    workflow.schemaVersion !== 18
   ) {
     throw new CliInputError(
       'WOML_RESUME_REQUIRES_DURABLE_WORKFLOW',
@@ -4062,7 +4070,7 @@ async function executeOneShot(
     );
     return;
   }
-  if (hasApproval || hasDurableWait) {
+  if (hasApproval || hasDurableWait || hasDurableLock) {
     await runApprovalWorkflow(workflow, args, io, dependencies, runtimeModules);
     return;
   }
@@ -4077,7 +4085,8 @@ async function executeOneShot(
     workflow.schemaVersion === 14 ||
     workflow.schemaVersion === 15 ||
     workflow.schemaVersion === 16 ||
-    workflow.schemaVersion === 17
+    workflow.schemaVersion === 17 ||
+    workflow.schemaVersion === 18
   ) {
     await mkdir(dirname(args.statePath), { recursive: true });
     const onProgress = durableRetryProgress(io, args);
@@ -6930,12 +6939,6 @@ async function runCliUnprofiled(
   let sources: readonly CompiledWorkflowSource[] | undefined;
   try {
     sources = await compileWorkflowInputs(inputPaths, io);
-    if (sources.some(source => source.workflow.schemaVersion === 18)) {
-      throw new CliInputError(
-        'WOML_LOCK_RUNTIME_UNAVAILABLE',
-        'This workflow uses <lock>, which is validated and compiled as Model v18 but cannot execute until the durable Rust lock authority is implemented in LL2–LL4. Use "woml check" to validate it now.'
-      );
-    }
     if (
       sources.some(source =>
         inspectWomlModuleUsage(source.document).referencedServices.includes(

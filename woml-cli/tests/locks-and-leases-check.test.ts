@@ -37,13 +37,15 @@ async function command(command: 'check' | 'run', ...options: string[]) {
 }
 
 describe('woml check lock authoring', () => {
-  test('accepts a valid Model v18 lock while identifying its deferred runtime', async () => {
+  test('accepts a valid executable Model v18 lock', async () => {
     const result = await command('check');
     expect(result.exitCode).toBe(0);
     expect(result.stderr).toBe('');
     expect(result.stdout).toContain('WOML check passed');
     expect(result.stdout).toContain('Compiled Model v18');
-    expect(result.stdout).toContain('Durable execution begins in LL2–LL4');
+    expect(result.stdout).toContain(
+      'passed frontend and durable Rust lock validation'
+    );
   });
 
   test('returns the frozen frontend-validation profile as JSON', async () => {
@@ -55,17 +57,9 @@ describe('woml check lock authoring', () => {
       valid: true,
       workflowId: 'lock-check',
       feature: 'locks-and-leases',
-      executable: false,
+      executable: true,
       modelVersion: 18,
-      runtimePhase: 'LL2–LL4',
+      runtimePhase: 'LL3',
     });
-  });
-
-  test('fails closed before runtime activation until Rust owns locks', async () => {
-    const result = await command('run');
-    expect(result.exitCode).toBe(1);
-    expect(result.stdout).toBe('');
-    expect(result.stderr).toContain('WOML_LOCK_RUNTIME_UNAVAILABLE');
-    expect(result.stderr).toContain('woml check');
   });
 });
