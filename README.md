@@ -332,6 +332,7 @@ Every example below is checked against the current WOML compiler.
 | [Telegram approval](./examples/telegramApprovalWorkflow.woml)        | Human approval, interactive notification buttons, and durable waiting   | `woml run examples/telegramApprovalWorkflow.woml` |
 | [Workflow composition](./examples/workflowCallManual/)               | One workflow calling another and using its returned result              | `woml run examples/workflowCallManual`            |
 | [Durable external callback](./examples/durableWaits/ciCallback.woml) | A run that releases its worker and resumes from an idempotent CI signal | `woml run examples/durableWaits/ciCallback.woml`  |
+| [Preview environment saga](./examples/compensationAndCleanup/previewEnvironment.woml) | Explicit rollback and mandatory cleanup for partial infrastructure success | `woml run examples/compensationAndCleanup/previewEnvironment.woml` |
 | [Local TypeScript module](./examples/moduleWorkflow.woml)            | Reusable project code exposed through `services.*`                      | `woml run examples/moduleWorkflow.woml`           |
 
 Provider examples require their documented credentials. Browse the [complete example catalog](./examples/) for webhooks, schedules, intervals, internal events, databases, storage, cache, lifecycle, retries, communication providers, and production deployment.
@@ -346,6 +347,7 @@ Provider examples require their documented credentials. Browse the [complete exa
 - **Human-in-the-loop** — pause durably for approval and continue through approved or rejected routes.
 - **Durable waits and signals** — suspend without holding a worker, survive restarts, and resume the same run from timers or authenticated callbacks.
 - **Locks, leases, and fencing** — serialize shared-resource work across runs and local processes, then reject stale owners with monotonic fencing tokens.
+- **Compensation and cleanup** — correct proven partial success in reverse completion order, always run cleanup, and fail closed when an effect is ambiguous.
 - **Managed capabilities** — use supervised HTTP, SQLite/PostgreSQL, storage, cache, state, events, workflow calls, and communication services.
 - **Reusable building blocks** — import local JavaScript or TypeScript modules and define reusable WOML steps or notification providers.
 - **Lifecycle and runtime policy** — observe workflow and step events while controlling concurrency, rate limits, queues, and timeouts.
@@ -377,6 +379,7 @@ woml inspect                             # Open the colored runtime inspector
 woml list                                # List workflows and recent runs
 woml get run_...                         # Inspect one run and its event history
 woml cancel run_...                      # Cancel a pending or running workflow
+woml recover run_... --retry action-id   # Resume a verified-safe corrective attempt
 woml workflow-id --logs                  # Follow logs for a workflow
 woml secrets set API_TOKEN               # Store a secret without printing it
 woml backup backups/latest               # Back up the durable state store
@@ -430,6 +433,7 @@ cp -R skills/woml .agents/skills/woml
 - [CLI reference](./docs/cli-reference.md)
 - [Services and capabilities](./docs/woml-services.md)
 - [Locks and leases](./docs/woml-locks-and-leases.md)
+- [Compensation and cleanup](./docs/woml-compensation-and-cleanup.md)
 - [Run local tools safely](./docs/woml-process.md)
 - [Preserve files as Durable Artifacts](./docs/woml-durable-artifacts.md)
 - [Modules](./docs/woml-modules.md)

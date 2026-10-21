@@ -53,6 +53,7 @@ import {
   type WomlDefinitionPackageV11,
   type WomlDefinitionPackageV12,
   type WomlDefinitionPackageV13,
+  type WomlDefinitionPackageV14,
 } from '@woml/compiler';
 import {
   compiledDefinitionHash,
@@ -75,6 +76,8 @@ import {
   inspectRunV2WithRust,
   inspectWaitsV1WithRust,
   inspectLocksV1WithRust,
+  inspectCorrectionV1WithRust,
+  recoverCorrectionWithRust,
   listRunPresentationsWithRust,
   listRunsWithRust,
   observeRuntimeWithRust,
@@ -101,6 +104,7 @@ import {
   type RustRunInspectionV2,
   type RustWaitInspectionV1,
   type RustLockInspectionV1,
+  type RustCorrectionInspectionV1,
   type RustRunListV1,
   type ScheduleProgressV1,
   type TriggerProgressV1,
@@ -308,6 +312,14 @@ function cancelUsage(): string {
   return 'Usage: woml cancel <runId> [--state <path>] [--json]';
 }
 
+function recoverUsage(): string {
+  return [
+    'Usage:',
+    '  woml recover <runId> --retry <actionId> [--state <path>] [--json]',
+    '  woml recover <runId> --resolve <actionId> --note <text> [--state <path>] [--json]',
+  ].join('\n');
+}
+
 function stopUsage(): string {
   return 'Usage: woml stop [--state <path>] [--json]';
 }
@@ -338,7 +350,7 @@ function typesUsage(): string {
 }
 
 function usage(): string {
-  return `${runUsage()}\n${testUsage()}\n${logFollowUsage}\n${checkUsage()}\n${typesUsage()}\n${inspectUsage}\n${artifactsUsage()}\n${backupUsage}\n${restoreUsage}\n${pruneUsage}\n${listUsage()}\n${getUsage()}\n${cancelUsage()}\n${stopUsage()}\n${emitUsage()}\n${signalUsage()}\n${secretsUsage()}\n${providerDoctorUsage()}`;
+  return `${runUsage()}\n${testUsage()}\n${logFollowUsage}\n${checkUsage()}\n${typesUsage()}\n${inspectUsage}\n${artifactsUsage()}\n${backupUsage}\n${restoreUsage}\n${pruneUsage}\n${listUsage()}\n${getUsage()}\n${cancelUsage()}\n${recoverUsage()}\n${stopUsage()}\n${emitUsage()}\n${signalUsage()}\n${secretsUsage()}\n${providerDoctorUsage()}`;
 }
 
 interface RunArguments {
@@ -665,6 +677,15 @@ interface RunGetArguments {
   readonly json: boolean;
 }
 
+interface RecoverArguments {
+  readonly runId: string;
+  readonly action: 'retry' | 'externally_resolve';
+  readonly actionId: string;
+  readonly note?: string;
+  readonly statePath: string;
+  readonly json: boolean;
+}
+
 interface ArtifactCommandArguments {
   readonly operation: 'inspect' | 'export';
   readonly artifactId: string;
@@ -953,6 +974,73 @@ function parseRunGetArguments(
   };
 }
 
+function parseRecoverArguments(args: readonly string[]): RecoverArguments {
+  const [, runId, ...options] = args;
+  if (
+    runId === undefined ||
+    runId.length === 0 ||
+    runId.length > 320 ||
+    runId.startsWith('--')
+  ) {
+    throw new CliInputError('WOML_CLI_ARGUMENTS_INVALID', recoverUsage());
+  }
+  let statePath = resolve('.woml/state.sqlite');
+  let json = false;
+  let action: RecoverArguments['action'] | undefined;
+  let actionId: string | undefined;
+  let note: string | undefined;
+  const seen = new Set<string>();
+  for (let index = 0; index < options.length; index += 1) {
+    const option = options[index]!;
+    if (seen.has(option)) {
+      throw new CliInputError('WOML_CLI_ARGUMENTS_INVALID', recoverUsage());
+    }
+    seen.add(option);
+    if (option === '--json') {
+      json = true;
+      continue;
+    }
+    const value = options[++index];
+    if (
+      value === undefined ||
+      value.startsWith('--') ||
+      !['--state', '--retry', '--resolve', '--note'].includes(option)
+    ) {
+      throw new CliInputError('WOML_CLI_ARGUMENTS_INVALID', recoverUsage());
+    }
+    if (option === '--state') statePath = resolve(value);
+    if (option === '--retry') {
+      action = 'retry';
+      actionId = value;
+    }
+    if (option === '--resolve') {
+      action = 'externally_resolve';
+      actionId = value;
+    }
+    if (option === '--note') note = value;
+  }
+  if (
+    action === undefined ||
+    actionId === undefined ||
+    actionId.length === 0 ||
+    actionId.length > 768 ||
+    (action === 'externally_resolve' &&
+      (note === undefined || note.length === 0 || note.length > 1000)) ||
+    (action === 'retry' && note !== undefined) ||
+    (seen.has('--retry') && seen.has('--resolve'))
+  ) {
+    throw new CliInputError('WOML_CLI_ARGUMENTS_INVALID', recoverUsage());
+  }
+  return {
+    runId,
+    action,
+    actionId,
+    ...(note === undefined ? {} : { note }),
+    statePath,
+    json,
+  };
+}
+
 function parseArtifactCommandArguments(
   args: readonly string[]
 ): ArtifactCommandArguments {
@@ -1055,7 +1143,8 @@ function formatRunInspection(
   artifacts?: readonly RustArtifactInspectionV1[],
   artifactsTruncated = false,
   waitInspection?: RustWaitInspectionV1,
-  locks: readonly RustLockInspectionV1[] = []
+  locks: readonly RustLockInspectionV1[] = [],
+  correction?: RustCorrectionInspectionV1
 ): string {
   const lines = [
     `Run: ${inspection.runId}`,
@@ -1173,6 +1262,36 @@ function formatRunInspection(
     }
     if (artifactsTruncated)
       lines.push('  Additional artifacts were omitted from this bounded view.');
+  }
+  if (correction !== undefined) {
+    lines.push('Correction:');
+    lines.push(
+      `  ${correction.phase.replaceAll('_', ' ')} · original outcome ${correction.originalOutcome}`
+    );
+    for (const saga of correction.sagas) {
+      lines.push(
+        `  ${saga.sagaId}: ${saga.status.replaceAll('_', ' ')} · ${saga.completedCompensations}/${saga.registeredCompensations} compensated · ${saga.completedCleanup} cleanup completed`
+      );
+    }
+    for (const action of correction.unresolvedActions) {
+      lines.push(
+        `  ${action.actionId}: ${action.kind} · ${action.code}${action.ambiguous ? ' · ambiguous' : ''}`
+      );
+      if (action.ambiguous) {
+        lines.push(
+          '    Verify the external effect before choosing a recovery action.'
+        );
+        lines.push(
+          `    Retry only if it did not occur: woml recover ${inspection.runId} --retry ${JSON.stringify(action.actionId)}`
+        );
+        lines.push(
+          `    Resolve after external repair: woml recover ${inspection.runId} --resolve ${JSON.stringify(action.actionId)} --note ${JSON.stringify('ticket or change reference')}`
+        );
+      }
+    }
+    if (correction.truncated) {
+      lines.push('  Additional unresolved actions were omitted from this bounded view.');
+    }
   }
   return `${lines.join('\n')}\n`;
 }
@@ -1793,7 +1912,8 @@ function promoteForLifecycleAuthority(
     workflow.schemaVersion === 15 ||
     workflow.schemaVersion === 16 ||
     workflow.schemaVersion === 17 ||
-    workflow.schemaVersion === 18
+    workflow.schemaVersion === 18 ||
+    workflow.schemaVersion === 19
   ) {
     return workflow;
   }
@@ -1875,6 +1995,7 @@ function runtimeModulesFromPackage(
     | WomlDefinitionPackageV11
     | WomlDefinitionPackageV12
     | WomlDefinitionPackageV13
+    | WomlDefinitionPackageV14
 ): readonly RustRuntimeModuleArtifact[] {
   const modules = definitionPackage.modules.map(module => {
     const bundle = definitionPackage.artifacts.find(
@@ -2732,6 +2853,12 @@ async function runSingleCheckCommand(
         child => child.kind === 'element' && declaresLock(child)
       );
     const hasLock = declaresLock(document.root);
+    const declaresSaga = (element: WomlSourceElement): boolean =>
+      element.name === 'saga' ||
+      element.children.some(
+        child => child.kind === 'element' && declaresSaga(child)
+      );
+    const hasSaga = declaresSaga(document.root);
     if (
       reusableGraph.root.kind !== 'workflow' ||
       reusableGraph.definitions.length > 0
@@ -2782,7 +2909,9 @@ async function runSingleCheckCommand(
         );
       }
       io.stdout(
-        reusablePackage?.schemaVersion === 13
+        reusablePackage?.schemaVersion === 14
+          ? `Compiled Model v19 package: ${reusablePackage.rootHash}\nExecution: compensation and cleanup authoring is validated; durable correction execution begins in CC2–CC4.\n`
+          : reusablePackage?.schemaVersion === 13
           ? `Compiled Model v18 package: ${reusablePackage.rootHash}\nExecution: lock authoring and lowering are validated; the durable lock runtime begins in LL2–LL4.\n`
           : reusablePackage?.schemaVersion === 11
           ? `Compiled Model v16 package: ${reusablePackage.rootHash}\nExecution: <for-each>, modules, and reusable steps are runnable together.\n`
@@ -2798,6 +2927,62 @@ async function runSingleCheckCommand(
                 : reusableGraph.root.kind === 'workflow'
                   ? 'Execution: reusable provider source is validated; custom notification providers begin in SCP5.\n'
                   : 'Execution: reusable definitions are imported by workflows and are not independently runnable.\n'
+      );
+      return 0;
+    }
+    if (hasSaga) {
+      const inspectionPackage = buildWomlDefinitionPackage(document, {
+        sourcePath: filePath,
+        projectRoot,
+      });
+      const executablePackage =
+        inspectionPackage.modules.length === 0
+          ? undefined
+          : await buildWomlExecutableDefinitionPackage(document, {
+              sourcePath: filePath,
+              projectRoot,
+            });
+      const compiled =
+        executablePackage?.workflow.model ?? compileWoml(document);
+      if (compiled.schemaVersion !== 19) {
+        throw new CliInputError(
+          'WOML_CORRECTION_MODEL_INVALID',
+          '<saga> did not lower to the frozen compiled Model v19 contract.'
+        );
+      }
+      const workflowElement = document.root.children.find(
+        (child): child is WomlSourceElement =>
+          child.kind === 'element' && child.name === 'workflow'
+      );
+      if (executablePackage !== undefined) {
+        await refreshEditorTypes(filePath, executablePackage.modules, io);
+      }
+      if (options[0] === '--json') {
+        io.stdout(
+          `${JSON.stringify(
+            {
+              profile: 'woml.model-validation/v1',
+              valid: true,
+              workflowId: workflowElement?.attributes.id?.value,
+              feature: 'compensation-and-cleanup',
+              executable: false,
+              modelVersion: compiled.schemaVersion,
+              runtimePhase: 'CC1',
+            },
+            null,
+            2
+          )}\n`
+        );
+        return 0;
+      }
+      io.stdout(
+        `WOML check passed for workflow "${workflowElement?.attributes.id?.value ?? filePath}".\n`
+      );
+      io.stdout(
+        'Compiled Model v19 passed compensation and cleanup frontend validation.\n'
+      );
+      io.stdout(
+        'Execution: corrective runtime execution begins in CC2–CC4.\n'
       );
       return 0;
     }
@@ -3592,7 +3777,8 @@ function workflowSecretReferences(
   if (
     workflow.schemaVersion === 16 ||
     workflow.schemaVersion === 17 ||
-    workflow.schemaVersion === 18
+    workflow.schemaVersion === 18 ||
+    workflow.schemaVersion === 19
   ) {
     for (const descriptor of workflow.graph.forEach) {
       for (const node of descriptor.body.nodes) {
@@ -3603,11 +3789,22 @@ function workflowSecretReferences(
       }
     }
   }
+  if (workflow.schemaVersion === 19) {
+    for (const saga of workflow.graph.sagas) {
+      for (const action of [...saga.compensations, ...saga.cleanup]) {
+        collectSecretReferences(action.node.inputs, references);
+        for (const name of action.node.scriptRuntime?.requiredSecrets ?? []) {
+          references.push({ kind: 'secretReference', name });
+        }
+      }
+    }
+  }
   for (const definition of workflow.schemaVersion === 14 ||
   workflow.schemaVersion === 15 ||
   workflow.schemaVersion === 16 ||
   workflow.schemaVersion === 17 ||
-  workflow.schemaVersion === 18
+  workflow.schemaVersion === 18 ||
+  workflow.schemaVersion === 19
     ? (workflow.reusableDefinitions ?? [])
     : []) {
     for (const prop of definition.props) {
@@ -4092,7 +4289,8 @@ async function executeOneShot(
     workflow.schemaVersion !== 15 &&
     workflow.schemaVersion !== 16 &&
     workflow.schemaVersion !== 17 &&
-    workflow.schemaVersion !== 18
+    workflow.schemaVersion !== 18 &&
+    workflow.schemaVersion !== 19
   ) {
     throw new CliInputError(
       'WOML_RESUME_REQUIRES_DURABLE_WORKFLOW',
@@ -4125,7 +4323,8 @@ async function executeOneShot(
     workflow.schemaVersion === 15 ||
     workflow.schemaVersion === 16 ||
     workflow.schemaVersion === 17 ||
-    workflow.schemaVersion === 18
+    workflow.schemaVersion === 18 ||
+    workflow.schemaVersion === 19
   ) {
     await mkdir(dirname(args.statePath), { recursive: true });
     const onProgress = durableRetryProgress(io, args);
@@ -6468,6 +6667,7 @@ async function runCliUnprofiled(
     'list',
     'get',
     'cancel',
+    'recover',
     'runs',
     'telegram',
     'discord',
@@ -6871,7 +7071,21 @@ async function runCliUnprofiled(
         get.runId,
         { nativeCorePath: dependencies.nativeCorePath }
       );
-      const publicResult = lockInspection.length > 0 ? {
+      const correctionInspection = inspectCorrectionV1WithRust(
+        get.statePath,
+        get.runId,
+        { nativeCorePath: dependencies.nativeCorePath }
+      );
+      const publicResult = correctionInspection !== undefined ? {
+        ...result,
+        profile: 'woml.run-inspection/v10' as const,
+        artifacts: artifactInspection,
+        ...(waitInspection.waits.length === 0
+          ? {}
+          : { durableWaits: waitInspection }),
+        ...(lockInspection.length === 0 ? {} : { locks: lockInspection }),
+        correction: correctionInspection,
+      } : lockInspection.length > 0 ? {
         ...result,
         profile: 'woml.run-inspection/v9' as const,
         artifacts: artifactInspection,
@@ -6897,7 +7111,8 @@ async function runCliUnprofiled(
               artifactInspection.artifacts,
               artifactInspection.truncated,
               waitInspection,
-              lockInspection
+              lockInspection,
+              correctionInspection
             )
       );
       return 0;
@@ -6935,6 +7150,40 @@ async function runCliUnprofiled(
     } catch (error) {
       if (error instanceof CliInputError && error.message === cancelUsage()) {
         io.stderr(`${cancelUsage()}\n`);
+        return 2;
+      }
+      io.stderr(`${formatError(error)}\n`);
+      return error instanceof CliInputError ? 2 : 1;
+    }
+  }
+
+  if (args[0] === 'recover') {
+    try {
+      const recovery = parseRecoverArguments(args);
+      const result = recoverCorrectionWithRust(
+        recovery.statePath,
+        {
+          profile: 'woml.correction-recovery-request/v1',
+          runId: recovery.runId,
+          action: recovery.action,
+          actionId: recovery.actionId,
+          ...(recovery.note === undefined ? {} : { note: recovery.note }),
+        },
+        { nativeCorePath: dependencies.nativeCorePath }
+      );
+      io.stdout(
+        recovery.json
+          ? `${JSON.stringify(result)}\n`
+          : result.status === 'retry_scheduled'
+            ? `Correction retry scheduled for ${result.actionId} in run ${result.runId}.\n`
+            : result.status === 'externally_resolved'
+              ? `External correction resolution recorded for ${result.actionId} in run ${result.runId}.\n`
+              : `Correction recovery was rejected for ${result.actionId} in run ${result.runId}.\n`
+      );
+      return result.status === 'rejected' ? 1 : 0;
+    } catch (error) {
+      if (error instanceof CliInputError && error.message === recoverUsage()) {
+        io.stderr(`${recoverUsage()}\n`);
         return 2;
       }
       io.stderr(`${formatError(error)}\n`);

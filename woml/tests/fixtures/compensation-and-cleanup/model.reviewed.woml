@@ -1,0 +1,29 @@
+<woml>
+  <workflow id="preview-environment" name="Preview environment" description="Provision and safely correct a preview environment." version="1.0.0">
+    <triggers><manual id="start" /></triggers>
+    <steps>
+      <step id="prepare" name="Prepare request">
+        <script>return { pullRequest: context.payload.pullRequest ?? 42 };</script>
+      </step>
+      <saga id="provision" name="Provision preview" description="Create resources as one correction scope.">
+        <step id="createNetwork" name="Create network">
+          <script>return { networkId: `network-${context.steps.prepare.pullRequest}` };</script>
+          <compensate timeout="5m" retry="3">
+            <script>return { deleted: context.steps.createNetwork.networkId };</script>
+          </compensate>
+        </step>
+        <step id="deployApplication" name="Deploy application">
+          <script>return { deployed: true, networkId: context.steps.createNetwork.networkId };</script>
+        </step>
+        <cleanup>
+          <step id="revokeCredentials" name="Revoke temporary credentials" timeout="1m" retry="2">
+            <script>return { revoked: true };</script>
+          </step>
+        </cleanup>
+      </saga>
+      <step id="summary" name="Build summary">
+        <script>return { provisioned: context.steps.provision.deployed };</script>
+      </step>
+    </steps>
+  </workflow>
+</woml>

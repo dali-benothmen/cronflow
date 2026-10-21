@@ -130,3 +130,18 @@ runtime coordination records. Corruption returns
 `WOML_STATE_STORE_CORRUPT`; state is never guessed from event history. Restore
 the complete database from a known-good coherent backup as described in
 [Durable User State Operations](woml-durable-state.md).
+
+## Compensation and cleanup recovery
+
+Model v19 correction has a stricter restart rule than ordinary derivation. A
+corrective attempt that started without a terminal outcome may have already
+changed an external system, so startup records it as ambiguous and requires an
+operator decision instead of replaying it.
+
+Use `woml get <runId>` to identify the exact unresolved action. After checking
+the outside system, use `woml recover <runId> --retry <actionId>` only when the
+effect definitely did not happen, or `--resolve <actionId> --note <text>` when
+it was completed or repaired externally. An active runtime resumes the bounded
+correction batch under the existing durable policy claim. Cleanup continues
+before the original failure or cancellation becomes terminal. See the
+[Compensation operations runbook](woml-compensation-operations.md).

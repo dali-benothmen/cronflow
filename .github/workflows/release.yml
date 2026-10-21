@@ -76,6 +76,8 @@ jobs:
           bun scripts/verify-durable-waits-release.ts
           bun run test:locks-and-leases-authoring
           bun scripts/verify-locks-and-leases-release.ts
+          bun run test:compensation-and-cleanup-authoring
+          bun scripts/verify-compensation-and-cleanup-release.ts
       - name: Run the final source and dependency security review
         run: |
           bun run test:final-review

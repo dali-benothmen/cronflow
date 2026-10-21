@@ -1,0 +1,8 @@
+{
+  "profile": "woml.correction-transitions/v1",
+  "success": ["forward", "cleanup", "committed"],
+  "failure": ["forward", "compensating", "cleanup", "failed"],
+  "cancellation": ["forward", "compensating", "cleanup", "cancelled"],
+  "ambiguity": ["correcting", "manual_recovery"],
+  "rules": { "forwardSuccessAndRegistration": "atomic", "correctionOrder": "reverse-completion-sequence", "cleanupOrder": "source-order", "laterFailureReopensCommittedSaga": false }
+}

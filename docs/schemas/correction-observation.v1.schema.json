@@ -1,0 +1,22 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://woml.dev/schemas/correction-observation/v1",
+  "title": "WOML Correction Observation v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "profile",
+    "openSagas",
+    "pendingActions",
+    "activeAttempts",
+    "manualRecoveryActions"
+  ],
+  "properties": {
+    "profile": { "const": "woml.correction-observation/v1" },
+    "openSagas": { "type": "integer", "minimum": 0 },
+    "pendingActions": { "type": "integer", "minimum": 0 },
+    "activeAttempts": { "type": "integer", "minimum": 0 },
+    "manualRecoveryActions": { "type": "integer", "minimum": 0, "maximum": 10000 },
+    "oldestManualRecoveryAgeMs": { "type": "integer", "minimum": 0 }
+  }
+}

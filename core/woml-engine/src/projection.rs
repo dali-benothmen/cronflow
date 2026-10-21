@@ -329,6 +329,55 @@ pub struct LockProjection {
   pub resolved_at: Option<DateTime<Utc>>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SagaPhase {
+  Forward,
+  ForwardSucceeded,
+  Correcting,
+  CorrectionCompleted,
+  ManualRecovery,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CorrectionActionStatus {
+  Registered,
+  Started,
+  RetryScheduled,
+  Succeeded,
+  Failed,
+  Interrupted,
+  ManualRecovery,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CorrectionActionProjection {
+  pub action_id: String,
+  pub action_kind: crate::CorrectiveActionKind,
+  pub for_step_id: Option<String>,
+  pub completion_sequence: Option<u64>,
+  pub status: CorrectionActionStatus,
+  pub attempts: u32,
+  pub active_attempt: Option<u32>,
+  pub retry_at: Option<DateTime<Utc>>,
+  pub failure_code: Option<String>,
+  pub ambiguous: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SagaProjection {
+  pub saga_id: String,
+  pub phase: SagaPhase,
+  pub reason: Option<crate::SagaCorrectionReason>,
+  pub started_sequence: u64,
+  pub forward_succeeded_sequence: Option<u64>,
+  pub correction_completed_sequence: Option<u64>,
+  pub actions: BTreeMap<String, CorrectionActionProjection>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum NotificationDeliveryStatus {
   Requested,
@@ -452,6 +501,7 @@ pub struct RunProjection {
   pub approval_requests: BTreeMap<String, ApprovalRequestProjection>,
   pub durable_waits: BTreeMap<String, DurableWaitProjection>,
   pub locks: BTreeMap<String, LockProjection>,
+  pub sagas: BTreeMap<String, SagaProjection>,
   pub external_signals: Vec<crate::ExternalSignalReceivedData>,
   pub notification_deliveries: BTreeMap<String, NotificationDeliveryProjection>,
   pub notification_updates: BTreeMap<String, NotificationMessageUpdateProjection>,
@@ -1281,14 +1331,15 @@ impl ProjectionFoldState {
       ));
     }
 
-    let scoped_loop_event = matches!(
+    let top_level_scoped_event = matches!(
       event.payload,
       RunEventPayload::ForEachIterationStarted(_)
         | RunEventPayload::ForEachIterationSucceeded(_)
         | RunEventPayload::ForEachIterationFailed(_)
         | RunEventPayload::ForEachIterationSkipped(_)
+        | RunEventPayload::CompensationRegistered(_)
     );
-    if event.iteration.is_some() && !scoped_loop_event {
+    if event.iteration.is_some() && !top_level_scoped_event {
       apply_iteration_scoped_event(projection, event, previous_event.as_ref())?;
       projection.last_sequence = event.sequence;
       *previous_event = Some(event.clone());
@@ -2094,6 +2145,283 @@ impl ProjectionFoldState {
         lock.status = LockStatus::LeaseLost;
         lock.resolved_at = Some(data.detected_at);
         projection.status = RunStatus::Running;
+      }
+      RunEventPayload::SagaStarted(data) => {
+        require_running(projection)?;
+        if projection.sagas.contains_key(&data.saga_id) {
+          return Err(FoldError::InvalidHistory(format!(
+            "Saga {:?} was started more than once.",
+            data.saga_id
+          )));
+        }
+        projection.sagas.insert(
+          data.saga_id.clone(),
+          SagaProjection {
+            saga_id: data.saga_id.clone(),
+            phase: SagaPhase::Forward,
+            reason: None,
+            started_sequence: event.sequence,
+            forward_succeeded_sequence: None,
+            correction_completed_sequence: None,
+            actions: BTreeMap::new(),
+          },
+        );
+      }
+      RunEventPayload::CompensationRegistered(data) => {
+        require_running_or_cancelling(projection)?;
+        let saga = projection.sagas.get_mut(&data.saga_id).ok_or_else(|| {
+          FoldError::InvalidHistory("Compensation was registered before its saga started.".into())
+        })?;
+        if saga.phase != SagaPhase::Forward
+          || saga.actions.contains_key(&data.action_id)
+          || data.completion_sequence >= event.sequence
+          || !matches!(
+            previous_event.as_ref().map(|previous| &previous.payload),
+            Some(RunEventPayload::StepAttemptSucceeded(succeeded))
+              if succeeded.node_id == data.for_step_id
+                && previous_event.as_ref().is_some_and(|previous| previous.sequence == data.completion_sequence)
+          )
+        {
+          return Err(FoldError::InvalidHistory(
+            "Compensation registration must atomically follow its proven forward success."
+              .to_string(),
+          ));
+        }
+        saga.actions.insert(
+          data.action_id.clone(),
+          CorrectionActionProjection {
+            action_id: data.action_id.clone(),
+            action_kind: crate::CorrectiveActionKind::Compensation,
+            for_step_id: Some(data.for_step_id.clone()),
+            completion_sequence: Some(data.completion_sequence),
+            status: CorrectionActionStatus::Registered,
+            attempts: 0,
+            active_attempt: None,
+            retry_at: None,
+            failure_code: None,
+            ambiguous: false,
+          },
+        );
+      }
+      RunEventPayload::SagaForwardSucceeded(data) => {
+        require_running(projection)?;
+        let saga = projection.sagas.get_mut(&data.saga_id).ok_or_else(|| {
+          FoldError::InvalidHistory("Saga forward success was recorded before saga start.".into())
+        })?;
+        if saga.phase != SagaPhase::Forward {
+          return Err(FoldError::InvalidHistory(
+            "Saga forward work may succeed exactly once.".to_string(),
+          ));
+        }
+        saga.phase = SagaPhase::ForwardSucceeded;
+        saga.forward_succeeded_sequence = Some(event.sequence);
+      }
+      RunEventPayload::SagaCorrectionStarted(data) => {
+        require_running_or_cancelling(projection)?;
+        let saga = projection.sagas.get_mut(&data.saga_id).ok_or_else(|| {
+          FoldError::InvalidHistory("Saga correction was started before saga start.".into())
+        })?;
+        let valid_phase = match data.reason {
+          crate::SagaCorrectionReason::Success => saga.phase == SagaPhase::ForwardSucceeded,
+          crate::SagaCorrectionReason::Failure | crate::SagaCorrectionReason::Cancel => {
+            saga.phase == SagaPhase::Forward
+          }
+        };
+        if !valid_phase {
+          return Err(FoldError::InvalidHistory(
+            "Saga correction reason does not match its forward phase.".to_string(),
+          ));
+        }
+        saga.phase = SagaPhase::Correcting;
+        saga.reason = Some(data.reason);
+      }
+      RunEventPayload::CorrectionAttemptStarted(data) => {
+        require_running_or_cancelling(projection)?;
+        let saga = projection.sagas.get_mut(&data.saga_id).ok_or_else(|| {
+          FoldError::InvalidHistory("Correction attempt references an unknown saga.".into())
+        })?;
+        if !matches!(
+          saga.phase,
+          SagaPhase::Correcting | SagaPhase::ManualRecovery
+        ) || saga
+          .actions
+          .values()
+          .any(|action| action.status == CorrectionActionStatus::Started)
+        {
+          return Err(FoldError::InvalidHistory(
+            "A saga may have only one active corrective attempt.".to_string(),
+          ));
+        }
+        let action = saga
+          .actions
+          .entry(data.action_id.clone())
+          .or_insert_with(|| CorrectionActionProjection {
+            action_id: data.action_id.clone(),
+            action_kind: data.action_kind,
+            for_step_id: None,
+            completion_sequence: None,
+            status: CorrectionActionStatus::Registered,
+            attempts: 0,
+            active_attempt: None,
+            retry_at: None,
+            failure_code: None,
+            ambiguous: false,
+          });
+        let can_start = action.action_kind == data.action_kind
+          && data.attempt == action.attempts + 1
+          && matches!(
+            action.status,
+            CorrectionActionStatus::Registered | CorrectionActionStatus::RetryScheduled
+          )
+          && action
+            .retry_at
+            .is_none_or(|retry_at| event.occurred_at >= retry_at);
+        if !can_start {
+          return Err(FoldError::InvalidHistory(
+            "Correction attempt does not match its pending action and retry schedule.".to_string(),
+          ));
+        }
+        action.attempts = data.attempt;
+        action.active_attempt = Some(data.attempt);
+        action.retry_at = None;
+        action.status = CorrectionActionStatus::Started;
+      }
+      RunEventPayload::CorrectionAttemptSucceeded(data) => {
+        let saga = projection.sagas.get_mut(&data.saga_id).ok_or_else(|| {
+          FoldError::InvalidHistory("Correction success references an unknown saga.".into())
+        })?;
+        let action = saga.actions.get_mut(&data.action_id).ok_or_else(|| {
+          FoldError::InvalidHistory("Correction success has no started action.".into())
+        })?;
+        if !matches!(
+          saga.phase,
+          SagaPhase::Correcting | SagaPhase::ManualRecovery
+        ) || action.action_kind != data.action_kind
+          || action.status != CorrectionActionStatus::Started
+          || action.active_attempt != Some(data.attempt)
+        {
+          return Err(FoldError::InvalidHistory(
+            "Correction success does not close its active attempt.".to_string(),
+          ));
+        }
+        action.status = CorrectionActionStatus::Succeeded;
+        action.active_attempt = None;
+      }
+      RunEventPayload::CorrectionAttemptFailed(data) => {
+        let saga = projection.sagas.get_mut(&data.saga_id).ok_or_else(|| {
+          FoldError::InvalidHistory("Correction failure references an unknown saga.".into())
+        })?;
+        let action = saga.actions.get_mut(&data.action_id).ok_or_else(|| {
+          FoldError::InvalidHistory("Correction failure has no started action.".into())
+        })?;
+        if !matches!(
+          saga.phase,
+          SagaPhase::Correcting | SagaPhase::ManualRecovery
+        ) || action.action_kind != data.action_kind
+          || action.status != CorrectionActionStatus::Started
+          || action.active_attempt != Some(data.attempt)
+        {
+          return Err(FoldError::InvalidHistory(
+            "Correction failure does not close its active attempt.".to_string(),
+          ));
+        }
+        action.status = CorrectionActionStatus::Failed;
+        action.active_attempt = None;
+        action.failure_code = Some(data.code.clone());
+        action.ambiguous = data.ambiguous;
+      }
+      RunEventPayload::CorrectionRetryScheduled(data) => {
+        let saga = projection.sagas.get_mut(&data.saga_id).ok_or_else(|| {
+          FoldError::InvalidHistory("Correction retry references an unknown saga.".into())
+        })?;
+        let action = saga.actions.get_mut(&data.action_id).ok_or_else(|| {
+          FoldError::InvalidHistory("Correction retry has no failed action.".into())
+        })?;
+        let automatic_retry = saga.phase == SagaPhase::Correcting
+          && action.status == CorrectionActionStatus::Failed
+          && !action.ambiguous;
+        let operator_retry = saga.phase == SagaPhase::ManualRecovery
+          && action.status == CorrectionActionStatus::ManualRecovery
+          && action.ambiguous;
+        if action.action_kind != data.action_kind
+          || action.attempts != data.attempt
+          || !(automatic_retry || operator_retry)
+        {
+          return Err(FoldError::InvalidHistory(
+            "Correction retry does not follow an automatic failure or an explicit manual-recovery decision."
+              .to_string(),
+          ));
+        }
+        if operator_retry {
+          saga.phase = SagaPhase::Correcting;
+          action.ambiguous = false;
+          action.failure_code = None;
+        }
+        action.status = CorrectionActionStatus::RetryScheduled;
+        action.retry_at = Some(data.retry_at);
+      }
+      RunEventPayload::CorrectionInterrupted(data) => {
+        let saga = projection.sagas.get_mut(&data.saga_id).ok_or_else(|| {
+          FoldError::InvalidHistory("Correction interruption references an unknown saga.".into())
+        })?;
+        let action = saga.actions.get_mut(&data.action_id).ok_or_else(|| {
+          FoldError::InvalidHistory("Correction interruption has no started action.".into())
+        })?;
+        if action.action_kind != data.action_kind
+          || action.status != CorrectionActionStatus::Started
+          || action.active_attempt != Some(data.attempt)
+        {
+          return Err(FoldError::InvalidHistory(
+            "Correction interruption does not close its active attempt.".to_string(),
+          ));
+        }
+        action.status = CorrectionActionStatus::Interrupted;
+        action.active_attempt = None;
+        action.ambiguous = data.ambiguous;
+      }
+      RunEventPayload::ManualRecoveryRequired(data) => {
+        let saga = projection.sagas.get_mut(&data.saga_id).ok_or_else(|| {
+          FoldError::InvalidHistory("Manual recovery references an unknown saga.".into())
+        })?;
+        let action = saga.actions.get_mut(&data.action_id).ok_or_else(|| {
+          FoldError::InvalidHistory("Manual recovery references an unknown correction.".into())
+        })?;
+        if action.action_kind != data.action_kind
+          || !matches!(
+            action.status,
+            CorrectionActionStatus::Failed | CorrectionActionStatus::Interrupted
+          )
+          || !action.ambiguous
+        {
+          return Err(FoldError::InvalidHistory(
+            "Manual recovery requires one ambiguous failed or interrupted correction.".to_string(),
+          ));
+        }
+        action.status = CorrectionActionStatus::ManualRecovery;
+        action.failure_code = Some(data.code.clone());
+        saga.phase = SagaPhase::ManualRecovery;
+      }
+      RunEventPayload::SagaCorrectionCompleted(data) => {
+        let saga = projection.sagas.get_mut(&data.saga_id).ok_or_else(|| {
+          FoldError::InvalidHistory("Correction completion references an unknown saga.".into())
+        })?;
+        let success_exit = saga.reason == Some(crate::SagaCorrectionReason::Success);
+        if !matches!(
+          saga.phase,
+          SagaPhase::Correcting | SagaPhase::ManualRecovery
+        ) || saga.actions.values().any(|action| {
+          matches!(
+            action.status,
+            CorrectionActionStatus::Started | CorrectionActionStatus::RetryScheduled
+          ) || action.status == CorrectionActionStatus::Registered
+            && !(success_exit && action.action_kind == crate::CorrectiveActionKind::Compensation)
+        }) {
+          return Err(FoldError::InvalidHistory(
+            "Saga correction cannot complete while corrective work remains pending.".to_string(),
+          ));
+        }
+        saga.phase = SagaPhase::CorrectionCompleted;
+        saga.correction_completed_sequence = Some(event.sequence);
       }
       RunEventPayload::ExternalSignalReceived(data) => {
         if projection.status != RunStatus::Waiting {

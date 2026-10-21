@@ -9,7 +9,7 @@ use crate::{
 };
 
 pub const SCRIPT_HOST_PROTOCOL: &str = "woml.script-host";
-pub const SCRIPT_HOST_PROTOCOL_VERSION: u32 = 10;
+pub const SCRIPT_HOST_PROTOCOL_VERSION: u32 = 11;
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -28,7 +28,7 @@ impl ReadyMessage {
       || self.host_instance_id.is_empty()
       || self.host_instance_id.chars().count() > 256
     {
-      return Err("The child did not send a valid script-host v9 ready message.".to_string());
+      return Err("The child did not send a valid script-host v11 ready message.".to_string());
     }
     Ok(())
   }
@@ -102,6 +102,10 @@ pub struct ScriptExecutionContext<'a> {
   pub item: Option<&'a Value>,
   #[serde(skip_serializing_if = "Option::is_none")]
   pub iteration: Option<ScriptIterationBinding>,
+  #[serde(skip_serializing_if = "Option::is_none")]
+  pub compensation: Option<&'a CompensationBindingV1>,
+  #[serde(skip_serializing_if = "Option::is_none")]
+  pub cleanup: Option<&'a CleanupBindingV1>,
 }
 
 impl<'a> ScriptExecutionContext<'a> {
@@ -112,6 +116,8 @@ impl<'a> ScriptExecutionContext<'a> {
       lock: context.lock.as_ref(),
       item: None,
       iteration: None,
+      compensation: None,
+      cleanup: None,
     }
   }
 
@@ -122,8 +128,72 @@ impl<'a> ScriptExecutionContext<'a> {
       lock: context.lock.as_ref(),
       item: Some(item),
       iteration: Some(ScriptIterationBinding { index, total }),
+      compensation: None,
+      cleanup: None,
     }
   }
+
+  fn correction(context: &'a WorkflowContext, binding: CorrectionBindingRef<'a>) -> Self {
+    let (compensation, cleanup) = match binding {
+      CorrectionBindingRef::Compensation(value) => (Some(value), None),
+      CorrectionBindingRef::Cleanup(value) => (None, Some(value)),
+    };
+    Self {
+      trigger: &context.trigger,
+      steps: &context.steps,
+      lock: context.lock.as_ref(),
+      item: None,
+      iteration: None,
+      compensation,
+      cleanup,
+    }
+  }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CorrectionReasonV1 {
+  Failure,
+  Cancel,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CompensationBindingV1 {
+  pub saga_id: String,
+  pub for_step_id: String,
+  pub reason: CorrectionReasonV1,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CleanupReasonV1 {
+  Success,
+  Failure,
+  Cancel,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CompensationStatusV1 {
+  NotRequired,
+  Completed,
+  Incomplete,
+  ManualRecovery,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CleanupBindingV1 {
+  pub saga_id: String,
+  pub reason: CleanupReasonV1,
+  pub compensation_status: CompensationStatusV1,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CorrectionBindingRef<'a> {
+  Compensation(&'a CompensationBindingV1),
+  Cleanup(&'a CleanupBindingV1),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -315,7 +385,7 @@ impl ModuleRegisteredMessage {
     if envelope && outcome {
       Ok(())
     } else {
-      Err("The child sent an invalid script-host v9 module registration response.".to_string())
+      Err("The child sent an invalid script-host v11 module registration response.".to_string())
     }
   }
 }
@@ -426,6 +496,44 @@ impl<'a> ExecuteMessage<'a> {
       timeout_ms,
       source,
       context: ScriptExecutionContext::root(context),
+      lifecycle: None,
+      reusable: None,
+      reusable_lifecycle: None,
+      bindings: ScriptBindings {
+        binding_version: 1,
+        services_version: 1,
+        secrets,
+      },
+      modules,
+    }
+  }
+
+  #[allow(clippy::too_many_arguments)]
+  pub fn corrective_script_with_modules(
+    invocation_id: &'a str,
+    run_id: &'a str,
+    action_id: &'a str,
+    attempt: ScriptAttempt<'a>,
+    timeout_ms: u64,
+    source: &'a str,
+    context: &'a WorkflowContext,
+    correction: CorrectionBindingRef<'a>,
+    secrets: &'a BTreeMap<String, String>,
+    modules: &'a [RuntimeModuleBinding],
+  ) -> Self {
+    Self {
+      protocol: SCRIPT_HOST_PROTOCOL,
+      protocol_version: SCRIPT_HOST_PROTOCOL_VERSION,
+      message_type: "execute",
+      invocation_id,
+      run_id,
+      node_id: action_id,
+      attempt,
+      mode: ScriptExecutionMode::Step,
+      handler: "runtime.script",
+      timeout_ms,
+      source,
+      context: ScriptExecutionContext::correction(context, correction),
       lifecycle: None,
       reusable: None,
       reusable_lifecycle: None,
@@ -803,7 +911,7 @@ impl CompletedMessage {
       || !self.duration_ms.is_finite()
       || self.duration_ms < 0.0
     {
-      return Err("The child sent an invalid script-host v9 completion envelope.".to_string());
+      return Err("The child sent an invalid script-host v11 completion envelope.".to_string());
     }
     if let HostOutcome::Failure { error } = &self.outcome {
       error.validate()?;

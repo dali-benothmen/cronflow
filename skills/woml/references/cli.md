@@ -97,6 +97,18 @@ woml stop [--state <path>] [--json]
 
 Gracefully stops the background runtime owning the selected store.
 
+## Recover an ambiguous corrective action
+
+```bash
+woml recover <runId> --retry <actionId> [--state <path>] [--json]
+woml recover <runId> --resolve <actionId> --note <text> [--state <path>] [--json]
+```
+
+First inspect with `woml get <runId>`. Retry only when the previous correction
+definitely did not happen. Resolve only after it was completed or verified
+outside WOML. The note must contain safe ticket context, never credentials or
+payloads. These commands change durable state and require explicit user intent.
+
 ## Follow logs
 
 ```bash

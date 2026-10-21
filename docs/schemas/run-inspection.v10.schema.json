@@ -1,0 +1,30 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://woml.dev/schemas/run-inspection/v10",
+  "title": "WOML Correction-Aware Safe Run Inspection v10",
+  "description": "Bounded redacted run inspection enriched with artifact, wait, lock, and correction state.",
+  "x-status": "compensation-and-cleanup-cc8-frozen",
+  "x-forbiddenFields": ["context", "payload", "result", "path", "url", "signedUrl", "credentials", "body", "secret", "stack", "operationKey", "idempotencyKey", "note"],
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["profile", "runId", "workflowId", "status", "businessOutcome", "lifecycleStatus", "hooks", "warnings", "cancellation", "artifacts", "correction"],
+  "properties": {
+    "profile": { "const": "woml.run-inspection/v10" },
+    "runId": { "type": "string", "minLength": 1, "maxLength": 320 },
+    "workflowId": { "type": "string", "minLength": 1, "maxLength": 256 },
+    "status": { "enum": ["not_started", "queued", "running", "waiting", "cancelling", "finalizing", "succeeded", "failed", "cancelled"] },
+    "businessOutcome": { "enum": ["undecided", "succeeded", "failed", "cancelled"] },
+    "lifecycleStatus": { "enum": ["idle", "running", "finalizing", "completed_with_warnings", "completed"] },
+    "hooks": { "type": "array", "maxItems": 1024 },
+    "warnings": { "type": "array", "maxItems": 128 },
+    "cancellation": { "type": "object" },
+    "policy": { "type": "object" },
+    "forks": { "type": "array" },
+    "reusableDefinitions": { "type": "array" },
+    "forEach": { "type": "array" },
+    "artifacts": { "type": "object" },
+    "durableWaits": { "type": "object" },
+    "locks": { "type": "array", "maxItems": 100 },
+    "correction": { "$ref": "https://woml.dev/schemas/correction-inspection/v1" }
+  }
+}

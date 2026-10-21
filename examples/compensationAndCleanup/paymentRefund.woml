@@ -1,0 +1,16 @@
+<woml>
+  <workflow id="payment-refund" name="Payment refund" description="Refund a captured payment when the order cannot be completed." version="1.0.0">
+    <triggers><manual id="start" /></triggers>
+    <steps>
+      <saga id="checkout" name="Complete checkout">
+        <step id="capturePayment" name="Capture payment">
+          <script>return { paymentId: "payment-42", amount: context.payload.amount ?? 149 };</script>
+          <compensate timeout="30s" retry="5"><script>return { refundedPayment: context.steps.capturePayment.paymentId, amount: context.steps.capturePayment.amount, idempotencyKey: attempt.idempotencyKey };</script></compensate>
+        </step>
+        <step id="commitOrder" name="Commit order"><script>if (context.payload.simulateFailure === true) throw new Error("order commit failed"); return { orderId: "order-42" };</script></step>
+        <cleanup><step id="closeCheckoutSession" name="Close checkout session"><script>return { closed: true };</script></step></cleanup>
+      </saga>
+      <step id="receipt"><script>return { orderId: context.steps.checkout.orderId, paymentId: context.steps.checkout.paymentId };</script></step>
+    </steps>
+  </workflow>
+</woml>

@@ -1,0 +1,9 @@
+{
+  "profile": "woml.correction-inspection/v1",
+  "runId": "run_preview_1",
+  "phase": "manual_recovery",
+  "originalOutcome": "failed",
+  "sagas": [{ "sagaId": "provision", "status": "correction_incomplete", "registeredCompensations": 1, "completedCompensations": 0, "completedCleanup": 1 }],
+  "unresolvedActions": [{ "actionId": "provision:compensate:createNetwork", "kind": "compensation", "code": "WOML_COMPENSATION_INTERRUPTED", "ambiguous": true }],
+  "truncated": false
+}

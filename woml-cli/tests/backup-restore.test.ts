@@ -106,7 +106,7 @@ describe('Packaged backup and restore', () => {
     const manifest = JSON.parse(backup.stdout);
     expect(manifest).toMatchObject({
       profile: 'woml.backup-manifest/v1',
-      storeVersion: 16,
+      storeVersion: 17,
       database: {
         file: 'state.sqlite',
         sizeBytes: expect.any(Number),
@@ -135,7 +135,7 @@ describe('Packaged backup and restore', () => {
       profile: 'woml.restore-result/v1',
       backupId: manifest.backupId,
       statePath: restoredState,
-      storeVersion: 16,
+      storeVersion: 17,
     });
     const restoredRead = await invoke(root, 'test', readerPath, '--state', restoredState);
     expect(restoredRead.exitCode, restoredRead.stderr).toBe(0);

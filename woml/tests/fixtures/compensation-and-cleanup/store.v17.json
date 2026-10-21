@@ -1,0 +1,13 @@
+{
+  "schemaVersion": 17,
+  "profile": "woml.durable-store/v17",
+  "tables": {
+    "sagaScopes": ["runId", "sagaId", "phase", "originalOutcome", "startedSequence", "committedSequence", "updatedAt", "modelDigest"],
+    "correctionActions": ["runId", "sagaId", "actionId", "actionKind", "forStepExecutionId", "completionSequence", "status", "attempts", "nextAttemptAt", "updatedAt"],
+    "correctionAttempts": ["runId", "sagaId", "actionId", "attempt", "invocationId", "status", "startedAt", "finishedAt", "failureCode"],
+    "manualRecovery": ["runId", "sagaId", "actionId", "status", "reasonCode", "createdAt", "resolvedAt"]
+  },
+  "invariants": ["events-remain-authoritative", "indexes-are-rebuildable", "one-active-corrective-attempt-per-action", "reverse-completion-order-is-deterministic", "cleanup-source-order-is-deterministic", "ambiguous-attempts-never-auto-replay"],
+  "migration": { "from": 16, "additive": true, "futureVersionsFailClosed": true },
+  "restore": { "preserveCorrectionHistory": true, "clearUnprovenOwnership": true, "resumeOnlyProvenWork": true }
+}

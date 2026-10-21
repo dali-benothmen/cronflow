@@ -1,0 +1,22 @@
+<woml>
+  <workflow id="correction-fork-failure" name="Correction fork failure" version="1.0.0">
+    <triggers><manual id="start" /></triggers>
+    <steps>
+      <saga id="distribute">
+        <fork id="destinations" join="all">
+          <branch id="publishedRoute">
+            <step id="published">
+              <script>await new Promise(resolve => setTimeout(resolve, 10)); return { id: "published" };</script>
+              <compensate><script>return context.compensation;</script></compensate>
+            </step>
+          </branch>
+          <branch id="rejectedRoute">
+            <step id="rejected"><script>throw new Error("destination rejected");</script></step>
+          </branch>
+        </fork>
+        <cleanup><step id="cleanupDistribution"><script>return context.cleanup;</script></step></cleanup>
+      </saga>
+      <step id="done"><script>return { ok: true };</script></step>
+    </steps>
+  </workflow>
+</woml>

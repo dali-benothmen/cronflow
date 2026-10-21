@@ -138,6 +138,15 @@ owner and fencing high-water; immutable events record meaningful workflow
 transitions instead of every heartbeat. The released local profile coordinates
 processes sharing one SQLite store and does not claim cross-host consensus.
 
+Compensation uses a separate corrective plan in compiled Model v19 rather than
+pretending rollback is an ordinary forward branch. Rust atomically registers
+eligible compensation with proven forward success, orders compensation by
+reverse durable completion, runs cleanup in source order, and records every
+corrective attempt in Event v18. Store v17 indexes correction for bounded
+inspection and recovery, but immutable run history remains authoritative. An
+attempt that may have fired becomes manual recovery and is never replayed from
+guesswork. See [Compensation and Cleanup](woml-compensation-and-cleanup.md).
+
 ## Triggers and admission
 
 The frontend compiles trigger definitions; it never creates runs. Manual input,

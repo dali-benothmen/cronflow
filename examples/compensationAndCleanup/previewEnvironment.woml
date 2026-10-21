@@ -1,0 +1,28 @@
+<woml>
+  <workflow id="preview-environment" name="Preview environment" description="Provision a pull-request environment with explicit rollback and cleanup." version="1.0.0">
+    <triggers><manual id="start" /></triggers>
+    <steps>
+      <step id="prepare" name="Prepare preview request">
+        <script>return { pullRequest: context.payload.pullRequest ?? 42 };</script>
+      </step>
+      <saga id="provision" name="Provision preview environment">
+        <step id="createNetwork" name="Create isolated network">
+          <script>return { networkId: `preview-network-${context.steps.prepare.pullRequest}` };</script>
+          <compensate timeout="30s" retry="3"><script>return { deletedNetwork: context.steps.createNetwork.networkId, reason: context.compensation.reason };</script></compensate>
+        </step>
+        <step id="createDatabase" name="Create preview database">
+          <script>return { databaseId: `preview-db-${context.steps.prepare.pullRequest}`, networkId: context.steps.createNetwork.networkId };</script>
+          <compensate timeout="30s" retry="3"><script>return { deletedDatabase: context.steps.createDatabase.databaseId };</script></compensate>
+        </step>
+        <step id="deployApplication" name="Deploy application">
+          <script>return { deploymentId: `preview-app-${context.steps.prepare.pullRequest}`, ready: true };</script>
+          <compensate timeout="30s" retry="2"><script>return { removedDeployment: context.steps.deployApplication.deploymentId };</script></compensate>
+        </step>
+        <cleanup>
+          <step id="revokePreviewCredentials" name="Revoke temporary credentials" retry="3"><script>return { revoked: true, status: context.cleanup.compensationStatus };</script></step>
+        </cleanup>
+      </saga>
+      <step id="summary" name="Publish preview summary"><script>return { preview: context.steps.provision.deploymentId, ready: context.steps.provision.ready };</script></step>
+    </steps>
+  </workflow>
+</woml>

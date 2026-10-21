@@ -87,6 +87,23 @@ Managed service errors expose `code`, `service`, `operation`, `retryable`, and `
 | `WOML_WORKFLOW_CALL_FAILED` | Inspect the child run ID for its actual failure. |
 | Idempotency conflict | Reused operation name with a different target/payload | Give each logical call a stable unique name and keep input stable across retry. |
 
+## Compensation and cleanup
+
+| Code | Repair |
+| --- | --- |
+| `WOML_COMPENSATION_FAILED` | Preserve the original business failure, inspect the exact corrective action, and repair its dependency or API. Cleanup still runs. |
+| `WOML_COMPENSATION_INTERRUPTED` | The effect may have happened. Verify the external system before choosing retry or external resolution. |
+| `WOML_CLEANUP_FAILED` / `WOML_CLEANUP_INTERRUPTED` | Inspect the cleanup action and reconcile the resource; do not skip mandatory cleanup. |
+| `WOML_CORRECTION_RECOVERY_REQUIRED` | Use `woml get <runId>` and investigate the identified action. |
+| `WOML_CORRECTION_LIMIT_EXCEEDED` | Stop automatic attempts and require operator review. Do not raise limits to hide a persistent failure. |
+| `WOML_CORRECTION_HISTORY_INVALID` | Preserve the store and restore from a verified backup; never edit event rows manually. |
+| `WOML_CORRECTION_NOT_RECOVERABLE` | The action is unknown, already decided, or not in manual recovery. Refresh inspection and do not force it. |
+
+Use `woml recover <runId> --retry <actionId>` only after proving the prior
+effect did not occur. Use `--resolve <actionId> --note <text>` after externally
+completing or verifying the correction. Never place secrets or payloads in the
+note.
+
 ## Approvals and notifications
 
 | Code | Repair |

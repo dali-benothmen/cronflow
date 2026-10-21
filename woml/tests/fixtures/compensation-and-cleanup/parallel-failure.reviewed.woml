@@ -1,0 +1,18 @@
+<woml>
+  <workflow id="correction-parallel-failure" name="Correction parallel failure" version="1.0.0">
+    <triggers><manual id="start" /></triggers>
+    <steps>
+      <saga id="publish">
+        <parallel id="destinations" concurrency="2" on-error="wait-all">
+          <step id="published">
+            <script>await new Promise(resolve => setTimeout(resolve, 10)); return { id: "published" };</script>
+            <compensate><script>return context.compensation;</script></compensate>
+          </step>
+          <step id="rejected"><script>throw new Error("destination rejected");</script></step>
+        </parallel>
+        <cleanup><step id="cleanupPublish"><script>return context.cleanup;</script></step></cleanup>
+      </saga>
+      <step id="done"><script>return { ok: true };</script></step>
+    </steps>
+  </workflow>
+</woml>

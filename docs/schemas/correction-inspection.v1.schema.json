@@ -1,0 +1,48 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://woml.dev/schemas/correction-inspection/v1",
+  "title": "WOML Correction Inspection v1",
+  "x-status": "compensation-and-cleanup-cc8-frozen",
+  "x-forbiddenFields": ["context", "payload", "result", "secret", "credentials", "stack", "operationKey", "idempotencyKey", "note"],
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["profile", "runId", "phase", "originalOutcome", "sagas", "unresolvedActions", "truncated"],
+  "properties": {
+    "profile": { "const": "woml.correction-inspection/v1" },
+    "runId": { "type": "string", "minLength": 1, "maxLength": 320 },
+    "phase": { "enum": ["forward", "compensating", "cleanup", "completed", "manual_recovery"] },
+    "originalOutcome": { "enum": ["running", "succeeded", "failed", "cancelled"] },
+    "sagas": {
+      "type": "array",
+      "maxItems": 64,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["sagaId", "status", "registeredCompensations", "completedCompensations", "completedCleanup"],
+        "properties": {
+          "sagaId": { "type": "string", "pattern": "^[a-z][A-Za-z0-9]*$" },
+          "status": { "type": "string", "minLength": 1, "maxLength": 64 },
+          "registeredCompensations": { "type": "integer", "minimum": 0, "maximum": 10000 },
+          "completedCompensations": { "type": "integer", "minimum": 0, "maximum": 10000 },
+          "completedCleanup": { "type": "integer", "minimum": 0, "maximum": 64 }
+        }
+      }
+    },
+    "unresolvedActions": {
+      "type": "array",
+      "maxItems": 100,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["actionId", "kind", "code", "ambiguous"],
+        "properties": {
+          "actionId": { "type": "string", "minLength": 1, "maxLength": 768 },
+          "kind": { "enum": ["compensation", "cleanup"] },
+          "code": { "type": "string", "minLength": 1, "maxLength": 160 },
+          "ambiguous": { "type": "boolean" }
+        }
+      }
+    },
+    "truncated": { "type": "boolean" }
+  }
+}

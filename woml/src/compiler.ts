@@ -27,12 +27,17 @@ import {
   type CompiledWorkflowDefinitionV16,
   type CompiledWorkflowDefinitionV17,
   type CompiledWorkflowDefinitionV18,
+  type CompiledWorkflowDefinitionV19,
   type CompiledWorkflowEdge,
   type CompiledWorkflowGraph,
   type CompiledWorkflowGraphV13,
   type CompiledWorkflowGraphV16,
   type CompiledWorkflowGraphV17,
   type CompiledWorkflowGraphV18,
+  type CompiledWorkflowGraphV19,
+  type CompiledCorrectiveActionV1,
+  type CompiledCompensationV1,
+  type CompiledSagaV1,
   type CompiledLockV1,
   type CompiledWaitV1,
   type CompiledWorkflowMetadata,
@@ -93,7 +98,18 @@ interface ValidatedStep {
   readonly scriptSpan: SourceSpan;
   readonly scriptAnalysis: ScriptAnalysis;
   readonly retryPolicy?: RetryPolicy;
+  readonly timeoutMs?: number;
+  readonly compensation?: ValidatedCompensation;
   readonly metadata?: Readonly<Record<string, JsonValue>>;
+}
+
+interface ValidatedCompensation {
+  readonly element: WomlSourceElement;
+  readonly source: string;
+  readonly scriptSpan: SourceSpan;
+  readonly scriptAnalysis: ScriptAnalysis;
+  readonly retryPolicy?: RetryPolicy;
+  readonly timeoutMs?: number;
 }
 
 interface ValidatedReference {
@@ -180,6 +196,15 @@ interface ValidatedLock {
   readonly acquireTimeoutMs: number;
   readonly leaseMs: number;
   readonly items: readonly ValidatedFlowItem[];
+}
+
+interface ValidatedSaga {
+  readonly kind: 'saga';
+  readonly id: string;
+  readonly element: WomlSourceElement;
+  readonly metadata?: Readonly<Record<string, JsonValue>>;
+  readonly items: readonly ValidatedFlowItem[];
+  readonly cleanup: readonly ValidatedStep[];
 }
 
 interface ValidatedApproval {
@@ -299,7 +324,8 @@ type ValidatedFlowItem =
   | ValidatedApproval
   | ValidatedFork
   | ValidatedWait
-  | ValidatedLock;
+  | ValidatedLock
+  | ValidatedSaga;
 
 interface ValidatedFlow {
   readonly items: readonly ValidatedFlowItem[];
@@ -313,12 +339,15 @@ interface ValidatedFlow {
   readonly firstForEach?: WomlSourceElement;
   readonly firstWait?: WomlSourceElement;
   readonly firstLock?: WomlSourceElement;
+  readonly firstSaga?: WomlSourceElement;
 }
 
 interface FlowValidationContext {
   readonly insideForkBranch: boolean;
   readonly insideForEach: boolean;
   readonly insideLock: boolean;
+  readonly insideSaga: boolean;
+  readonly insideCleanup: boolean;
   readonly shadowedServices: readonly string[];
 }
 
@@ -326,6 +355,8 @@ const rootFlowValidationContext: FlowValidationContext = {
   insideForkBranch: false,
   insideForEach: false,
   insideLock: false,
+  insideSaga: false,
+  insideCleanup: false,
   shadowedServices: [],
 };
 
@@ -488,6 +519,12 @@ interface V13LoweringState {
   readonly ownedBranchTerminalNodeIds: string[];
   readonly waits: CompiledWaitV1[];
   readonly locks: CompiledLockV1[];
+  readonly sagas: CompiledSagaV1[];
+  readonly iterationOwnerId?: string;
+  readonly activeSaga?: {
+    readonly sagaId: string;
+    readonly compensations: CompiledCompensationV1[];
+  };
 }
 
 const supportedElements = new Set([
@@ -522,6 +559,9 @@ const supportedElements = new Set([
   'parallel',
   'for-each',
   'lock',
+  'saga',
+  'compensate',
+  'cleanup',
   'wait',
   'wait-until',
   'wait-for',
@@ -613,6 +653,9 @@ const elementProfiles: Readonly<Record<string, ElementProfile>> = {
       'lease',
     ]),
   },
+  saga: { attributes: new Set(['id', 'name', 'description']) },
+  compensate: { attributes: new Set(['timeout', 'retry']) },
+  cleanup: { attributes: new Set() },
   wait: {
     attributes: new Set(['id', 'name', 'description', 'duration']),
   },
@@ -792,7 +835,14 @@ function visitProfile(
 
   const profile = elementProfiles[element.name];
   for (const attribute of Object.values(element.attributes)) {
-    if (profile.stagedAttributes?.has(attribute.name) === true) {
+    const stagedCleanupStepTimeout =
+      element.name === 'step' &&
+      attribute.name === 'timeout' &&
+      parent?.name === 'cleanup';
+    if (
+      profile.stagedAttributes?.has(attribute.name) === true &&
+      !stagedCleanupStepTimeout
+    ) {
       failValidation(
         document,
         'WOML_FEATURE_NOT_EXECUTABLE',
@@ -800,7 +850,10 @@ function visitProfile(
         attribute.nameSpan
       );
     }
-    if (!profile.attributes.has(attribute.name)) {
+    if (
+      !profile.attributes.has(attribute.name) &&
+      !(stagedCleanupStepTimeout && attribute.name === 'timeout')
+    ) {
       const isLifecycleStepFilterMisuse =
         attribute.name === 'steps' &&
         element.name.startsWith('on-') &&
@@ -827,7 +880,7 @@ function visitProfile(
         isLifecycleStepFilterMisuse
           ? 'Attribute "steps" is valid only on step lifecycle hooks.'
           : attribute.name === 'retry' || attribute.name.startsWith('retry-')
-            ? `Retry attributes are valid only on <step>; found "${attribute.name}" on <${element.name}>.`
+            ? `Retry attributes are valid only on <step> and <compensate>; found "${attribute.name}" on <${element.name}>.`
             : `Unknown attribute "${attribute.name}" on <${element.name}>.`,
         attribute.nameSpan,
         attribute.name === 'retry' || attribute.name.startsWith('retry-')
@@ -986,6 +1039,7 @@ function validateJavaScriptSafeId(
     | 'parallel'
     | 'for-each'
     | 'lock'
+    | 'saga'
     | 'approval'
     | 'wait'
 ): string {
@@ -996,7 +1050,7 @@ function validateJavaScriptSafeId(
     failValidation(
       document,
       'WOML_INVALID_ID',
-      `${role === 'trigger' ? 'Trigger' : role === 'branch' ? 'Branch' : role === 'choose' ? 'Choice' : role === 'switch' ? 'Switch' : role === 'fork' ? 'Fork' : role === 'parallel' ? 'Parallel' : role === 'for-each' ? 'For-each' : role === 'lock' ? 'Lock' : role === 'approval' ? 'Approval' : role === 'wait' ? 'Wait' : 'Step'} ID "${attribute.value}" must be a JavaScript-safe lower-camel identifier.`,
+      `${role === 'trigger' ? 'Trigger' : role === 'branch' ? 'Branch' : role === 'choose' ? 'Choice' : role === 'switch' ? 'Switch' : role === 'fork' ? 'Fork' : role === 'parallel' ? 'Parallel' : role === 'for-each' ? 'For-each' : role === 'lock' ? 'Lock' : role === 'saga' ? 'Saga' : role === 'approval' ? 'Approval' : role === 'wait' ? 'Wait' : 'Step'} ID "${attribute.value}" must be a JavaScript-safe lower-camel identifier.`,
       attribute.valueSpan,
       'Use letters and numbers, start with a lowercase letter, and do not use hyphens.'
     );
@@ -1843,6 +1897,7 @@ function registerStructuralId(
     | 'parallel'
     | 'for-each'
     | 'lock'
+    | 'saga'
     | 'approval'
     | 'wait'
 ): string {
@@ -1851,7 +1906,7 @@ function registerStructuralId(
     failValidation(
       document,
       'WOML_DUPLICATE_ID',
-      `Structural ID "${id}" is duplicated across workflow steps, waits, locks, choices, loops, forks, parallel groups, and approvals.`,
+      `Structural ID "${id}" is duplicated across workflow steps, waits, locks, sagas, choices, loops, forks, parallel groups, and approvals.`,
       attribute.valueSpan
     );
   }
@@ -2980,11 +3035,80 @@ function validateApproval(
   };
 }
 
+const maximumCorrectionTimeoutMs = 7 * 24 * 60 * 60 * 1_000;
+
+function correctionTimeoutMs(
+  document: WomlSourceDocument,
+  element: WomlSourceElement,
+  code: 'WOML_COMPENSATE_TIMEOUT_INVALID' | 'WOML_CLEANUP_TIMEOUT_INVALID'
+): number | undefined {
+  const timeout = element.attributes.timeout;
+  if (timeout === undefined) return undefined;
+  const match =
+    /^(?:(?:[1-9][0-9]*)(?:\.[0-9]+)?|0\.[0-9]*[1-9][0-9]*)(ms|s|m|h|d)$/.exec(
+      timeout.value
+    );
+  if (match === null) {
+    failValidation(
+      document,
+      code,
+      `Corrective timeout "${timeout.value}" must be a positive duration using ms, s, m, h, or d.`,
+      timeout.valueSpan,
+      'Examples: 30s, 5m, 1h'
+    );
+  }
+  const numeric = Number(timeout.value.slice(0, -match[1].length));
+  const milliseconds =
+    numeric * durationUnitsMs[match[1] as keyof typeof durationUnitsMs];
+  if (
+    !Number.isSafeInteger(milliseconds) ||
+    milliseconds < 1 ||
+    milliseconds > maximumCorrectionTimeoutMs
+  ) {
+    failValidation(
+      document,
+      code,
+      `Corrective timeout "${timeout.value}" must resolve to a whole number of milliseconds from 1ms through 7d.`,
+      timeout.valueSpan
+    );
+  }
+  return milliseconds;
+}
+
+function validateCompensation(
+  document: WomlSourceDocument,
+  element: WomlSourceElement,
+  shadowedServices: readonly string[]
+): ValidatedCompensation {
+  const children = elementChildren(document, element);
+  if (children.length !== 1 || children[0].name !== 'script') {
+    failValidation(
+      document,
+      'WOML_COMPENSATE_BODY_INVALID',
+      '<compensate> must contain exactly one <script> and no control-flow items.',
+      children[1]?.openTagSpan ?? children[0]?.openTagSpan ?? element.openTagSpan
+    );
+  }
+  const body = scriptBody(document, children[0]);
+  return {
+    element,
+    source: body.source,
+    scriptSpan: body.span,
+    scriptAnalysis: validateScriptAnalysis(document, body, shadowedServices),
+    retryPolicy: stepRetryPolicy(document, element),
+    timeoutMs: correctionTimeoutMs(
+      document,
+      element,
+      'WOML_COMPENSATE_TIMEOUT_INVALID'
+    ),
+  };
+}
+
 function validateStep(
   document: WomlSourceDocument,
   step: WomlSourceElement,
   registry: Set<string>,
-  shadowedServices: readonly string[] = []
+  context: FlowValidationContext = rootFlowValidationContext
 ): ValidatedStep {
   const id = registerStructuralId(
     document,
@@ -2994,25 +3118,88 @@ function validateStep(
   );
 
   const operations = elementChildren(document, step);
-  if (operations.length !== 1 || operations[0].name !== 'script') {
+  const scripts = operations.filter(operation => operation.name === 'script');
+  const compensations = operations.filter(
+    operation => operation.name === 'compensate'
+  );
+  const invalid = operations.find(
+    operation => operation.name !== 'script' && operation.name !== 'compensate'
+  );
+  if (invalid !== undefined || scripts.length !== 1) {
     failValidation(
       document,
       'WOML_STEP_OPERATION_COUNT',
-      `<step id="${id}"> must contain exactly one <script> operation.`,
-      operations[1]?.openTagSpan ??
-        operations[0]?.openTagSpan ??
-        step.openTagSpan
+      `<step id="${id}"> must contain exactly one <script> operation and may contain one trailing <compensate> inside a saga.`,
+      invalid?.openTagSpan ?? scripts[1]?.openTagSpan ?? step.openTagSpan
+    );
+  }
+  if (compensations.length > 1) {
+    failValidation(
+      document,
+      'WOML_COMPENSATE_DUPLICATE',
+      `<step id="${id}"> may contain at most one <compensate>.`,
+      compensations[1].openTagSpan
+    );
+  }
+  if (compensations.length === 1 && !context.insideSaga) {
+    failValidation(
+      document,
+      'WOML_COMPENSATE_OUTSIDE_SAGA',
+      '<compensate> is valid only on a forward <step> inside <saga>.',
+      compensations[0].openTagSpan,
+      'Wrap the forward work in a saga or remove its compensation.'
+    );
+  }
+  if (
+    compensations.length === 1 &&
+    operations.at(-1) !== compensations[0]
+  ) {
+    failValidation(
+      document,
+      'WOML_COMPENSATE_BODY_INVALID',
+      '<compensate> must be the final child of its forward <step>.',
+      compensations[0].openTagSpan
+    );
+  }
+  if (context.insideCleanup && compensations.length > 0) {
+    failValidation(
+      document,
+      'WOML_COMPENSATE_BODY_INVALID',
+      'Cleanup steps cannot register compensations.',
+      compensations[0].openTagSpan
     );
   }
 
-  const body = scriptBody(document, operations[0]);
+  const body = scriptBody(document, scripts[0]);
   return {
     kind: 'step',
     id,
     source: body.source,
     scriptSpan: body.span,
-    scriptAnalysis: validateScriptAnalysis(document, body, shadowedServices),
+    scriptAnalysis: validateScriptAnalysis(
+      document,
+      body,
+      context.shadowedServices
+    ),
     retryPolicy: stepRetryPolicy(document, step),
+    ...(context.insideCleanup
+      ? {
+          timeoutMs: correctionTimeoutMs(
+            document,
+            step,
+            'WOML_CLEANUP_TIMEOUT_INVALID'
+          ),
+        }
+      : {}),
+    ...(compensations[0] === undefined
+      ? {}
+      : {
+          compensation: validateCompensation(
+            document,
+            compensations[0],
+            context.shadowedServices
+          ),
+        }),
     metadata: flowItemMetadata(document, step),
   };
 }
@@ -3552,6 +3739,12 @@ function collectScriptAnalyses(
   for (const item of items) {
     if (item.kind === 'step') {
       analyses.set(item.id, item.scriptAnalysis);
+      if (item.compensation !== undefined) {
+        analyses.set(
+          `__woml_compensation__${item.id}`,
+          item.compensation.scriptAnalysis
+        );
+      }
       continue;
     }
     if (item.kind === 'parallel') {
@@ -3562,6 +3755,13 @@ function collectScriptAnalyses(
     }
     if (item.kind === 'forEach' || item.kind === 'lock') {
       collectScriptAnalyses(item.items, analyses);
+      continue;
+    }
+    if (item.kind === 'saga') {
+      collectScriptAnalyses(item.items, analyses);
+      for (const step of item.cleanup) {
+        analyses.set(`__woml_cleanup__${step.id}`, step.scriptAnalysis);
+      }
       continue;
     }
     if (item.kind === 'branch') {
@@ -3617,6 +3817,9 @@ function collectValidatedSteps(
       );
     } else if (item.kind === 'forEach' || item.kind === 'lock') {
       collectValidatedSteps(item.items, steps);
+    } else if (item.kind === 'saga') {
+      collectValidatedSteps(item.items, steps);
+      steps.push(...item.cleanup);
     } else if (item.kind === 'branch') {
       for (const arm of item.arms) collectValidatedSteps(arm.items, steps);
     } else if (item.kind === 'controlChoice' || item.kind === 'switch') {
@@ -3642,7 +3845,11 @@ function collectValidatedNotifications(
       deliveries.push(...item.notifications);
       collectValidatedNotifications(item.approvedItems, deliveries);
       collectValidatedNotifications(item.rejectedItems, deliveries);
-    } else if (item.kind === 'forEach' || item.kind === 'lock') {
+    } else if (
+      item.kind === 'forEach' ||
+      item.kind === 'lock' ||
+      item.kind === 'saga'
+    ) {
       collectValidatedNotifications(item.items, deliveries);
     } else if (
       item.kind === 'branch' ||
@@ -3680,9 +3887,12 @@ export function inspectWomlModuleUsage(
   const referencedServices = [
     ...new Set(
       [
-        ...collectValidatedSteps(validated.flow.items).map(
-          step => step.scriptAnalysis
-        ),
+        ...collectValidatedSteps(validated.flow.items).flatMap(step => [
+          step.scriptAnalysis,
+          ...(step.compensation === undefined
+            ? []
+            : [step.compensation.scriptAnalysis]),
+        ]),
         ...lifecycleAnalyses,
       ].flatMap(analysis => analysis.requiredServices)
     ),
@@ -4533,7 +4743,7 @@ function validateParallel(
 
   const children = childElements.map(child =>
     child.name === 'step'
-      ? validateStep(document, child, registry, context.shadowedServices)
+      ? validateStep(document, child, registry, context)
       : validateWait(document, child, registry, context)
   );
   const concurrencyAttribute = parallel.attributes.concurrency;
@@ -5256,6 +5466,139 @@ function validateLock(
   };
 }
 
+function validateSaga(
+  document: WomlSourceDocument,
+  element: WomlSourceElement,
+  registry: Set<string>,
+  context: FlowValidationContext
+): ValidatedSaga {
+  if (context.insideSaga) {
+    failValidation(
+      document,
+      'WOML_SAGA_NESTED',
+      'Nested <saga> scopes are not supported in Compensation and Cleanup v1.',
+      element.openTagSpan,
+      'Finish the current saga before starting another correction scope.'
+    );
+  }
+  const idAttribute = requiredAttribute(document, element, 'id');
+  if (
+    idAttribute.value.length > 256 ||
+    !javascriptSafeIdPattern.test(idAttribute.value)
+  ) {
+    failValidation(
+      document,
+      'WOML_SAGA_ID_INVALID',
+      `Saga ID "${idAttribute.value}" must be a JavaScript-safe lower-camel identifier.`,
+      idAttribute.valueSpan,
+      'Use letters and numbers, start with a lowercase letter, and do not use hyphens.'
+    );
+  }
+  const id = registerStructuralId(
+    document,
+    registry,
+    idAttribute,
+    'saga'
+  );
+  const children = elementChildren(document, element);
+  const cleanupBlocks = children.filter(child => child.name === 'cleanup');
+  if (cleanupBlocks.length > 1) {
+    failValidation(
+      document,
+      'WOML_CLEANUP_ORDER_INVALID',
+      `<saga id="${id}"> may contain at most one <cleanup> block.`,
+      cleanupBlocks[1].openTagSpan
+    );
+  }
+  const cleanup = cleanupBlocks[0];
+  if (cleanup !== undefined && children.at(-1) !== cleanup) {
+    failValidation(
+      document,
+      'WOML_CLEANUP_ORDER_INVALID',
+      '<cleanup> must be the final child of its saga.',
+      cleanup.openTagSpan,
+      'Move every forward flow item before <cleanup>.'
+    );
+  }
+  const forwardChildren = cleanup === undefined ? children : children.slice(0, -1);
+  if (forwardChildren.length === 0) {
+    failValidation(
+      document,
+      'WOML_SAGA_EMPTY',
+      `<saga id="${id}"> must contain at least one forward flow item.`,
+      element.openTagSpan
+    );
+  }
+  const sagaContext: FlowValidationContext = {
+    ...context,
+    insideSaga: true,
+  };
+  const items = forwardChildren.map(child =>
+    validateFlowItem(document, child, registry, `<saga id="${id}">`, sagaContext)
+  );
+  const cleanupSteps =
+    cleanup === undefined
+      ? []
+      : elementChildren(document, cleanup).map(child => {
+          if (child.name !== 'step') {
+            failValidation(
+              document,
+              'WOML_CLEANUP_BODY_INVALID',
+              `<cleanup> accepts sequential <step> children only; found <${child.name}>.`,
+              child.openTagSpan
+            );
+          }
+          return validateStep(document, child, registry, {
+            ...sagaContext,
+            insideCleanup: true,
+          });
+        });
+  if (cleanupSteps.length > 64) {
+    failValidation(
+      document,
+      'WOML_CORRECTION_LIMIT_EXCEEDED',
+      `<saga id="${id}"> contains ${cleanupSteps.length} cleanup steps; v1 allows at most 64.`,
+      cleanup!.openTagSpan
+    );
+  }
+  if (cleanup !== undefined && cleanupSteps.length === 0) {
+    failValidation(
+      document,
+      'WOML_CLEANUP_BODY_INVALID',
+      '<cleanup> must contain at least one <step>.',
+      cleanup.openTagSpan
+    );
+  }
+  const hasDeterministicResult = items.some(
+    item =>
+      item.kind === 'step' ||
+      item.kind === 'wait' ||
+      item.kind === 'lock' ||
+      item.kind === 'saga' ||
+      item.kind === 'branch' ||
+      item.kind === 'approval' ||
+      item.kind === 'forEach' ||
+      (item.kind === 'switch' && item.id !== undefined)
+  );
+  if (!hasDeterministicResult) {
+    failValidation(
+      document,
+      'WOML_SAGA_RESULT_REQUIRED',
+      `<saga id="${id}"> requires at least one deterministic value-producing forward item.`,
+      element.openTagSpan,
+      'Add a step or another result-producing flow item inside the saga.'
+    );
+  }
+  return {
+    kind: 'saga',
+    id,
+    element,
+    metadata: flowItemMetadata(document, element),
+    items,
+    cleanup: cleanupSteps,
+  };
+}
+
 function validateFlowItem(
   document: WomlSourceDocument,
   element: WomlSourceElement,
@@ -5264,7 +5607,7 @@ function validateFlowItem(
   context: FlowValidationContext
 ): ValidatedFlowItem {
   if (element.name === 'step')
-    return validateStep(document, element, registry, context.shadowedServices);
+    return validateStep(document, element, registry, context);
   if (element.name === 'branch') {
     if (context.insideForkBranch) {
       failValidation(
@@ -5325,7 +5668,20 @@ function validateFlowItem(
         'Move the nested fan-out outside the branch or use <parallel> for direct concurrent steps.'
       );
     }
-    return validateFork(document, element, registry, context);
+    const fork = validateFork(document, element, registry, context);
+    if (
+      context.insideSaga &&
+      fork.joinedBranchIds.length !== fork.branches.length
+    ) {
+      failValidation(
+        document,
+        'WOML_SAGA_DETACHED_BRANCH',
+        `Fork "${fork.id}" must join every branch while it is inside a saga.`,
+        element.attributes.join?.valueSpan ?? element.openTagSpan,
+        'List every branch ID in join, or move detached work outside the saga.'
+      );
+    }
+    return fork;
   }
   if (element.name === 'parallel') {
     return validateParallel(document, element, registry, context);
@@ -5344,6 +5700,25 @@ function validateFlowItem(
   }
   if (element.name === 'lock') {
     return validateLock(document, element, registry, context);
+  }
+  if (element.name === 'saga') {
+    return validateSaga(document, element, registry, context);
+  }
+  if (element.name === 'compensate') {
+    failValidation(
+      document,
+      'WOML_COMPENSATE_OUTSIDE_SAGA',
+      '<compensate> is valid only as the final direct child of a step inside <saga>.',
+      element.openTagSpan
+    );
+  }
+  if (element.name === 'cleanup') {
+    failValidation(
+      document,
+      'WOML_CLEANUP_OUTSIDE_SAGA',
+      '<cleanup> is valid only as the final direct child of <saga>.',
+      element.openTagSpan
+    );
   }
   if (
     element.name === 'wait' ||
@@ -5446,6 +5821,9 @@ function collectFlowOutputIds(
   for (const item of items) {
     if (item.kind === 'step' || item.kind === 'wait' || item.kind === 'lock') {
       output.add(item.id);
+    } else if (item.kind === 'saga') {
+      output.add(item.id);
+      collectFlowOutputIds(item.items, output);
     } else if (item.kind === 'parallel') {
       for (const child of item.children) output.add(child.id);
     } else if (item.kind === 'forEach') {
@@ -5515,6 +5893,18 @@ function validateReferenceAvailability(
           invisible
         );
       }
+      validateReferenceAvailability(
+        document,
+        item.items,
+        allIds,
+        new Set(available),
+        new Set(invisible)
+      );
+      available.add(item.id);
+      continue;
+    }
+
+    if (item.kind === 'saga') {
       validateReferenceAvailability(
         document,
         item.items,
@@ -5785,7 +6175,11 @@ function validateSteps(
           if (nested !== undefined) return nested;
         }
       }
-      if (item.kind === 'forEach' || item.kind === 'lock') {
+      if (
+        item.kind === 'forEach' ||
+        item.kind === 'lock' ||
+        item.kind === 'saga'
+      ) {
         const nested = findFirstBranch(item.items);
         if (nested !== undefined) return nested;
       }
@@ -5821,7 +6215,11 @@ function validateSteps(
           if (nested !== undefined) return nested;
         }
       }
-      if (item.kind === 'forEach' || item.kind === 'lock') {
+      if (
+        item.kind === 'forEach' ||
+        item.kind === 'lock' ||
+        item.kind === 'saga'
+      ) {
         const nested = findFirstParallel(item.items);
         if (nested !== undefined) return nested;
       }
@@ -5857,7 +6255,11 @@ function validateSteps(
           if (nested !== undefined) return nested;
         }
       }
-      if (item.kind === 'forEach' || item.kind === 'lock') {
+      if (
+        item.kind === 'forEach' ||
+        item.kind === 'lock' ||
+        item.kind === 'saga'
+      ) {
         const nested = findFirstApproval(item.items);
         if (nested !== undefined) return nested;
       }
@@ -5886,7 +6288,11 @@ function validateSteps(
           if (nested !== undefined) return nested;
         }
       }
-      if (item.kind === 'forEach' || item.kind === 'lock') {
+      if (
+        item.kind === 'forEach' ||
+        item.kind === 'lock' ||
+        item.kind === 'saga'
+      ) {
         const nested = findFirstNotification(item.items);
         if (nested !== undefined) return nested;
       }
@@ -5925,7 +6331,11 @@ function validateSteps(
           const nested = findFirstKind(arm.items, kind);
           if (nested !== undefined) return nested;
         }
-      } else if (item.kind === 'forEach' || item.kind === 'lock') {
+      } else if (
+        item.kind === 'forEach' ||
+        item.kind === 'lock' ||
+        item.kind === 'saga'
+      ) {
         const nested = findFirstKind(item.items, kind);
         if (nested !== undefined) return nested;
       } else if (item.kind === 'approval') {
@@ -5960,7 +6370,11 @@ function validateSteps(
           const nested = findFirstWait(arm.items);
           if (nested !== undefined) return nested;
         }
-      } else if (item.kind === 'forEach' || item.kind === 'lock') {
+      } else if (
+        item.kind === 'forEach' ||
+        item.kind === 'lock' ||
+        item.kind === 'saga'
+      ) {
         const nested = findFirstWait(item.items);
         if (nested !== undefined) return nested;
       } else if (item.kind === 'approval') {
@@ -5992,7 +6406,7 @@ function validateSteps(
           const nested = findFirstLock(arm.items);
           if (nested !== undefined) return nested;
         }
-      } else if (item.kind === 'forEach') {
+      } else if (item.kind === 'forEach' || item.kind === 'saga') {
         const nested = findFirstLock(item.items);
         if (nested !== undefined) return nested;
       } else if (item.kind === 'approval') {
@@ -6010,6 +6424,38 @@ function validateSteps(
     return undefined;
   };
   const firstLock = findFirstLock(items);
+  const findFirstSaga = (
+    flowItems: readonly ValidatedFlowItem[]
+  ): WomlSourceElement | undefined => {
+    for (const item of flowItems) {
+      if (item.kind === 'saga') return item.element;
+      if (
+        item.kind === 'branch' ||
+        item.kind === 'controlChoice' ||
+        item.kind === 'switch'
+      ) {
+        for (const arm of item.arms) {
+          const nested = findFirstSaga(arm.items);
+          if (nested !== undefined) return nested;
+        }
+      } else if (item.kind === 'forEach' || item.kind === 'lock') {
+        const nested = findFirstSaga(item.items);
+        if (nested !== undefined) return nested;
+      } else if (item.kind === 'approval') {
+        const approved = findFirstSaga(item.approvedItems);
+        if (approved !== undefined) return approved;
+        const rejected = findFirstSaga(item.rejectedItems);
+        if (rejected !== undefined) return rejected;
+      } else if (item.kind === 'fork') {
+        for (const branch of item.branches) {
+          const nested = findFirstSaga(branch.items);
+          if (nested !== undefined) return nested;
+        }
+      }
+    }
+    return undefined;
+  };
+  const firstSaga = findFirstSaga(items);
 
   return {
     items,
@@ -6023,6 +6469,7 @@ function validateSteps(
     ...(firstForEach === undefined ? {} : { firstForEach }),
     ...(firstWait === undefined ? {} : { firstWait }),
     ...(firstLock === undefined ? {} : { firstLock }),
+    ...(firstSaga === undefined ? {} : { firstSaga }),
   };
 }
 
@@ -6031,6 +6478,7 @@ function lowerStep(step: ValidatedStep): LoweredFlowFragment {
     id: step.id,
     handler: 'runtime.script',
     ...(step.metadata === undefined ? {} : { metadata: step.metadata }),
+    ...(step.timeoutMs === undefined ? {} : { timeoutMs: step.timeoutMs }),
     ...(step.retryPolicy === undefined
       ? {}
       : { retryPolicy: step.retryPolicy }),
@@ -6373,6 +6821,44 @@ function lowerStepV13(
     nodeId: step.id,
     stepIds: [...visibleBefore],
   });
+  if (step.compensation !== undefined && state.activeSaga !== undefined) {
+    const actionId = `${state.activeSaga.sagaId}:compensate:${step.id}`;
+    const identity =
+      state.iterationOwnerId === undefined
+        ? ({ kind: 'static', actionId } as const)
+        : ({
+            kind: 'forEachIteration',
+            forEachId: state.iterationOwnerId,
+            actionIdTemplate: `${actionId}:{iterationKey}`,
+          } as const);
+    state.activeSaga.compensations.push({
+      actionId,
+      forStepId: step.id,
+      identity,
+      visibleStepIds: [...visibleBefore, step.id],
+      node: {
+        id: actionId,
+        handler: 'runtime.script',
+        inputs: {
+          kind: 'object',
+          fields: {
+            source: { kind: 'literal', value: step.compensation.source },
+          },
+        },
+        ...(step.compensation.timeoutMs === undefined
+          ? {}
+          : { timeoutMs: step.compensation.timeoutMs }),
+        ...(step.compensation.retryPolicy === undefined
+          ? {}
+          : { retryPolicy: step.compensation.retryPolicy }),
+        scriptRuntime: {
+          bindingVersion: 1,
+          bindings: scriptRuntimeBindings,
+          requiredSecrets: step.compensation.scriptAnalysis.requiredSecrets,
+        },
+      },
+    });
+  }
   const fragment = lowerStep(step);
   return {
     ...fragment,
@@ -6430,11 +6916,7 @@ function lowerParallelV13(
 ): LoweredV13FlowFragment {
   const childFragments = parallel.children.map(child => {
     if (child.kind === 'step') {
-      state.contextVisibility.push({
-        nodeId: child.id,
-        stepIds: [...visibleBefore],
-      });
-      return lowerStep(child);
+      return lowerStepV13(child, visibleBefore, state);
     }
     return lowerWaitV17(child, visibleBefore, state);
   });
@@ -6847,6 +7329,9 @@ function lowerForEachV16(
     ownedBranchTerminalNodeIds: [],
     waits: [],
     locks: [],
+    sagas: [],
+    iterationOwnerId: loop.id,
+    ...(state.activeSaga === undefined ? {} : { activeSaga: state.activeSaga }),
   };
   const body = lowerFlowItemsV13(
     loop.items,
@@ -6865,6 +7350,7 @@ function lowerForEachV16(
   }
   state.waits.push(...bodyState.waits);
   state.locks.push(...bodyState.locks);
+  state.sagas.push(...bodyState.sagas);
   state.forEach.push({
     forEachId: loop.id,
     openNodeId,
@@ -6954,6 +7440,106 @@ function lowerLockV18(
   };
 }
 
+function correctiveActionNode(
+  actionId: string,
+  step: ValidatedStep
+): CompiledWorkflowNode {
+  return {
+    id: actionId,
+    handler: 'runtime.script',
+    inputs: {
+      kind: 'object',
+      fields: { source: { kind: 'literal', value: step.source } },
+    },
+    ...(step.timeoutMs === undefined ? {} : { timeoutMs: step.timeoutMs }),
+    ...(step.retryPolicy === undefined
+      ? {}
+      : { retryPolicy: step.retryPolicy }),
+    ...(step.metadata === undefined ? {} : { metadata: step.metadata }),
+    scriptRuntime: {
+      bindingVersion: 1,
+      bindings: scriptRuntimeBindings,
+      requiredSecrets: step.scriptAnalysis.requiredSecrets,
+    },
+  };
+}
+
+function lowerSagaV19(
+  saga: ValidatedSaga,
+  visibleBefore: ReadonlySet<string>,
+  path: string,
+  state: V13LoweringState
+): LoweredV13FlowFragment {
+  const openNodeId = `__woml_saga__${saga.id}__open`;
+  const commitNodeId = `__woml_saga__${saga.id}__commit`;
+  const compensations: CompiledCompensationV1[] = [];
+  const sagaState: V13LoweringState = {
+    ...state,
+    activeSaga: { sagaId: saga.id, compensations },
+  };
+  const body = lowerFlowItemsV13(
+    saga.items,
+    new Set(visibleBefore),
+    `${path}_saga_${saga.id}`,
+    sagaState
+  );
+  if (body.lastResultNodeId === undefined) {
+    throw new Error(`Saga "${saga.id}" has no deterministic forward result.`);
+  }
+  const cleanup: CompiledCorrectiveActionV1[] = saga.cleanup.map(step => {
+    const actionId = `${saga.id}:cleanup:${step.id}`;
+    return {
+      actionId,
+      identity:
+        state.iterationOwnerId === undefined
+          ? { kind: 'static', actionId }
+          : {
+              kind: 'forEachIteration',
+              forEachId: state.iterationOwnerId,
+              actionIdTemplate: `${actionId}:{iterationKey}`,
+            },
+      visibleStepIds: [...body.visibleAfter],
+      node: correctiveActionNode(actionId, step),
+    };
+  });
+  state.sagas.push({
+    sagaId: saga.id,
+    openNodeId,
+    commitNodeId,
+    resultNodeId: saga.id,
+    bodyEntryNodeId: body.entryId,
+    bodyTerminalNodeId: body.exitId,
+    bodyResultNodeId: body.lastResultNodeId,
+    outerStepIds: [...visibleBefore],
+    compensations,
+    cleanup,
+    ...(saga.metadata === undefined ? {} : { metadata: saga.metadata }),
+  });
+  return {
+    entryId: openNodeId,
+    exitId: saga.id,
+    nodes: [
+      v13EmptyEngineNode(openNodeId, 'engine.saga-open'),
+      ...body.nodes,
+      v13EmptyEngineNode(commitNodeId, 'engine.saga-commit'),
+      {
+        id: saga.id,
+        handler: 'engine.saga-result',
+        inputs: { kind: 'object', fields: {} },
+        ...(saga.metadata === undefined ? {} : { metadata: saga.metadata }),
+      },
+    ],
+    edges: [
+      alwaysEdge(openNodeId, body.entryId),
+      ...body.edges,
+      alwaysEdge(body.exitId, commitNodeId),
+      alwaysEdge(commitNodeId, saga.id),
+    ],
+    visibleAfter: new Set([...visibleBefore, saga.id]),
+    lastResultNodeId: saga.id,
+  };
+}
+
 function lowerFlowItemV13(
   item: ValidatedFlowItem,
   visibleBefore: ReadonlySet<string>,
@@ -6976,6 +7562,8 @@ function lowerFlowItemV13(
     return lowerForEachV16(item, visibleBefore, path, state);
   if (item.kind === 'lock')
     return lowerLockV18(item, visibleBefore, path, state);
+  if (item.kind === 'saga')
+    return lowerSagaV19(item, visibleBefore, path, state);
   return lowerForkV13(item, visibleBefore, path, state);
 }
 
@@ -7025,6 +7613,7 @@ function lowerWorkflowV13(items: readonly ValidatedFlowItem[]): {
   readonly forEach: readonly CompiledForEachV1[];
   readonly waits: readonly CompiledWaitV1[];
   readonly locks: readonly CompiledLockV1[];
+  readonly sagas: readonly CompiledSagaV1[];
 } {
   const state: V13LoweringState = {
     forks: [],
@@ -7034,6 +7623,7 @@ function lowerWorkflowV13(items: readonly ValidatedFlowItem[]): {
     ownedBranchTerminalNodeIds: [],
     waits: [],
     locks: [],
+    sagas: [],
   };
   const fragment = lowerFlowItemsV13(items, new Set(), 'root', state);
   if (fragment.lastResultNodeId === undefined) {
@@ -7061,6 +7651,7 @@ function lowerWorkflowV13(items: readonly ValidatedFlowItem[]): {
     forEach: state.forEach,
     waits: state.waits,
     locks: state.locks,
+    sagas: state.sagas,
     graph: {
       entryNodeIds: [fragment.entryId],
       nodes: [
@@ -8307,7 +8898,8 @@ function compileValidatedWoml(
     usesTelegramMessaging ||
     usesDiscordMessaging ||
     usesWhatsAppMessaging;
-  const usesModelV18 = flow.firstLock !== undefined;
+  const usesModelV19 = flow.firstSaga !== undefined;
+  const usesModelV18 = usesModelV19 || flow.firstLock !== undefined;
   const usesModelV17 = usesModelV18 || flow.firstWait !== undefined;
   const usesModelV16 = usesModelV17 || flow.firstForEach !== undefined;
   const usesModelV14 =
@@ -8404,6 +8996,7 @@ function compileValidatedWoml(
         item.kind === 'step' ||
         item.kind === 'wait' ||
         item.kind === 'lock' ||
+        item.kind === 'saga' ||
         item.kind === 'branch' ||
         item.kind === 'approval' ||
         item.kind === 'forEach'
@@ -8417,7 +9010,7 @@ function compileValidatedWoml(
     failCompile(
       document,
       'WOML_WORKFLOW_RESULT_REQUIRED',
-      `This Model v${usesModelV18 ? '18' : usesModelV17 ? '17' : usesModelV16 ? '16' : usesModelV15 ? '15' : usesModelV14 ? '14' : '13'} workflow has no deterministic value-producing item on its main route.`,
+      `This Model v${usesModelV19 ? '19' : usesModelV18 ? '18' : usesModelV17 ? '17' : usesModelV16 ? '16' : usesModelV15 ? '15' : usesModelV14 ? '14' : '13'} workflow has no deterministic value-producing item on its main route.`,
       source.openTagSpan,
       'Add a main-route <step>, durable wait, result-producing <choose id="..."> or <switch id="...">, or <approval> before the terminal control structure.'
     );
@@ -8431,12 +9024,18 @@ function compileValidatedWoml(
     ...modules.map(module => module.name),
   ]);
   const unknownService = [
-    ...collectValidatedSteps(flow.items).flatMap(step =>
-      step.scriptAnalysis.serviceReferences.map(reference => ({
+    ...collectValidatedSteps(flow.items).flatMap(step => [
+      ...step.scriptAnalysis.serviceReferences.map(reference => ({
         span: step.scriptSpan,
         reference,
-      }))
-    ),
+      })),
+      ...(step.compensation?.scriptAnalysis.serviceReferences.map(
+        reference => ({
+          span: step.compensation!.scriptSpan,
+          reference,
+        })
+      ) ?? []),
+    ]),
     ...lifecycleScripts.flatMap(script =>
       script.analysis.serviceReferences.map(reference => ({
         span: script.span,
@@ -8485,7 +9084,28 @@ function compileValidatedWoml(
           nodes,
           edges: lowered.edges,
         } satisfies CompiledWorkflowGraph)
-      : usesModelV18
+      : usesModelV19
+        ? ({
+            ...loweredV13.graph,
+            nodes: withScriptRuntimeBindings(
+              loweredV13.graph.nodes,
+              scriptAnalyses
+            ),
+            forEach: loweredV13.forEach.map(loop => ({
+              ...loop,
+              body: {
+                ...loop.body,
+                nodes: withScriptRuntimeBindings(
+                  loop.body.nodes,
+                  scriptAnalyses
+                ),
+              },
+            })),
+            waits: loweredV13.waits,
+            locks: loweredV13.locks,
+            sagas: loweredV13.sagas,
+          } satisfies CompiledWorkflowGraphV19)
+        : usesModelV18
         ? ({
             ...loweredV13.graph,
             nodes: withScriptRuntimeBindings(
@@ -8692,7 +9312,18 @@ function compileValidatedWoml(
       : { runtimePolicy: runtimePolicy.value }),
   };
   const compiled: CompiledWorkflowDefinition = usesStructuredGraph
-    ? usesModelV18
+    ? usesModelV19
+      ? ({
+          schemaVersion: 19,
+          ...definition,
+          graph: baseGraph as CompiledWorkflowGraphV19,
+          runtimePolicy: runtimePolicy?.value ?? {
+            profileVersion: 1,
+            concurrency: 1,
+          },
+          ...(communication === undefined ? {} : { communication }),
+        } satisfies CompiledWorkflowDefinitionV19)
+      : usesModelV18
       ? ({
           schemaVersion: 18,
           ...definition,
@@ -8810,17 +9441,19 @@ export function compilePreparedReusableWorkflow(
   | CompiledWorkflowDefinitionV15
   | CompiledWorkflowDefinitionV16
   | CompiledWorkflowDefinitionV17
-  | CompiledWorkflowDefinitionV18 {
+  | CompiledWorkflowDefinitionV18
+  | CompiledWorkflowDefinitionV19 {
   const compiled = compileValidatedWoml(prepared.document, moduleRuntime, true);
   if (
     compiled.schemaVersion !== 14 &&
     compiled.schemaVersion !== 15 &&
     compiled.schemaVersion !== 16 &&
     compiled.schemaVersion !== 17 &&
-    compiled.schemaVersion !== 18
+    compiled.schemaVersion !== 18 &&
+    compiled.schemaVersion !== 19
   ) {
     throw new Error(
-      'reusable-step lowering did not produce Model v14, v15, v16, v17, or v18'
+      'reusable-step lowering did not produce Model v14, v15, v16, v17, v18, or v19'
     );
   }
   const invocationsByNode = new Map(
@@ -8858,7 +9491,8 @@ export function compilePreparedReusableWorkflow(
   const compiledForEach =
     compiled.schemaVersion === 16 ||
     compiled.schemaVersion === 17 ||
-    compiled.schemaVersion === 18
+    compiled.schemaVersion === 18 ||
+    compiled.schemaVersion === 19
       ? compiled.graph.forEach
       : undefined;
   const forEach = compiledForEach?.map(loop => ({
@@ -9063,7 +9697,8 @@ export function compilePreparedReusableWorkflow(
     | CompiledWorkflowDefinitionV15
     | CompiledWorkflowDefinitionV16
     | CompiledWorkflowDefinitionV17
-    | CompiledWorkflowDefinitionV18;
+    | CompiledWorkflowDefinitionV18
+    | CompiledWorkflowDefinitionV19;
 }
 
 export function compileWoml(
@@ -9091,7 +9726,8 @@ export function compileWomlWithModules(
   | CompiledWorkflowDefinitionV15
   | CompiledWorkflowDefinitionV16
   | CompiledWorkflowDefinitionV17
-  | CompiledWorkflowDefinitionV18 {
+  | CompiledWorkflowDefinitionV18
+  | CompiledWorkflowDefinitionV19 {
   const compiled = compileValidatedWoml(
     document,
     moduleRuntime,
@@ -9109,10 +9745,11 @@ export function compileWomlWithModules(
     compiled.schemaVersion !== 15 &&
     compiled.schemaVersion !== 16 &&
     compiled.schemaVersion !== 17 &&
-    compiled.schemaVersion !== 18
+    compiled.schemaVersion !== 18 &&
+    compiled.schemaVersion !== 19
   ) {
     throw new Error(
-      'module compilation did not produce Model v9, v10, v11, v12, v13, v14, v15, v16, v17, or v18'
+      'module compilation did not produce Model v9, v10, v11, v12, v13, v14, v15, v16, v17, v18, or v19'
     );
   }
   return compiled;

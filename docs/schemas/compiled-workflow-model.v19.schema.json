@@ -1,0 +1,90 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://woml.dev/schemas/compiled-workflow-model/v19",
+  "title": "WOML Compensation and Cleanup Compiled Workflow Model v19",
+  "type": "object",
+  "additionalProperties": true,
+  "required": ["schemaVersion", "workflowId", "triggers", "graph", "runtimePolicy"],
+  "properties": {
+    "schemaVersion": { "const": 19 },
+    "workflowId": { "type": "string", "minLength": 1 },
+    "triggers": { "type": "array" },
+    "runtimePolicy": { "type": "object" },
+    "graph": {
+      "type": "object",
+      "additionalProperties": true,
+      "required": ["entryNodeIds", "nodes", "edges", "forks", "choices", "contextVisibility", "settlement", "forEach", "waits", "locks", "sagas"],
+      "properties": {
+        "entryNodeIds": { "type": "array", "minItems": 1, "items": { "type": "string" } },
+        "nodes": { "type": "array" },
+        "edges": { "type": "array" },
+        "forks": { "type": "array" },
+        "choices": { "type": "array" },
+        "contextVisibility": { "type": "array" },
+        "settlement": { "type": "object" },
+        "forEach": { "type": "array" },
+        "waits": { "type": "array" },
+        "locks": { "type": "array" },
+        "sagas": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 64,
+          "items": { "$ref": "#/$defs/saga" }
+        }
+      }
+    }
+  },
+  "$defs": {
+    "publicId": { "type": "string", "pattern": "^[a-z][A-Za-z0-9]*$", "maxLength": 256 },
+    "identity": {
+      "oneOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["kind", "actionId"],
+          "properties": { "kind": { "const": "static" }, "actionId": { "type": "string", "minLength": 1, "maxLength": 768 } }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["kind", "forEachId", "actionIdTemplate"],
+          "properties": {
+            "kind": { "const": "forEachIteration" },
+            "forEachId": { "$ref": "#/$defs/publicId" },
+            "actionIdTemplate": { "type": "string", "pattern": "\\{iterationKey\\}", "maxLength": 1024 }
+          }
+        }
+      ]
+    },
+    "action": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["actionId", "node", "identity", "visibleStepIds"],
+      "properties": {
+        "actionId": { "type": "string", "minLength": 1, "maxLength": 768 },
+        "node": { "type": "object", "required": ["id", "handler", "inputs"] },
+        "identity": { "$ref": "#/$defs/identity" },
+        "visibleStepIds": { "type": "array", "uniqueItems": true, "items": { "$ref": "#/$defs/publicId" } },
+        "forStepId": { "$ref": "#/$defs/publicId" }
+      }
+    },
+    "saga": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["sagaId", "openNodeId", "commitNodeId", "resultNodeId", "bodyEntryNodeId", "bodyTerminalNodeId", "bodyResultNodeId", "outerStepIds", "compensations", "cleanup"],
+      "properties": {
+        "sagaId": { "$ref": "#/$defs/publicId" },
+        "openNodeId": { "type": "string", "minLength": 1 },
+        "commitNodeId": { "type": "string", "minLength": 1 },
+        "resultNodeId": { "$ref": "#/$defs/publicId" },
+        "bodyEntryNodeId": { "type": "string", "minLength": 1 },
+        "bodyTerminalNodeId": { "type": "string", "minLength": 1 },
+        "bodyResultNodeId": { "type": "string", "minLength": 1 },
+        "outerStepIds": { "type": "array", "uniqueItems": true, "items": { "$ref": "#/$defs/publicId" } },
+        "compensations": { "type": "array", "maxItems": 256, "items": { "$ref": "#/$defs/action" } },
+        "cleanup": { "type": "array", "maxItems": 64, "items": { "$ref": "#/$defs/action" } },
+        "metadata": { "type": "object", "additionalProperties": false, "properties": { "name": { "type": "string", "minLength": 1 }, "description": { "type": "string", "minLength": 1 } } }
+      }
+    }
+  }
+}

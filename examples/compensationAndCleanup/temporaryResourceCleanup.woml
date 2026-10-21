@@ -1,0 +1,23 @@
+<woml>
+  <workflow id="temporary-resource-cleanup" name="Temporary resource cleanup" description="Always remove temporary credentials and workspace state." version="1.0.0">
+    <triggers><manual id="start" /></triggers>
+    <steps>
+      <saga id="analysis" name="Run isolated analysis">
+        <step id="createWorkspace" name="Create temporary workspace">
+          <script>return { workspaceId: "workspace-42", path: "/tmp/woml-workspace-42" };</script>
+          <compensate retry="3"><script>return { removedWorkspace: context.steps.createWorkspace.workspaceId };</script></compensate>
+        </step>
+        <step id="issueCredential" name="Issue temporary credential">
+          <script>return { credentialId: "credential-42", workspaceId: context.steps.createWorkspace.workspaceId };</script>
+          <compensate retry="5"><script>return { revokedCredential: context.steps.issueCredential.credentialId };</script></compensate>
+        </step>
+        <step id="runAnalysis" name="Run analysis"><script>if (context.payload.simulateFailure === true) throw new Error("analysis failed"); return { report: { issues: 0 } };</script></step>
+        <cleanup>
+          <step id="scrubTemporaryFiles" name="Scrub temporary files" retry="3"><script>return { scrubbedPath: context.steps.createWorkspace.path, correction: context.cleanup.compensationStatus };</script></step>
+          <step id="closeAuditSession" name="Close audit session"><script>return { closed: true };</script></step>
+        </cleanup>
+      </saga>
+      <step id="analysisSummary"><script>return context.steps.analysis.report;</script></step>
+    </steps>
+  </workflow>
+</woml>

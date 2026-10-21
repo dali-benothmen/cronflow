@@ -298,6 +298,25 @@ fn load_inventory(
     inventory.protected.insert(run_id.map_err(map_sqlite)?);
   }
 
+  // Correction history is operationally live until every required action is
+  // settled. A failed or cancelled business run must therefore remain
+  // retention-protected while compensation, cleanup, or manual repair is
+  // unresolved.
+  let mut statement = connection
+    .prepare(
+      "SELECT run_id FROM woml_saga_scopes
+       WHERE phase IN ('correcting', 'manual_recovery')
+       UNION
+       SELECT run_id FROM woml_correction_manual_recovery WHERE status = 'required'",
+    )
+    .map_err(map_sqlite)?;
+  for run_id in statement
+    .query_map([], |row| row.get::<_, String>(0))
+    .map_err(map_sqlite)?
+  {
+    inventory.protected.insert(run_id.map_err(map_sqlite)?);
+  }
+
   let mut statement = connection
     .prepare("SELECT run_id, received_at FROM woml_trigger_occurrences")
     .map_err(map_sqlite)?;
@@ -649,6 +668,10 @@ fn delete_batch(
     .execute_batch(DROP_RETENTION_GUARDS)
     .map_err(map_sqlite)?;
   for statement in [
+    "DELETE FROM woml_correction_manual_recovery WHERE run_id IN (SELECT run_id FROM woml_retention_candidates)",
+    "DELETE FROM woml_correction_attempts WHERE run_id IN (SELECT run_id FROM woml_retention_candidates)",
+    "DELETE FROM woml_correction_actions WHERE run_id IN (SELECT run_id FROM woml_retention_candidates)",
+    "DELETE FROM woml_saga_scopes WHERE run_id IN (SELECT run_id FROM woml_retention_candidates)",
     "DELETE FROM woml_scheduler_claims WHERE run_id IN (SELECT run_id FROM woml_retention_candidates)",
     "DELETE FROM woml_runtime_policy_queue WHERE run_id IN (SELECT run_id FROM woml_retention_candidates)",
     "DELETE FROM woml_runtime_policy_starts WHERE run_id IN (SELECT run_id FROM woml_retention_candidates)",

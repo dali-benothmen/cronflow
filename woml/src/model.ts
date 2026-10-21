@@ -422,6 +422,50 @@ export interface CompiledWorkflowGraphV18 extends CompiledWorkflowGraphV17 {
   readonly locks: readonly CompiledLockV1[];
 }
 
+export type CompiledCorrectionIdentityV1 =
+  | Readonly<{
+      readonly kind: 'static';
+      readonly actionId: string;
+    }>
+  | Readonly<{
+      readonly kind: 'forEachIteration';
+      readonly forEachId: string;
+      readonly actionIdTemplate: string;
+    }>;
+
+export interface CompiledCorrectiveActionV1 {
+  readonly actionId: string;
+  readonly node: CompiledWorkflowNode;
+  readonly identity: CompiledCorrectionIdentityV1;
+  readonly visibleStepIds: readonly string[];
+}
+
+export interface CompiledCompensationV1 extends CompiledCorrectiveActionV1 {
+  readonly forStepId: string;
+}
+
+export interface CompiledSagaV1 {
+  readonly sagaId: string;
+  readonly openNodeId: string;
+  readonly commitNodeId: string;
+  readonly resultNodeId: string;
+  readonly bodyEntryNodeId: string;
+  readonly bodyTerminalNodeId: string;
+  readonly bodyResultNodeId: string;
+  readonly outerStepIds: readonly string[];
+  readonly compensations: readonly CompiledCompensationV1[];
+  readonly cleanup: readonly CompiledCorrectiveActionV1[];
+  readonly metadata?: Readonly<{
+    readonly name?: string;
+    readonly description?: string;
+  }>;
+}
+
+/** Model v19 adds explicit sagas with a separate corrective execution plan. */
+export interface CompiledWorkflowGraphV19 extends CompiledWorkflowGraphV18 {
+  readonly sagas: readonly CompiledSagaV1[];
+}
+
 interface CompiledWorkflowDefinitionBase {
   readonly workflowId: string;
   readonly metadata?: CompiledWorkflowMetadata;
@@ -561,6 +605,14 @@ export interface CompiledWorkflowDefinitionV18 extends Omit<
   readonly graph: CompiledWorkflowGraphV18;
 }
 
+export interface CompiledWorkflowDefinitionV19 extends Omit<
+  CompiledWorkflowDefinitionV16,
+  'schemaVersion' | 'graph'
+> {
+  readonly schemaVersion: 19;
+  readonly graph: CompiledWorkflowGraphV19;
+}
+
 export type CompiledWorkflowDefinition =
   | CompiledWorkflowDefinitionV1
   | CompiledWorkflowDefinitionV2
@@ -579,7 +631,8 @@ export type CompiledWorkflowDefinition =
   | CompiledWorkflowDefinitionV15
   | CompiledWorkflowDefinitionV16
   | CompiledWorkflowDefinitionV17
-  | CompiledWorkflowDefinitionV18;
+  | CompiledWorkflowDefinitionV18
+  | CompiledWorkflowDefinitionV19;
 
 export interface CompiledGraphIssue {
   readonly code:
@@ -603,7 +656,8 @@ export interface CompiledGraphIssue {
     | 'INVALID_WORKFLOW_SETTLEMENT'
     | 'INVALID_FOR_EACH'
     | 'INVALID_DURABLE_WAIT'
-    | 'INVALID_LOCK';
+    | 'INVALID_LOCK'
+    | 'INVALID_SAGA';
   readonly message: string;
 }
 
@@ -739,6 +793,7 @@ export function inspectCompiledWorkflowGraph<TGraph extends CompiledWorkflowGrap
   inspectForkGraph(graph, issues);
   inspectDurableWaitGraph(graph, issues);
   inspectLockGraph(graph, issues);
+  inspectSagaGraph(graph, issues);
 
   return issues;
 }
@@ -1550,6 +1605,87 @@ function inspectLockGraph(
       issues.push({
         code: 'INVALID_LOCK',
         message: `Lock "${lock.lockId}" does not match the frozen Model v18 contract.`,
+      });
+    }
+  }
+}
+
+function inspectSagaGraph(
+  graph: CompiledWorkflowGraph,
+  issues: CompiledGraphIssue[]
+): void {
+  const sagas = (graph as Partial<CompiledWorkflowGraphV19>).sagas;
+  const loops = (graph as Partial<CompiledWorkflowGraphV16>).forEach ?? [];
+  const allNodes = [
+    ...graph.nodes,
+    ...loops.flatMap(loop => loop.body.nodes),
+  ];
+  const allEdges = [
+    ...graph.edges,
+    ...loops.flatMap(loop => loop.body.edges),
+  ];
+  const openNodes = allNodes.filter(node => node.handler === 'engine.saga-open');
+  if (sagas === undefined && openNodes.length === 0) return;
+  if (sagas === undefined || sagas.length !== openNodes.length) {
+    issues.push({
+      code: 'INVALID_SAGA',
+      message:
+        'Model v19 sagas must describe every engine.saga-open scope exactly once.',
+    });
+    return;
+  }
+
+  const nodeById = new Map(allNodes.map(node => [node.id, node]));
+  const edges = new Set(allEdges.map(edge => `${edge.from}\0${edge.to}`));
+  const seenSagas = new Set<string>();
+  const seenActions = new Set<string>();
+  for (const saga of sagas) {
+    const open = nodeById.get(saga.openNodeId);
+    const commit = nodeById.get(saga.commitNodeId);
+    const result = nodeById.get(saga.resultNodeId);
+    const actions = [...saga.compensations, ...saga.cleanup];
+    const actionsValid = actions.every(action => {
+      const identityValid =
+        action.identity.kind === 'static'
+          ? action.identity.actionId === action.actionId
+          : publicStructuralIdPattern.test(action.identity.forEachId) &&
+            action.identity.actionIdTemplate.includes('{iterationKey}');
+      const nodeValid =
+        action.node.id === action.actionId &&
+        action.node.handler === 'runtime.script' &&
+        action.node.inputs.kind === 'object' &&
+        action.node.inputs.fields.source?.kind === 'literal' &&
+        typeof action.node.inputs.fields.source.value === 'string';
+      const unique = !seenActions.has(action.actionId);
+      seenActions.add(action.actionId);
+      return unique && identityValid && nodeValid;
+    });
+    const compensationsValid = saga.compensations.every(
+      compensation =>
+        publicStructuralIdPattern.test(compensation.forStepId) &&
+        nodeById.has(compensation.forStepId)
+    );
+    const valid =
+      !seenSagas.has(saga.sagaId) &&
+      saga.resultNodeId === saga.sagaId &&
+      emptyEngineNode(open, 'engine.saga-open') &&
+      emptyEngineNode(commit, 'engine.saga-commit') &&
+      result?.handler === 'engine.saga-result' &&
+      result.inputs.kind === 'object' &&
+      Object.keys(result.inputs.fields).length === 0 &&
+      nodeById.has(saga.bodyEntryNodeId) &&
+      nodeById.has(saga.bodyTerminalNodeId) &&
+      nodeById.has(saga.bodyResultNodeId) &&
+      edges.has(`${saga.openNodeId}\0${saga.bodyEntryNodeId}`) &&
+      edges.has(`${saga.bodyTerminalNodeId}\0${saga.commitNodeId}`) &&
+      edges.has(`${saga.commitNodeId}\0${saga.resultNodeId}`) &&
+      actionsValid &&
+      compensationsValid;
+    seenSagas.add(saga.sagaId);
+    if (!valid) {
+      issues.push({
+        code: 'INVALID_SAGA',
+        message: `Saga "${saga.sagaId}" does not match the frozen Model v19 contract.`,
       });
     }
   }

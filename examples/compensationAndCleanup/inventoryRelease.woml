@@ -1,0 +1,19 @@
+<woml>
+  <workflow id="inventory-release" name="Inventory release" description="Release reserved stock when fulfillment cannot complete." version="1.0.0">
+    <triggers><manual id="start" /></triggers>
+    <steps>
+      <saga id="fulfillment" name="Fulfill order">
+        <step id="reserveInventory" name="Reserve inventory">
+          <script>return { reservationId: "reservation-42", sku: context.payload.sku ?? "SKU-42", quantity: context.payload.quantity ?? 2 };</script>
+          <compensate retry="5"><script>return { releasedReservation: context.steps.reserveInventory.reservationId };</script></compensate>
+        </step>
+        <step id="createShipment" name="Create shipment">
+          <script>if (context.payload.simulateFailure === true) throw new Error("carrier rejected shipment"); return { shipmentId: "shipment-42" };</script>
+          <compensate retry="3"><script>return { cancelledShipment: context.steps.createShipment.shipmentId };</script></compensate>
+        </step>
+        <cleanup><step id="releaseFulfillmentSession" name="Release fulfillment session"><script>return { released: true };</script></step></cleanup>
+      </saga>
+      <step id="confirmation"><script>return { reservationId: context.steps.fulfillment.reservationId, shipmentId: context.steps.fulfillment.shipmentId };</script></step>
+    </steps>
+  </workflow>
+</woml>
