@@ -1,0 +1,20 @@
+<woml>
+  <workflow id="deployment-rollback" name="Deployment rollback" description="Roll back a partially completed release when verification fails." version="1.0.0">
+    <triggers><manual id="start" /></triggers>
+    <steps>
+      <saga id="release" name="Release application">
+        <step id="registerRelease" name="Register release">
+          <script>return { releaseId: context.payload.releaseId ?? "release-42", previousVersion: "1.9.0" };</script>
+          <compensate retry="3"><script>return { removedRelease: context.steps.registerRelease.releaseId };</script></compensate>
+        </step>
+        <step id="deployRelease" name="Deploy release">
+          <script>return { deploymentId: `deployment-${context.steps.registerRelease.releaseId}`, version: "2.0.0" };</script>
+          <compensate retry="3"><script>return { restoredVersion: context.steps.registerRelease.previousVersion, removedDeployment: context.steps.deployRelease.deploymentId };</script></compensate>
+        </step>
+        <step id="verifyRelease" name="Verify release health"><script>if (context.payload.simulateFailure === true) throw new Error("release health check failed"); return { healthy: true };</script></step>
+        <cleanup><step id="removeDeploymentLock" name="Remove temporary deployment marker"><script>return { removed: true };</script></step></cleanup>
+      </saga>
+      <step id="releaseSummary"><script>return { releaseId: context.steps.release.releaseId, healthy: context.steps.release.healthy };</script></step>
+    </steps>
+  </workflow>
+</woml>

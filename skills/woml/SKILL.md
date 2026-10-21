@@ -44,6 +44,10 @@ Read only the references needed for the request:
 - A result-producing `<choose>` or `<switch>` publishes one predictable value at `context.steps.<controlId>` through an explicit `<result>` in every arm.
 - `<for-each>` iterates an exact array reference durably. Inside its body, use `context.item` and `context.iteration`; publish one ordered per-item value with a final `<result>`.
 - Use `<wait>`, `<wait-until>`, or `<wait-for>` for long pauses and callbacks; never keep a worker alive with `setTimeout()`. External signals require correlation, authentication, schema validation when declared, and a stable idempotency key.
+- Use `<saga>` when several external effects form one business operation and
+  partial success needs explicit correction. Give each eligible forward step a
+  narrow `<compensate>` and put mandatory release/revocation work in the final
+  `<cleanup>`. Never describe compensation as an ACID rollback.
 - Retry is a `<step>` attribute, never a `<retry>` tag.
 - Local JS/TS modules use named exports and appear as `services.<moduleName>`. Pass `context`, `attempt`, and secret values from the calling script because modules receive only `services` automatically.
 - Prefer `services.http.request()` for managed HTTP behavior; native `fetch()` remains available when Fetch compatibility or streaming matters.
@@ -61,5 +65,7 @@ When asked to create a workflow:
 - provide the exact `woml check` and `woml run` commands; and
 - explain how to trigger the workflow, including the generated HTTP route or provider setup when applicable.
 - explain how to resume every `<wait-for>`, including the signal name, correlation source, payload shape, and local or HTTP delivery command.
+- identify saga failure points, the resource ID each compensation targets, and
+  the safe `woml get`/`woml recover` operator path for ambiguous correction.
 
 Do not claim a workflow works merely because it looks valid. Report whether it was checked, executed, or left untested.

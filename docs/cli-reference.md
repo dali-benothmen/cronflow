@@ -99,6 +99,8 @@ woml list [--workflow <workflowId>] [--status <status>] \
   [--limit <1-200>] [--state <path>] [--json]
 woml get <runId> [--state <path>] [--json]
 woml cancel <runId> [--state <path>] [--json]
+woml recover <runId> --retry <actionId> [--state <path>] [--json]
+woml recover <runId> --resolve <actionId> --note <text> [--state <path>] [--json]
 woml stop [--state <path>] [--json]
 ```
 
@@ -108,6 +110,11 @@ woml stop [--state <path>] [--json]
   bounded metadata for artifacts created by that run.
 - `cancel` records a durable cancellation request and propagates it through
   supervised work.
+- `recover` records one state-checked operator decision for an ambiguous
+  compensation or cleanup action. Retry means the operator proved the previous
+  effect did not occur. Resolve means the effect was completed or repaired
+  externally; the note is reduced to a digest and no fake success event is
+  created.
 - `stop` gracefully stops the background runtime that owns the selected store.
 
 Run and runtime inspection deliberately omit payloads, secrets, credentials,

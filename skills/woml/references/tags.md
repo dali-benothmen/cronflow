@@ -334,6 +334,32 @@ use `services.locks.withLease()` only for one short script-local callback.
 
 `<notify>` contains one or more built-in or imported custom notification tags. Provider attributes differ between approvals and lifecycle notifications; read [providers.md](providers.md).
 
+### `<saga>`, `<compensate>`, and `<cleanup>`
+
+```xml
+<saga id="checkout" name="Complete checkout">
+  <step id="capturePayment">
+    <script>return { paymentId: "payment-42" };</script>
+    <compensate timeout="30s" retry="5">
+      <script>return { refunded: context.steps.capturePayment.paymentId };</script>
+    </compensate>
+  </step>
+  <step id="commitOrder"><script>return { orderId: "order-42" };</script></step>
+  <cleanup>
+    <step id="closeSession"><script>return { closed: true };</script></step>
+  </cleanup>
+</saga>
+```
+
+`<saga>` requires `id` and accepts optional `name` and `description`. It owns a
+non-empty forward flow and an optional final `<cleanup>`. A forward step inside
+it may have one trailing `<compensate>` with exactly one script and optional
+`timeout` and `retry` attributes. Cleanup contains one or more sequential
+steps. Compensation follows reverse durable completion order; cleanup follows
+source order and runs after success, failure, cancellation, and failed
+compensation. Nested sagas, detached fork branches, waits/approvals in
+corrective bodies, and multi-step compensations are invalid.
+
 ## Workflow lifecycle tags
 
 ```xml

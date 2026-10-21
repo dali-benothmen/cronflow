@@ -195,6 +195,7 @@ flowchart TD
 - Runtime concurrency, rate-limit, queue, and timeout policies.
 - Foreground and background operation, colored inspection, durable logs, cancellation, backup, restore, and retention.
 - Worker-free durable timers and authenticated, idempotent external-signal callbacks.
+- Explicit sagas with reverse-order compensation, mandatory cleanup, and fail-closed operator recovery.
 
 ## Basic WOML API
 
@@ -239,6 +240,9 @@ flowchart TD
 | `<switch>`                            | Selects one exact-string `<case>` or its `<default>` route.                                                  |
 | `<fork>`                              | Starts several independent, concurrent multi-step branches and joins the selected branches.                  |
 | `<branch>`                            | Defines one sequential route inside a `<fork>` and may contain several flow items.                           |
+| `<saga>`                              | Owns forward work, explicit compensations, and mandatory cleanup as one durable correction scope.            |
+| `<compensate>`                        | Defines the single corrective script for one successfully completed saga step.                              |
+| `<cleanup>`                           | Runs sequential cleanup after saga success, failure, cancellation, or compensation failure.                 |
 | `<wait>`                              | Suspends the run durably for a fixed duration without occupying a worker.                                    |
 | `<wait-until>`                        | Suspends until an RFC 3339 instant or exact context reference.                                               |
 | `<wait-for>`                          | Resumes from one authenticated external signal matched by run, wait, and correlation.                        |
@@ -272,6 +276,8 @@ flowchart TD
 | `context.item`            | The current item while a script is running inside `<for-each>`; unavailable outside that loop.       |
 | `context.iteration.index` | The current `<for-each>` item's stable, zero-based input index.                                      |
 | `context.iteration.total` | The total number of items captured by the current `<for-each>`.                                      |
+| `context.compensation`    | Read-only saga, forward-step, and reason binding available only inside `<compensate>`.                |
+| `context.cleanup`         | Read-only saga, reason, and compensation-status binding available only inside `<cleanup>`.            |
 
 Return only data that later steps genuinely need. Step results become durable workflow context, while local variables and mutations to `context` do not persist.
 
@@ -318,6 +324,8 @@ woml inspect                             # Open the colored runtime inspector
 woml list                                # List workflows and recent runs
 woml get run_...                         # Inspect one run and its history
 woml cancel run_...                      # Cancel a pending or running workflow
+woml recover run_... --retry action-id   # Retry a verified-safe correction
+woml recover run_... --resolve action-id --note 'ticket OPS-42'
 woml signal job.completed --run run_... --wait result --correlation job-42 --id callback-42 --payload result.json
 woml workflow-id --logs                  # Follow logs for a workflow
 woml secrets set API_TOKEN               # Store a secret securely
@@ -354,6 +362,7 @@ For Codex and other Agent Skills-compatible tools, copy the repository's complet
 - [Services and capabilities](https://github.com/dali-benothmen/woml/blob/master/docs/woml-services.md)
 - [Run local tools safely](https://github.com/dali-benothmen/woml/blob/master/docs/woml-process.md)
 - [Durable waits and external signals](https://github.com/dali-benothmen/woml/blob/master/docs/woml-durable-waits.md)
+- [Compensation and cleanup](https://github.com/dali-benothmen/woml/blob/master/docs/woml-compensation-and-cleanup.md)
 - [Modules](https://github.com/dali-benothmen/woml/blob/master/docs/woml-modules.md)
 - [Communication providers](https://github.com/dali-benothmen/woml/blob/master/docs/woml-communication-providers.md)
 - [Production deployment](https://github.com/dali-benothmen/woml/blob/master/docs/woml-production-deployment.md)

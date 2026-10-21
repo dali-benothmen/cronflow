@@ -65,6 +65,17 @@ Use `<switch>` instead when routing one string across several exact values. Use 
 
 Approvals are durable control-flow items, not step attributes. Provider-specific configuration must be checked against current documentation. All notification deliveries for one approval share the same first-valid-decision authority.
 
+## Correct partial success
+
+Use a `<saga>` when one business operation creates several external effects
+and later failure must trigger explicit correction. Return precise external
+identifiers from forward steps, attach one narrow `<compensate>` to each effect
+that can be corrected, and reserve `<cleanup>` for work that must always run.
+
+Do not use a saga for pure data transformation, and do not promise exact
+rollback. Place the saga inside a `<lock>` when resource ownership must remain
+held through compensation and cleanup.
+
 ## Reuse project code
 
 Declare a local module:
@@ -143,5 +154,7 @@ Never use cache as authoritative business state.
 - Scripts return JSON-compatible, intentionally small values.
 - Credentials are symbolic secret references.
 - Effectful retries have stable operation names or provider idempotency.
+- Saga compensations target exact forward resource IDs; cleanup is safe after
+  partial initialization; ambiguous correction has an operator runbook.
 - The user receives required secret names and exact check/run/trigger commands.
 - `woml check` passed, or the reason it could not run is stated explicitly.

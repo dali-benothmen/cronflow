@@ -990,7 +990,8 @@ first -> second
 ```
 
 `<steps>` has no attributes. It may contain `<step>`, `<parallel>`,
-`<for-each>`, `<choose>`, `<switch>`, `<fork>`, and `<approval>` elements.
+`<for-each>`, `<choose>`, `<switch>`, `<fork>`, `<lock>`, `<saga>`, and
+`<approval>` elements.
 
 Empty and control-only behavior is explicit:
 
@@ -1013,6 +1014,24 @@ Empty and control-only behavior is explicit:
 WOML v1.0 does not expose arbitrary `after`, `depends-on`, `from`, or `to`
 attributes. The frontend still produces a DAG, but the source language describes
 that DAG through structured sequencing, parallelism, and conditional flow.
+
+### 10.1 `<saga>`, `<compensate>`, and `<cleanup>`
+
+`<saga id="...">` creates one explicit correction scope. A forward step inside
+the saga may have one trailing `<compensate>` containing one script. An
+optional final `<cleanup>` contains sequential steps that run after success,
+failure, cancellation, and failed compensation.
+
+Compensations run only for forward steps whose success and registration were
+durably committed, in reverse durable completion order. Cleanup runs in source
+order. A saga publishes its successful forward result at
+`context.steps.<sagaId>`. Nested sagas, detached fork branches, waits or
+approvals inside corrective bodies, and multi-step compensations are invalid.
+
+Compensation scripts receive read-only `context.compensation`; cleanup scripts
+receive read-only `context.cleanup`. See [Compensation and
+Cleanup](woml-compensation-and-cleanup.md) for the complete grammar, bindings,
+recovery behavior, composition rules, and limits.
 
 ## 11. `<step>` Operations
 

@@ -1,0 +1,8 @@
+{
+  "profile": "woml.compensation-and-cleanup-performance-budgets/v1",
+  "maximumRegistrationProjectionMilliseconds": 10000,
+  "registrationBenchmarkCount": 1000,
+  "maximumRecoveryBatch": 100,
+  "maximumInspectionRows": 100,
+  "maximumInspectionBytes": 1048576
+}

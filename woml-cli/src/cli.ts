@@ -1279,7 +1279,13 @@ function formatRunInspection(
       );
       if (action.ambiguous) {
         lines.push(
-          `    Recover: woml recover ${inspection.runId} --retry ${JSON.stringify(action.actionId)}`
+          '    Verify the external effect before choosing a recovery action.'
+        );
+        lines.push(
+          `    Retry only if it did not occur: woml recover ${inspection.runId} --retry ${JSON.stringify(action.actionId)}`
+        );
+        lines.push(
+          `    Resolve after external repair: woml recover ${inspection.runId} --resolve ${JSON.stringify(action.actionId)} --note ${JSON.stringify('ticket or change reference')}`
         );
       }
     }

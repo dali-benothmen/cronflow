@@ -1,0 +1,20 @@
+<woml>
+  <workflow id="access-revocation" name="Access revocation" description="Revoke access already granted when onboarding fails." version="1.0.0">
+    <triggers><manual id="start" /></triggers>
+    <steps>
+      <saga id="onboarding" name="Onboard operator">
+        <step id="createIdentity" name="Create identity">
+          <script>return { identityId: context.payload.identityId ?? "operator-42" };</script>
+          <compensate retry="3"><script>return { disabledIdentity: context.steps.createIdentity.identityId };</script></compensate>
+        </step>
+        <step id="grantProductionRole" name="Grant production role">
+          <script>return { grantId: "grant-42", identityId: context.steps.createIdentity.identityId };</script>
+          <compensate retry="5"><script>return { revokedGrant: context.steps.grantProductionRole.grantId };</script></compensate>
+        </step>
+        <step id="registerAuditProfile" name="Register audit profile"><script>if (context.payload.simulateFailure === true) throw new Error("audit profile unavailable"); return { profileId: "audit-42" };</script></step>
+        <cleanup><step id="revokeBootstrapToken" name="Revoke bootstrap token"><script>return { revoked: true };</script></step></cleanup>
+      </saga>
+      <step id="onboardingSummary"><script>return { identityId: context.steps.onboarding.identityId, profileId: context.steps.onboarding.profileId };</script></step>
+    </steps>
+  </workflow>
+</woml>

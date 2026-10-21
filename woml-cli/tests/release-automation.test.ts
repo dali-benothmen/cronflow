@@ -46,6 +46,7 @@ describe('WOML release automation', () => {
       'architecture',
       'artifact-filesystem',
       'cli',
+      'compensation-correction',
       'documentation',
       'frontend',
       'lock-authority',

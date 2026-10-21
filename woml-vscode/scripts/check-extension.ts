@@ -88,4 +88,17 @@ if (syntaxFiles.length !== 3) {
   throw new Error(`Expected 3 grammar files, found ${syntaxFiles.length}.`);
 }
 
+const snippets = await Bun.file(
+  join(extensionRoot, 'snippets/woml.code-snippets')
+).text();
+for (const marker of [
+  '"prefix": "woml-saga"',
+  '<compensate timeout=',
+  '<cleanup>',
+]) {
+  if (!snippets.includes(marker)) {
+    throw new Error(`Compensation and Cleanup snippet marker is missing: ${marker}`);
+  }
+}
+
 console.log('WOML VS Code extension check passed.');

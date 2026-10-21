@@ -118,6 +118,29 @@ lifecycle.failure.message
 
 Lifecycle event values are engine-normalized (`run_start`, `step_start`, `step_success`, `step_failure`, `step_complete`, `run_success`, `run_failure`, `run_cancel`, `run_complete`). Lifecycle actions are observational: returned values do not enter `context.steps`, failures become warnings, and hooks cannot change a run outcome.
 
+## Compensation and cleanup bindings
+
+Inside `<compensate>`, scripts receive:
+
+```js
+context.compensation.sagaId
+context.compensation.forStepId
+context.compensation.reason
+```
+
+Inside a `<cleanup>` step, scripts receive:
+
+```js
+context.cleanup.sagaId
+context.cleanup.reason
+context.cleanup.compensationStatus
+```
+
+Both are deeply read-only and invocation-only. Use the original forward result
+in `context.steps` to target the exact resource and
+`attempt.idempotencyKey` for an idempotent corrective API call. An interrupted
+corrective effect is ambiguous; never infer that a retry is safe.
+
 ## Reusable-definition bindings
 
 Reusable custom step scripts receive:

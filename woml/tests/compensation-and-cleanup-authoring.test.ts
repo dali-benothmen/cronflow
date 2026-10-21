@@ -56,6 +56,7 @@ describe('WOML Compensation and Cleanup CC0 and CC1', () => {
       'correction-inspection.v1.schema.json',
       'correction-recovery.v1.schema.json',
       'correction-observation.v1.schema.json',
+      'run-inspection.v10.schema.json',
       'compensation-and-cleanup.v1.schema.json',
     ]) {
       ajv.addSchema(JSON.parse(readFileSync(resolve(schemaRoot, name), 'utf8')));
@@ -111,6 +112,25 @@ describe('WOML Compensation and Cleanup CC0 and CC1', () => {
         .getSchema('https://woml.dev/schemas/correction-inspection/v1')?.(
           JSON.parse(fixture('inspection.v1.json'))
         )
+    ).toBe(true);
+    expect(
+      ajv.getSchema('https://woml.dev/schemas/run-inspection/v10')?.({
+        profile: 'woml.run-inspection/v10',
+        runId: 'run_preview_1',
+        workflowId: 'preview-environment',
+        status: 'failed',
+        businessOutcome: 'failed',
+        lifecycleStatus: 'completed',
+        hooks: [],
+        warnings: [],
+        cancellation: { requested: false },
+        artifacts: {
+          profile: 'woml.artifact-run-inspection/v1',
+          artifacts: [],
+          truncated: false,
+        },
+        correction: JSON.parse(fixture('inspection.v1.json')),
+      })
     ).toBe(true);
     expect(
       ajv.getSchema('https://woml.dev/schemas/run-event/v18')?.({
