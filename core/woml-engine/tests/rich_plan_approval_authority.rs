@@ -8,11 +8,12 @@ use uuid::Uuid;
 use woml_engine::{
   bind_rich_approval_review, create_online_backup, resolve_rich_approval_review, ApprovalDecision,
   ArtifactReferenceV1, BoundRichApprovalReview, CompiledWorkflowDefinition, DurableEventStore,
-  DurableStoreError, RichApprovalArtifactVerifier, RichApprovalBindingInput,
-  RichApprovalDecisionAdmission, RichApprovalDecisionStatus, RichApprovalError,
-  RichApprovalResolutionReason, RunAdmissionQueue, RunAdmissionTrigger, RunAdmittedData,
-  RunEventPayload, RunExecutionStartedData, ValueExpression, WorkflowContext,
-  DURABLE_STORE_SCHEMA_VERSION, RUN_EVENT_SCHEMA_VERSION_V19,
+  DurableStoreError, ReviewerDirectoryAuthorityV1, ReviewerDirectoryError, ReviewerDirectoryV1,
+  ReviewerIdentityClaimV1, ReviewerProviderV1, RichApprovalArtifactVerifier,
+  RichApprovalBindingInput, RichApprovalDecisionAdmission, RichApprovalDecisionStatus,
+  RichApprovalError, RichApprovalIdentityDecision, RichApprovalResolutionReason, RunAdmissionQueue,
+  RunAdmissionTrigger, RunAdmittedData, RunEventPayload, RunExecutionStartedData, ValueExpression,
+  WorkflowContext, DURABLE_STORE_SCHEMA_VERSION, RUN_EVENT_SCHEMA_VERSION_V19,
 };
 
 const MODEL: &str =
@@ -21,6 +22,8 @@ const REVIEW: &str =
   include_str!("../../../woml/tests/fixtures/rich-plan-approvals/review.v1.json");
 const BINDING_VECTOR: &str =
   include_str!("../../../woml/tests/fixtures/rich-plan-approvals/binding.v1.json");
+const DIRECTORY: &str =
+  include_str!("../../../woml/tests/fixtures/rich-plan-approvals/reviewer-directory.v1.json");
 const DEFINITION_HASH: &str =
   "sha256:2020202020202020202020202020202020202020202020202020202020202020";
 
@@ -169,6 +172,133 @@ fn decision(
     roles: roles.iter().map(|role| (*role).to_string()).collect(),
     decided_at: Utc.with_ymd_and_hms(2026, 10, 21, 12, 0, 0).unwrap() + Duration::minutes(minute),
   }
+}
+
+fn identity_decision(
+  provider: ReviewerProviderV1,
+  account_id: &str,
+  actor_id: &str,
+  decision: ApprovalDecision,
+  minute: i64,
+) -> RichApprovalIdentityDecision {
+  RichApprovalIdentityDecision {
+    run_id: "run_rich_review_1".to_string(),
+    request_id: "aprreq_rich_review_1".to_string(),
+    review_digest: binding().review_digest,
+    decision,
+    identity: ReviewerIdentityClaimV1 {
+      provider,
+      account_id: account_id.to_string(),
+      actor_id: actor_id.to_string(),
+    },
+    decided_at: Utc.with_ymd_and_hms(2026, 10, 21, 12, 0, 0).unwrap() + Duration::minutes(minute),
+  }
+}
+
+#[test]
+fn reviewer_directory_validation_and_reload_fail_closed_without_losing_pinned_snapshots() {
+  let document: ReviewerDirectoryV1 = serde_json::from_str(DIRECTORY).unwrap();
+  let authority = ReviewerDirectoryAuthorityV1::from_document(document.clone()).unwrap();
+  assert_eq!(authority.active_version().unwrap(), document.version);
+  assert!(authority
+    .active_content_hash()
+    .unwrap()
+    .starts_with("sha256:"));
+
+  let mut conflicting = document.clone();
+  conflicting.principals[0].roles = vec!["security-owner".to_string()];
+  assert_eq!(
+    authority.reload(conflicting).unwrap_err(),
+    ReviewerDirectoryError::VersionConflict
+  );
+
+  let mut next = document;
+  next.version = "directory-2026-10-22".to_string();
+  next.principals[0].roles = vec!["observer".to_string()];
+  authority.reload(next).unwrap();
+  let pinned = authority
+    .resolve(
+      "directory-2026-10-21",
+      &ReviewerIdentityClaimV1 {
+        provider: ReviewerProviderV1::Slack,
+        account_id: "T0123456789".to_string(),
+        actor_id: "U0123456789".to_string(),
+      },
+      &["production-owner".to_string()],
+    )
+    .unwrap();
+  assert_eq!(pinned.principal_id, "person:alice");
+  assert_eq!(pinned.roles, ["production-owner"]);
+}
+
+#[test]
+fn trusted_provider_identities_are_mapped_before_the_atomic_quorum_authority() {
+  let directory: ReviewerDirectoryV1 = serde_json::from_str(DIRECTORY).unwrap();
+  let authority = ReviewerDirectoryAuthorityV1::from_document(directory).unwrap();
+  let mut store = running_store();
+  store
+    .create_rich_approval_request(
+      &binding(),
+      Utc.with_ymd_and_hms(2026, 10, 21, 12, 0, 0).unwrap(),
+    )
+    .unwrap();
+
+  let wrong_workspace = store
+    .record_rich_approval_identity_decision(
+      &authority,
+      identity_decision(
+        ReviewerProviderV1::Slack,
+        "T9999999999",
+        "U0123456789",
+        ApprovalDecision::Approved,
+        1,
+      ),
+    )
+    .unwrap_err();
+  assert!(matches!(
+    wrong_workspace,
+    DurableStoreError::ReviewerDirectory(ReviewerDirectoryError::ReviewerUnknown)
+  ));
+
+  let first = store
+    .record_rich_approval_identity_decision(
+      &authority,
+      identity_decision(
+        ReviewerProviderV1::Slack,
+        "T0123456789",
+        "U0123456789",
+        ApprovalDecision::Approved,
+        2,
+      ),
+    )
+    .unwrap();
+  assert_eq!(first.status, RichApprovalDecisionStatus::Pending);
+  let replay = store
+    .record_rich_approval_identity_decision(
+      &authority,
+      identity_decision(
+        ReviewerProviderV1::Slack,
+        "T0123456789",
+        "U0123456789",
+        ApprovalDecision::Approved,
+        3,
+      ),
+    )
+    .unwrap();
+  assert_eq!(replay.status, RichApprovalDecisionStatus::Idempotent);
+  let final_vote = store
+    .record_rich_approval_identity_decision(
+      &authority,
+      identity_decision(
+        ReviewerProviderV1::Telegram,
+        "bot-42",
+        "812345678",
+        ApprovalDecision::Approved,
+        4,
+      ),
+    )
+    .unwrap();
+  assert_eq!(final_vote.status, RichApprovalDecisionStatus::Approved);
 }
 
 #[test]

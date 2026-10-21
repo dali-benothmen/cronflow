@@ -8,6 +8,7 @@ import {
   ApprovalDecisionError,
   type ApprovalDecision,
   type ApprovalDecisionResult,
+  type RichApprovalDecisionResult,
   type RustApprovalRuntimeOutcome,
 } from '../src/rust-executor';
 
@@ -35,6 +36,56 @@ function waitingOutcome(): WaitingOutcome {
       token,
       credentialExpiresAt: '2099-01-01T00:00:00.000Z',
     },
+  };
+}
+
+function richWaitingOutcome(): WaitingOutcome {
+  return {
+    contract: 'woml.runtime-outcome',
+    version: 1,
+    status: 'waiting',
+    workflowId: 'production-deployment',
+    runId: 'run_rich_approval_http',
+    approval: {
+      approvalId: 'approveDeployment',
+      requestId: 'aprreq_review_http',
+      name: 'Approve production deployment',
+      description: 'Authorize the exact reviewed plan.',
+      expiresAt: '2099-01-01T00:00:00.000Z',
+      onTimeout: 'reject',
+      reviewDigest:
+        'sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+      review: {
+        title: 'Deploy payments-api to production',
+        summary: 'Create 2, modify 4, and destroy 1 resource.',
+        risk: 'high',
+        facts: [],
+        changes: [],
+        checks: [],
+        artifacts: [],
+      },
+      authority: {
+        required: 2,
+        received: 0,
+        requiredRoles: ['production-owner', 'security-owner'],
+        representedRoles: [],
+      },
+    },
+  };
+}
+
+function richDecisionResult(
+  status: RichApprovalDecisionResult['status']
+): RichApprovalDecisionResult {
+  return {
+    contract: 'woml.approval-http',
+    version: 2,
+    status,
+    runId: 'run_rich_approval_http',
+    approvalId: 'approveDeployment',
+    requestId: 'aprreq_review_http',
+    reviewDigest:
+      'sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
   };
 }
 
@@ -251,6 +302,134 @@ describe('local approval HTTP v1', () => {
       },
       onListening: () => {},
     });
+    expect(await wait).toBe('refresh');
+  });
+});
+
+describe('trusted approval HTTP v2', () => {
+  test('renders the frozen review and admits only verified digest-bound identities', async () => {
+    const port = await availablePort();
+    let listening!: (url: string) => void;
+    const urlReady = new Promise<string>(resolve => {
+      listening = resolve;
+    });
+    const verified: string[] = [];
+    let decisions = 0;
+    const wait = serveApprovalAndWait({
+      outcome: richWaitingOutcome(),
+      port,
+      onDecision: () => {
+        throw new Error(
+          'Rich approval must not use the basic token authority.'
+        );
+      },
+      verifyRichIdentity: (gateway, assertion) => {
+        verified.push(`${gateway}:${assertion}`);
+        if (gateway !== 'slack-signed-callback' || assertion !== 'signed-1') {
+          throw new ApprovalDecisionError(
+            'WOML_APPROVAL_REVIEWER_UNKNOWN',
+            'untrusted assertion'
+          );
+        }
+        return {
+          provider: 'slack',
+          providerAccountId: 'T0123456789',
+          providerActorId: 'U0123456789',
+        };
+      },
+      onRichDecision: request => {
+        expect(request.reviewDigest).toBe(
+          richWaitingOutcome().approval.reviewDigest!
+        );
+        expect(request.identity.providerAccountId).toBe('T0123456789');
+        decisions += 1;
+        return richDecisionResult(decisions === 1 ? 'recorded' : 'resolved');
+      },
+      onTimeout: () => ({
+        status: 'not_due',
+        runId: 'run_rich_approval_http',
+        approvalId: 'approveDeployment',
+        requestId: 'aprreq_review_http',
+        resolution: null,
+        settledAt: null,
+      }),
+      onListening: listening,
+    });
+    const url = await urlReady;
+    expect(url).toContain('/api/v2/approvals/');
+    expect(url).not.toContain('apr_');
+
+    const reviewResponse = await fetch(url);
+    expect(reviewResponse.status).toBe(200);
+    const review = await reviewResponse.json();
+    expect(review.version).toBe(2);
+    expect(review.review.title).toBe('Deploy payments-api to production');
+    expect(review.authority).toEqual(richWaitingOutcome().approval.authority);
+
+    const stale = await fetch(url, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        decision: 'approved',
+        reviewDigest:
+          'sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb',
+        gateway: 'slack-signed-callback',
+        assertion: 'signed-1',
+      }),
+    });
+    expect(stale.status).toBe(400);
+    expect(verified).toEqual([]);
+
+    const vote = () =>
+      fetch(url, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          decision: 'approved',
+          reviewDigest: richWaitingOutcome().approval.reviewDigest,
+          gateway: 'slack-signed-callback',
+          assertion: 'signed-1',
+        }),
+      });
+    expect((await (await vote()).json()).status).toBe('recorded');
+    expect((await (await vote()).json()).status).toBe('resolved');
+    expect(await wait).toBe('decision');
+    expect(verified).toHaveLength(2);
+  });
+
+  test('fails closed when no trusted identity gateway is configured', async () => {
+    const port = await availablePort();
+    const controller = new AbortController();
+    let listening!: (url: string) => void;
+    const urlReady = new Promise<string>(resolve => {
+      listening = resolve;
+    });
+    const wait = serveApprovalAndWait({
+      outcome: richWaitingOutcome(),
+      port,
+      signal: controller.signal,
+      onDecision: () => decisionResult('approved'),
+      onTimeout: () => ({
+        status: 'not_due',
+        runId: 'run_rich_approval_http',
+        approvalId: 'approveDeployment',
+        requestId: 'aprreq_review_http',
+        resolution: null,
+        settledAt: null,
+      }),
+      onListening: listening,
+    });
+    const url = await urlReady;
+    const response = await fetch(url, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: '{}',
+    });
+    expect(response.status).toBe(503);
+    expect(await response.text()).toContain(
+      'WOML_APPROVAL_AUTHORITY_UNAVAILABLE'
+    );
+    controller.abort();
     expect(await wait).toBe('refresh');
   });
 });

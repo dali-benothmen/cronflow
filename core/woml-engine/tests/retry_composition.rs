@@ -428,7 +428,7 @@ async fn both_approval_arms_retry_without_reopening_the_human_decision() {
     };
     resolve_human_approval_durable(
       database.path().to_path_buf(),
-      &approval.token,
+      approval.token.as_deref().expect("basic approval token"),
       decision,
       &FixedEngineClock::new(Utc::now() + Duration::seconds(1)),
     )
@@ -510,7 +510,7 @@ async fn approval_arm_retry_does_not_requeue_notification_delivery() {
   };
   resolve_human_approval_durable(
     database.path().to_path_buf(),
-    &approval.token,
+    approval.token.as_deref().expect("basic approval token"),
     ApprovalDecision::Approved,
     &FixedEngineClock::new(Utc::now() + Duration::seconds(1)),
   )

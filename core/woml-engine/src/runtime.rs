@@ -3,7 +3,7 @@ use std::future::{poll_fn, Future};
 use std::path::PathBuf;
 use std::pin::Pin;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, OnceLock};
+use std::sync::{Arc, OnceLock, RwLock};
 use std::task::Poll;
 use std::time::Duration;
 
@@ -63,21 +63,23 @@ use crate::schedule::{
 use crate::workflow_calls::WorkflowCallProgressReporter;
 use crate::{
   run_event_schema_version_for_model, ApprovalDecisionOutcome, ApprovalTimeoutSettlement,
-  AttemptFailure, AttemptFailureKind, BranchFailure, CapabilityFailure, CapabilityFailureKind,
-  CapabilityRegistry, CompiledWorkflowDefinition, CustomNotificationHostClient,
-  CustomNotificationHostClientError, CustomNotificationHostProcessOptions, CustomNotificationKind,
-  CustomNotificationRequest, CustomProviderAttempt, CustomProviderExecuteMessage,
-  CustomProviderLimits, CustomProviderOutcome, CustomProviderScriptArtifact,
-  DurableCapabilityAuthority, DurableDagEngine, DurableEngineError, DurableEventStore,
-  DurableStoreError, EngineError, InMemoryDagEngine, InformationalNotificationDeliverMessage,
-  IssuedApprovalToken, NotificationCredentials, NotificationHostClient,
-  NotificationHostClientError, NotificationHostOutcome, NotificationHostProcessOptions,
-  OperationStatus, PolicyClaimWaitReason, PolicyExecutionClaimResult, PolicyWaitingFor,
-  RecoveryReport, RunEvent, RunEventPayload, RunFailure, RunProjection, RunStatus,
-  RunTimeoutSettlement, SchedulerClaimV1, ScriptHostClient, ScriptHostClientError,
-  ScriptHostModuleArtifact, ScriptHostProcessOptions, StepFailureDisposition,
-  TriggerAdmissionRequest, WorkflowContext, CUSTOM_NOTIFICATION_PROVIDER_PROTOCOL,
-  CUSTOM_NOTIFICATION_PROVIDER_PROTOCOL_VERSION,
+  AttemptFailure, AttemptFailureKind, BoundRichApprovalReview, BranchFailure, CapabilityFailure,
+  CapabilityFailureKind, CapabilityRegistry, CompiledWorkflowDefinition,
+  CustomNotificationHostClient, CustomNotificationHostClientError,
+  CustomNotificationHostProcessOptions, CustomNotificationKind, CustomNotificationRequest,
+  CustomProviderAttempt, CustomProviderExecuteMessage, CustomProviderLimits, CustomProviderOutcome,
+  CustomProviderScriptArtifact, DurableCapabilityAuthority, DurableDagEngine, DurableEngineError,
+  DurableEventStore, DurableStoreError, EngineError, InMemoryDagEngine,
+  InformationalNotificationDeliverMessage, IssuedApprovalToken, NotificationCredentials,
+  NotificationHostClient, NotificationHostClientError, NotificationHostOutcome,
+  NotificationHostProcessOptions, OperationStatus, PolicyClaimWaitReason,
+  PolicyExecutionClaimResult, PolicyWaitingFor, RecoveryReport, ReviewPayloadV1,
+  ReviewerDirectoryAuthorityV1, RichApprovalArtifactVerifier, RichApprovalBindingInput,
+  RichApprovalError, RichApprovalResolutionReason, RunEvent, RunEventPayload, RunFailure,
+  RunProjection, RunStatus, RunTimeoutSettlement, SchedulerClaimV1, ScriptHostClient,
+  ScriptHostClientError, ScriptHostModuleArtifact, ScriptHostProcessOptions,
+  StepFailureDisposition, TriggerAdmissionRequest, WorkflowContext,
+  CUSTOM_NOTIFICATION_PROVIDER_PROTOCOL, CUSTOM_NOTIFICATION_PROVIDER_PROTOCOL_VERSION,
   INFORMATIONAL_NOTIFICATION_PROVIDER_PROTOCOL_VERSION, NOTIFICATION_PROVIDER_PROTOCOL,
   RUN_EVENT_SCHEMA_VERSION_V1, RUN_EVENT_SCHEMA_VERSION_V2,
 };
@@ -88,6 +90,9 @@ pub trait EngineClock: Send + Sync {
 
 pub const EXECUTION_PROGRESS_CONTRACT: &str = "woml.execution-progress";
 pub const EXECUTION_PROGRESS_VERSION: u32 = 1;
+
+static REVIEWER_AUTHORITIES: OnceLock<RwLock<HashMap<PathBuf, Arc<ReviewerDirectoryAuthorityV1>>>> =
+  OnceLock::new();
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
@@ -277,6 +282,7 @@ pub struct RuntimeExecutionOptions {
   managed_locks_service: Option<Arc<crate::ManagedLocksService>>,
   managed_artifact_store: Option<Arc<crate::ManagedArtifactStore>>,
   artifact_policy: Option<Arc<crate::artifacts::PreparedArtifactPolicy>>,
+  reviewer_authority: Option<Arc<ReviewerDirectoryAuthorityV1>>,
   policy_execution: Option<Arc<PolicyExecutionCoordinator>>,
   policy_execution_registry: PolicyExecutionRegistry,
   lock_renewals: Arc<std::sync::Mutex<HashMap<String, Arc<AtomicBool>>>>,
@@ -485,6 +491,7 @@ impl RuntimeExecutionOptions {
       managed_locks_service: Some(managed_locks_service),
       managed_artifact_store: None,
       artifact_policy: None,
+      reviewer_authority: None,
       policy_execution: None,
       policy_execution_registry: Arc::new(tokio::sync::RwLock::new(HashMap::new())),
       lock_renewals: Arc::new(std::sync::Mutex::new(HashMap::new())),
@@ -670,6 +677,15 @@ impl RuntimeExecutionOptions {
       .map_err(|error| crate::ArtifactPolicyError::Invalid(error.to_string()))?;
     self.managed_artifact_store = Some(store);
     Ok(self)
+  }
+
+  pub fn with_reviewer_directory(mut self, authority: Arc<ReviewerDirectoryAuthorityV1>) -> Self {
+    self.reviewer_authority = Some(authority);
+    self
+  }
+
+  pub fn reviewer_authority(&self) -> Option<Arc<ReviewerDirectoryAuthorityV1>> {
+    self.reviewer_authority.clone()
   }
 
   pub fn with_schedule_progress_reporter(mut self, reporter: ScheduleProgressReporter) -> Self {
@@ -1088,8 +1104,25 @@ pub struct WaitingWorkflowApproval {
   #[serde(skip_serializing_if = "Option::is_none")]
   pub expires_at: Option<chrono::DateTime<chrono::Utc>>,
   pub on_timeout: ApprovalTimeoutPolicy,
-  pub token: String,
-  pub credential_expires_at: chrono::DateTime<chrono::Utc>,
+  #[serde(skip_serializing_if = "Option::is_none")]
+  pub token: Option<String>,
+  #[serde(skip_serializing_if = "Option::is_none")]
+  pub credential_expires_at: Option<chrono::DateTime<chrono::Utc>>,
+  #[serde(skip_serializing_if = "Option::is_none")]
+  pub review_digest: Option<String>,
+  #[serde(skip_serializing_if = "Option::is_none")]
+  pub review: Option<ReviewPayloadV1>,
+  #[serde(skip_serializing_if = "Option::is_none")]
+  pub authority: Option<WaitingRichApprovalAuthority>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WaitingRichApprovalAuthority {
+  pub required: u32,
+  pub received: u32,
+  pub required_roles: Vec<String>,
+  pub represented_roles: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -1684,6 +1717,7 @@ async fn execute_policy_run_durable_unprofiled(
   {
     let binding = store.run_binding(run_id)?;
     let workflow = store.definition(&binding.definition_hash)?;
+    validate_rich_approval_authority(&workflow, &options)?;
     let policy = workflow.runtime_policy.as_ref().ok_or_else(|| {
       RuntimeExecutionError::InvalidConfiguration(
         "Model v12 execution requires a runtime policy".to_string(),
@@ -1837,6 +1871,7 @@ async fn execute_workflow_durable_internal_unprofiled(
   options: RuntimeExecutionOptions,
   database_path: PathBuf,
 ) -> Result<WorkflowRuntimeOutcome, RuntimeExecutionError> {
+  validate_rich_approval_authority(&workflow, &options)?;
   let options = attach_durable_capability_authority(options, &database_path)?;
   let mut store = DurableEventStore::open(database_path.clone())?;
   if workflow.schema_version >= crate::COMPILED_MODEL_SCHEMA_VERSION_V12 {
@@ -1931,6 +1966,7 @@ async fn execute_admitted_trigger_run_durable_unprofiled(
   let store = DurableEventStore::open(database_path.clone())?;
   let binding = store.run_binding(run_id)?;
   let workflow = store.definition(&binding.definition_hash)?;
+  validate_rich_approval_authority(&workflow, &options)?;
   if workflow.schema_version >= crate::COMPILED_MODEL_SCHEMA_VERSION_V12 {
     return execute_policy_run_durable(database_path, run_id, options, store).await;
   }
@@ -1949,6 +1985,7 @@ async fn resume_workflow_durable_internal(
   let mut store = DurableEventStore::open(database_path.clone())?;
   let binding = store.run_binding(run_id)?;
   let workflow = store.definition(&binding.definition_hash)?;
+  validate_rich_approval_authority(&workflow, &options)?;
   let has_approval = workflow_has_approval(&workflow);
   let has_durable_wait = workflow_has_durable_wait(&workflow);
   let has_durable_lock = workflow_has_durable_lock(&workflow);
@@ -1975,6 +2012,18 @@ fn attach_durable_capability_authority(
   mut options: RuntimeExecutionOptions,
   database_path: &std::path::Path,
 ) -> Result<RuntimeExecutionOptions, RuntimeExecutionError> {
+  if let Some(authority) = options.reviewer_authority() {
+    REVIEWER_AUTHORITIES
+      .get_or_init(|| RwLock::new(HashMap::new()))
+      .write()
+      .map_err(|_| {
+        RuntimeExecutionError::InvalidConfiguration(
+          "WOML_APPROVAL_AUTHORITY_UNAVAILABLE: reviewer authority registry is unavailable"
+            .to_string(),
+        )
+      })?
+      .insert(database_path.to_path_buf(), authority);
+  }
   if let Some(storage) = &options.managed_storage_store {
     storage
       .configure_for_state(database_path)
@@ -2099,6 +2148,44 @@ fn workflow_has_approval(workflow: &CompiledWorkflowDefinition) -> bool {
       .nodes
       .iter()
       .any(|node| node.handler == "engine.approval-wait")
+}
+
+fn validate_rich_approval_authority(
+  workflow: &CompiledWorkflowDefinition,
+  options: &RuntimeExecutionOptions,
+) -> Result<(), RuntimeExecutionError> {
+  if workflow.schema_version != crate::COMPILED_MODEL_SCHEMA_VERSION_V20 {
+    return Ok(());
+  }
+  let authority = options.reviewer_authority.as_ref().ok_or_else(|| {
+    RuntimeExecutionError::InvalidConfiguration(
+      "WOML_APPROVAL_AUTHORITY_UNAVAILABLE: Model v20 requires an operator-owned Reviewer Directory v1".to_string(),
+    )
+  })?;
+  let version = authority.active_version().map_err(|error| {
+    RuntimeExecutionError::InvalidConfiguration(format!("{}: {error}", error.code()))
+  })?;
+  for node in workflow
+    .graph
+    .nodes
+    .iter()
+    .filter(|node| node.handler == "engine.approval-wait")
+  {
+    let approval = workflow.approval(&node.id).ok_or_else(|| {
+      RuntimeExecutionError::InvalidConfiguration(
+        "Model v20 contains an invalid approval descriptor".to_string(),
+      )
+    })?;
+    let Some(required) = approval.required_approvals else {
+      continue;
+    };
+    authority
+      .validate_requirements(&version, required, &approval.required_roles)
+      .map_err(|error| {
+        RuntimeExecutionError::InvalidConfiguration(format!("{}: {error}", error.code()))
+      })?;
+  }
+  Ok(())
 }
 
 fn workflow_has_durable_wait(workflow: &CompiledWorkflowDefinition) -> bool {
@@ -2340,6 +2427,29 @@ pub fn resolve_human_approval_durable(
   Ok(store.resolve_human_approval(token, decision, clock.now())?)
 }
 
+pub fn resolve_rich_approval_durable(
+  database_path: PathBuf,
+  decision: crate::RichApprovalIdentityDecision,
+) -> Result<crate::RichApprovalDecisionOutcome, RuntimeExecutionError> {
+  let authority = REVIEWER_AUTHORITIES
+    .get_or_init(|| RwLock::new(HashMap::new()))
+    .read()
+    .map_err(|_| {
+      RuntimeExecutionError::InvalidConfiguration(
+        "WOML_APPROVAL_AUTHORITY_UNAVAILABLE: reviewer authority is unavailable".to_string(),
+      )
+    })?
+    .get(&database_path)
+    .cloned()
+    .ok_or_else(|| {
+      RuntimeExecutionError::InvalidConfiguration(
+        "WOML_APPROVAL_AUTHORITY_UNAVAILABLE: no reviewer authority is active for this durable store".to_string(),
+      )
+    })?;
+  let mut store = DurableEventStore::open(database_path)?;
+  Ok(store.record_rich_approval_identity_decision(&authority, decision)?)
+}
+
 pub fn settle_approval_timeout_durable(
   database_path: PathBuf,
   run_id: &str,
@@ -2349,6 +2459,67 @@ pub fn settle_approval_timeout_durable(
   let mut store = DurableEventStore::open(database_path)?;
   let now = clock.now();
   let projection = store.projection(run_id)?;
+  if let Some(request) = projection.rich_approval_requests.get(approval_id) {
+    let binding = store.run_binding(run_id)?;
+    let workflow = store.definition(&binding.definition_hash)?;
+    let approval = workflow.approval(approval_id).ok_or_else(|| {
+      RuntimeExecutionError::Stalled(
+        "rich approval timeout references an unknown approval definition".to_string(),
+      )
+    })?;
+    let deadline = approval
+      .timeout_ms
+      .ok_or(DurableStoreError::ApprovalHasNoDeadline)
+      .and_then(|milliseconds| {
+        i64::try_from(milliseconds)
+          .map(chrono::Duration::milliseconds)
+          .map(|duration| request.requested_at + duration)
+          .map_err(|_| {
+            DurableStoreError::Contract(
+              "Rich approval timeout exceeds the durable clock range.".to_string(),
+            )
+          })
+      })?;
+    if request.status != crate::RichApprovalRequestStatus::Waiting {
+      return Ok(ApprovalTimeoutSettlement {
+        status: crate::ApprovalTimeoutSettlementStatus::AlreadyResolved,
+        run_id: run_id.to_string(),
+        approval_id: approval_id.to_string(),
+        request_id: request.request_id.clone(),
+        resolution: None,
+        settled_at: request.resolved_at,
+      });
+    }
+    if now < deadline {
+      return Ok(ApprovalTimeoutSettlement {
+        status: crate::ApprovalTimeoutSettlementStatus::NotDue,
+        run_id: run_id.to_string(),
+        approval_id: approval_id.to_string(),
+        request_id: request.request_id.clone(),
+        resolution: None,
+        settled_at: None,
+      });
+    }
+    let outcome = store.settle_rich_approval_without_vote(
+      run_id,
+      &request.request_id,
+      &request.review_digest,
+      RichApprovalResolutionReason::Timeout,
+      now,
+    )?;
+    return Ok(ApprovalTimeoutSettlement {
+      status: if outcome.status == crate::RichApprovalDecisionStatus::AlreadyResolved {
+        crate::ApprovalTimeoutSettlementStatus::AlreadyResolved
+      } else {
+        crate::ApprovalTimeoutSettlementStatus::Settled
+      },
+      run_id: run_id.to_string(),
+      approval_id: approval_id.to_string(),
+      request_id: request.request_id.clone(),
+      resolution: None,
+      settled_at: Some(now),
+    });
+  }
   if projection.timeout_reached_at.is_some() {
     let request = projection
       .approval_requests
@@ -4875,6 +5046,7 @@ async fn drive_workflow_lifecycle<E: RuntimeDagEngine>(
       | crate::COMPILED_MODEL_SCHEMA_VERSION_V17
       | crate::COMPILED_MODEL_SCHEMA_VERSION_V18
       | crate::COMPILED_MODEL_SCHEMA_VERSION_V19
+      | crate::COMPILED_MODEL_SCHEMA_VERSION_V20
   ) {
     return Ok(());
   }
@@ -6313,6 +6485,75 @@ fn request_approval_wait<E: RuntimeDagEngine>(
   } else {
     on_timeout
   };
+  if let Some(review_reference) = approval.review.clone() {
+    let authority = options.reviewer_authority.as_ref().ok_or_else(|| {
+      RuntimeExecutionError::InvalidConfiguration(
+        "WOML_APPROVAL_AUTHORITY_UNAVAILABLE: rich approval requires an operator-owned Reviewer Directory v1".to_string(),
+      )
+    })?;
+    let required = approval.required_approvals.ok_or_else(|| {
+      RuntimeExecutionError::Stalled(
+        "a rich approval has no compiled required approval count".to_string(),
+      )
+    })?;
+    let directory_version = authority.active_version().map_err(|error| {
+      RuntimeExecutionError::InvalidConfiguration(format!("{}: {error}", error.code()))
+    })?;
+    authority
+      .validate_requirements(&directory_version, required, &approval.required_roles)
+      .map_err(|error| {
+        RuntimeExecutionError::InvalidConfiguration(format!("{}: {error}", error.code()))
+      })?;
+    let projection = engine.projection(run_id)?;
+    let review = crate::resolve_rich_approval_review(&review_reference, &projection.context)
+      .map_err(rich_approval_runtime_error)?;
+    let workflow_version = engine
+      .workflow()
+      .metadata
+      .as_ref()
+      .and_then(|metadata| metadata.version.as_deref())
+      .unwrap_or("0.0.0")
+      .to_string();
+    let reject_artifacts = RejectRichApprovalArtifacts;
+    let artifact_verifier: &dyn RichApprovalArtifactVerifier = options
+      .managed_artifact_store
+      .as_deref()
+      .map(|store| store as &dyn RichApprovalArtifactVerifier)
+      .unwrap_or(&reject_artifacts);
+    let known_secrets = options
+      .resolved_secrets
+      .values()
+      .cloned()
+      .collect::<Vec<_>>();
+    let binding = crate::bind_rich_approval_review(
+      RichApprovalBindingInput {
+        definition_hash: engine.definition_hash().to_string(),
+        workflow_id: engine.workflow().workflow_id.clone(),
+        workflow_version,
+        run_id: run_id.to_string(),
+        approval_id: approval.approval_id.clone(),
+        request_id: request_id.clone(),
+        review,
+        required_approvals: required,
+        required_roles: approval.required_roles.clone(),
+        directory_version,
+      },
+      artifact_verifier,
+      &known_secrets,
+    )
+    .map_err(rich_approval_runtime_error)?;
+    engine.request_rich_approval(run_id, occurred_at, &binding)?;
+    return Ok(rich_waiting_outcome(
+      engine.workflow().workflow_id.clone(),
+      run_id.to_string(),
+      approval,
+      waiting_expires_at,
+      waiting_on_timeout,
+      binding,
+      0,
+      Vec::new(),
+    ));
+  }
   let token = engine.request_approval(
     run_id,
     occurred_at,
@@ -6355,10 +6596,65 @@ fn waiting_outcome(
       description: approval.description,
       expires_at,
       on_timeout,
-      token: token.token,
-      credential_expires_at: token.credential_expires_at,
+      token: Some(token.token),
+      credential_expires_at: Some(token.credential_expires_at),
+      review_digest: None,
+      review: None,
+      authority: None,
     },
   }
+}
+
+fn rich_waiting_outcome(
+  workflow_id: String,
+  run_id: String,
+  approval: ApprovalDefinition,
+  expires_at: Option<chrono::DateTime<chrono::Utc>>,
+  on_timeout: ApprovalTimeoutPolicy,
+  binding: BoundRichApprovalReview,
+  received: u32,
+  represented_roles: Vec<String>,
+) -> WorkflowRuntimeOutcome {
+  WorkflowRuntimeOutcome::Waiting {
+    contract: RUNTIME_OUTCOME_CONTRACT,
+    version: RUNTIME_OUTCOME_VERSION,
+    workflow_id,
+    run_id,
+    approval: WaitingWorkflowApproval {
+      approval_id: approval.approval_id,
+      request_id: binding.request_id,
+      name: approval.name,
+      description: approval.description,
+      expires_at,
+      on_timeout,
+      token: None,
+      credential_expires_at: None,
+      review_digest: Some(binding.review_digest),
+      review: Some(binding.review),
+      authority: Some(WaitingRichApprovalAuthority {
+        required: binding.required_approvals,
+        received,
+        required_roles: binding.required_roles,
+        represented_roles,
+      }),
+    },
+  }
+}
+
+struct RejectRichApprovalArtifacts;
+
+impl RichApprovalArtifactVerifier for RejectRichApprovalArtifacts {
+  fn verify_review_artifact(
+    &self,
+    _run_id: &str,
+    _artifact: &crate::ArtifactReferenceV1,
+  ) -> Result<crate::ArtifactReferenceV1, RichApprovalError> {
+    Err(RichApprovalError::ArtifactInvalid)
+  }
+}
+
+fn rich_approval_runtime_error(error: RichApprovalError) -> RuntimeExecutionError {
+  RuntimeExecutionError::InvalidConfiguration(format!("{}: {error}", error.code()))
 }
 
 fn fork_branch_routes(
@@ -11693,6 +11989,12 @@ fn settle_cancelling_run<E: RuntimeDagEngine>(
     return Ok(());
   }
 
+  engine.settle_pending_rich_approval(
+    run_id,
+    RichApprovalResolutionReason::Cancellation,
+    occurred_at,
+  )?;
+
   let active_operations = projection
     .operations
     .values()
@@ -12333,6 +12635,24 @@ trait RuntimeDagEngine {
       "human approval requires the durable runtime".to_string(),
     ))
   }
+  fn request_rich_approval(
+    &mut self,
+    _run_id: &str,
+    _occurred_at: chrono::DateTime<chrono::Utc>,
+    _binding: &BoundRichApprovalReview,
+  ) -> Result<(), RuntimeExecutionError> {
+    Err(RuntimeExecutionError::Stalled(
+      "rich plan approval requires the durable runtime".to_string(),
+    ))
+  }
+  fn settle_pending_rich_approval(
+    &mut self,
+    _run_id: &str,
+    _reason: RichApprovalResolutionReason,
+    _settled_at: chrono::DateTime<chrono::Utc>,
+  ) -> Result<bool, RuntimeExecutionError> {
+    Ok(false)
+  }
   fn register_durable_wait(
     &mut self,
     _run_id: &str,
@@ -12622,6 +12942,24 @@ impl<E: RuntimeDagEngine> RuntimeDagEngine for SharedForEachEngine<'_, E> {
     request: ApprovalRequestedData,
   ) -> Result<IssuedApprovalToken, RuntimeExecutionError> {
     self.with_engine(|engine| engine.request_approval(run_id, occurred_at, request))
+  }
+
+  fn request_rich_approval(
+    &mut self,
+    run_id: &str,
+    occurred_at: chrono::DateTime<chrono::Utc>,
+    binding: &BoundRichApprovalReview,
+  ) -> Result<(), RuntimeExecutionError> {
+    self.with_engine(|engine| engine.request_rich_approval(run_id, occurred_at, binding))
+  }
+
+  fn settle_pending_rich_approval(
+    &mut self,
+    run_id: &str,
+    reason: RichApprovalResolutionReason,
+    settled_at: chrono::DateTime<chrono::Utc>,
+  ) -> Result<bool, RuntimeExecutionError> {
+    self.with_engine(|engine| engine.settle_pending_rich_approval(run_id, reason, settled_at))
   }
 
   fn register_durable_wait(
@@ -12980,6 +13318,27 @@ impl RuntimeDagEngine for DurableDagEngine {
     )?)
   }
 
+  fn request_rich_approval(
+    &mut self,
+    run_id: &str,
+    occurred_at: chrono::DateTime<chrono::Utc>,
+    binding: &BoundRichApprovalReview,
+  ) -> Result<(), RuntimeExecutionError> {
+    DurableDagEngine::request_rich_approval(self, run_id, occurred_at, binding)?;
+    Ok(())
+  }
+
+  fn settle_pending_rich_approval(
+    &mut self,
+    run_id: &str,
+    reason: RichApprovalResolutionReason,
+    settled_at: chrono::DateTime<chrono::Utc>,
+  ) -> Result<bool, RuntimeExecutionError> {
+    Ok(DurableDagEngine::settle_pending_rich_approval(
+      self, run_id, reason, settled_at,
+    )?)
+  }
+
   fn register_durable_wait(
     &mut self,
     run_id: &str,
@@ -13111,6 +13470,91 @@ impl RuntimeDagEngine for DurableDagEngine {
     now: chrono::DateTime<chrono::Utc>,
   ) -> Result<WorkflowRuntimeOutcome, RuntimeExecutionError> {
     let projection = self.projection(run_id)?;
+    if let Some(request) = projection
+      .rich_approval_requests
+      .values()
+      .find(|request| matches!(request.status, crate::RichApprovalRequestStatus::Waiting))
+      .cloned()
+    {
+      let approval = self
+        .workflow()
+        .approval(&request.approval_id)
+        .ok_or_else(|| {
+          RuntimeExecutionError::Stalled(
+            "waiting run references an unknown rich approval definition".to_string(),
+          )
+        })?;
+      let inspection = DurableDagEngine::inspect_rich_approval(self, run_id, &request.request_id)?;
+      let expires_at = approval
+        .timeout_ms
+        .map(|milliseconds| {
+          i64::try_from(milliseconds)
+            .map(chrono::Duration::milliseconds)
+            .map(|duration| request.requested_at + duration)
+        })
+        .transpose()
+        .map_err(|_| {
+          RuntimeExecutionError::Stalled(
+            "rich approval timeout exceeds the clock range".to_string(),
+          )
+        })?;
+      let waiting_expires_at = match (expires_at, projection.timeout_at) {
+        (Some(approval), Some(workflow)) => Some(approval.min(workflow)),
+        (Some(approval), None) => Some(approval),
+        (None, Some(workflow)) => Some(workflow),
+        (None, None) => None,
+      };
+      if waiting_expires_at.is_some_and(|deadline| now >= deadline) {
+        return Err(RuntimeExecutionError::Stalled(
+          "rich approval deadline must be settled before wait reissue".to_string(),
+        ));
+      }
+      let on_timeout = if projection
+        .timeout_at
+        .is_some_and(|workflow| expires_at.is_none_or(|approval| workflow <= approval))
+      {
+        ApprovalTimeoutPolicy::Fail
+      } else if approval.on_timeout == "reject" {
+        ApprovalTimeoutPolicy::Reject
+      } else {
+        ApprovalTimeoutPolicy::Fail
+      };
+      let workflow_version = self
+        .workflow()
+        .metadata
+        .as_ref()
+        .and_then(|metadata| metadata.version.as_deref())
+        .unwrap_or("0.0.0")
+        .to_string();
+      return Ok(rich_waiting_outcome(
+        self.workflow().workflow_id.clone(),
+        run_id.to_string(),
+        approval,
+        waiting_expires_at,
+        on_timeout,
+        BoundRichApprovalReview {
+          profile: crate::RICH_PLAN_APPROVAL_PROFILE.to_string(),
+          definition_hash: self.definition_hash().to_string(),
+          workflow_id: self.workflow().workflow_id.clone(),
+          workflow_version,
+          run_id: run_id.to_string(),
+          approval_id: request.approval_id,
+          request_id: request.request_id,
+          artifacts: inspection.review.artifacts.clone(),
+          review: inspection.review,
+          required_approvals: inspection.required,
+          required_roles: inspection.required_roles,
+          directory_version: inspection.directory_version,
+          review_digest: inspection.review_digest,
+        },
+        request
+          .decisions
+          .values()
+          .filter(|decision| decision.decision == crate::ApprovalDecision::Approved)
+          .count() as u32,
+        request.represented_roles,
+      ));
+    }
     if let Some(request) = projection
       .approval_requests
       .values()

@@ -427,13 +427,19 @@ async fn waiting_approval_cancels_and_invalidates_its_credential() {
   };
   let mut store = DurableEventStore::open(database.clone()).unwrap();
   store
-    .verify_approval_token(&approval.token, Utc::now())
+    .verify_approval_token(
+      approval.token.as_deref().expect("basic approval token"),
+      Utc::now(),
+    )
     .unwrap();
   store
     .request_run_cancellation(&run_id, "cancel_approval", Utc::now())
     .unwrap();
   assert!(matches!(
-    store.verify_approval_token(&approval.token, Utc::now()),
+    store.verify_approval_token(
+      approval.token.as_deref().expect("basic approval token"),
+      Utc::now()
+    ),
     Err(DurableStoreError::ApprovalExpired)
   ));
 

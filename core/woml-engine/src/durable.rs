@@ -61,7 +61,10 @@ use crate::{
   RUN_EVENT_SCHEMA_VERSION_V5, RUN_EVENT_SCHEMA_VERSION_V6, RUN_EVENT_SCHEMA_VERSION_V7,
   RUN_EVENT_SCHEMA_VERSION_V8, RUN_EVENT_SCHEMA_VERSION_V9,
 };
-use crate::{verify_bound_rich_approval_review, BoundRichApprovalReview, ReviewPayloadV1};
+use crate::{
+  verify_bound_rich_approval_review, BoundRichApprovalReview, ReviewPayloadV1,
+  ReviewerDirectoryAuthorityV1, ReviewerDirectoryError, ReviewerIdentityClaimV1,
+};
 
 pub const DURABLE_STORE_SCHEMA_VERSION: u32 = 18;
 const STORE_SCHEMA_VERSION_V1: &str = "1";
@@ -1996,6 +1999,8 @@ pub enum DurableStoreError {
   RichApprovalBindingMismatch,
   #[error("the canonical reviewer already recorded a conflicting decision")]
   RichApprovalReviewerConflict,
+  #[error(transparent)]
+  ReviewerDirectory(#[from] ReviewerDirectoryError),
   #[error("the lock acquisition identity is already bound to different input")]
   LockIdempotencyConflict,
   #[error("the durable lock wait queue reached its safety ceiling")]
@@ -2029,6 +2034,16 @@ pub struct RichApprovalDecisionAdmission {
   pub provider_account_id: String,
   pub provider_actor_id: String,
   pub roles: Vec<String>,
+  pub decided_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RichApprovalIdentityDecision {
+  pub run_id: String,
+  pub request_id: String,
+  pub review_digest: String,
+  pub decision: ApprovalDecision,
+  pub identity: ReviewerIdentityClaimV1,
   pub decided_at: DateTime<Utc>,
 }
 
@@ -2086,6 +2101,7 @@ struct RichReviewRow {
   review_digest: String,
   required: u32,
   required_roles: Vec<String>,
+  directory_version: String,
   status: String,
 }
 
@@ -2100,9 +2116,10 @@ fn rich_review_row(
   run_id: &str,
   request_id: &str,
 ) -> Result<Option<RichReviewRow>, DurableStoreError> {
-  let row: Option<(String, String, String, i64, String, String)> = connection
+  let row: Option<(String, String, String, i64, String, String, String)> = connection
     .query_row(
-      "SELECT approval_id, request_id, review_digest, required_approvals, required_roles_json, status
+      "SELECT approval_id, request_id, review_digest, required_approvals, required_roles_json,
+              directory_version, status
        FROM woml_approval_reviews WHERE run_id = ?1 AND request_id = ?2",
       params![run_id, request_id],
       |row| {
@@ -2113,13 +2130,22 @@ fn rich_review_row(
           row.get(3)?,
           row.get(4)?,
           row.get(5)?,
+          row.get(6)?,
         ))
       },
     )
     .optional()?;
   row
     .map(
-      |(approval_id, request_id, review_digest, required, required_roles_json, status)| {
+      |(
+        approval_id,
+        request_id,
+        review_digest,
+        required,
+        required_roles_json,
+        directory_version,
+        status,
+      )| {
         Ok(RichReviewRow {
           approval_id,
           request_id,
@@ -2130,6 +2156,7 @@ fn rich_review_row(
             )
           })?,
           required_roles: serde_json::from_str(&required_roles_json)?,
+          directory_version,
           status,
         })
       },
@@ -5834,6 +5861,44 @@ impl DurableEventStore {
     })
   }
 
+  /// Resolves an authenticated provider identity through the operator-owned
+  /// directory version pinned by the immutable review, then converges on the
+  /// same atomic quorum transaction used by every rich-approval ingress path.
+  /// Principal IDs and roles are never accepted from callback input.
+  pub fn record_rich_approval_identity_decision(
+    &mut self,
+    authority: &ReviewerDirectoryAuthorityV1,
+    decision: RichApprovalIdentityDecision,
+  ) -> Result<RichApprovalDecisionOutcome, DurableStoreError> {
+    let review = rich_review_row(&self.connection, &decision.run_id, &decision.request_id)?
+      .ok_or(DurableStoreError::RichApprovalNotFound)?;
+    if review.review_digest != decision.review_digest {
+      return Err(DurableStoreError::RichApprovalBindingMismatch);
+    }
+    authority.validate_requirements(
+      &review.directory_version,
+      review.required,
+      &review.required_roles,
+    )?;
+    let reviewer = authority.resolve(
+      &review.directory_version,
+      &decision.identity,
+      &review.required_roles,
+    )?;
+    self.record_rich_approval_decision(RichApprovalDecisionAdmission {
+      run_id: decision.run_id,
+      request_id: decision.request_id,
+      review_digest: decision.review_digest,
+      principal_id: reviewer.principal_id,
+      decision: decision.decision,
+      provider: reviewer.provider.as_str().to_string(),
+      provider_account_id: reviewer.account_id,
+      provider_actor_id: reviewer.actor_id,
+      roles: reviewer.roles,
+      decided_at: decision.decided_at,
+    })
+  }
+
   pub fn settle_rich_approval_without_vote(
     &mut self,
     run_id: &str,
@@ -5886,7 +5951,7 @@ impl DurableEventStore {
       ));
     }
     payloads.push(RunEventPayload::ApprovalResolved(ApprovalResolvedData {
-      approval_id: review.approval_id,
+      approval_id: review.approval_id.clone(),
       request_id: request_id.to_string(),
       resolution: None,
       review_digest: Some(review_digest.to_string()),
@@ -5897,6 +5962,25 @@ impl DurableEventStore {
       required_roles: Some(review.required_roles),
       represented_roles: Some(quorum.represented_roles.clone()),
     }));
+    if reason == RichApprovalResolutionReason::Timeout {
+      let workflow = definition_for_run(&transaction, run_id)?;
+      let approval = workflow.approval(&review.approval_id).ok_or_else(|| {
+        DurableStoreError::Contract("A rich approval timeout has no compiled descriptor.".into())
+      })?;
+      if approval.on_timeout == "fail" {
+        payloads.push(RunEventPayload::RunFailed(RunFailedData::V4(
+          crate::RunFailedDataV4::Approval {
+            approval_id: review.approval_id.clone(),
+            request_id: request_id.to_string(),
+            failure: ApprovalFailure {
+              kind: "approval_timeout".to_string(),
+              code: "WOML_APPROVAL_TIMEOUT".to_string(),
+              message: format!("Approval {:?} reached its deadline.", review.approval_id),
+            },
+          },
+        )));
+      }
+    }
     append_rich_approval_payloads(
       &transaction,
       &self.projection_cache,
@@ -6180,6 +6264,7 @@ impl DurableEventStore {
         {
           projection.workflow_id = Some(binding.workflow_id);
         }
+        hydrate_rich_approval_public_outputs(&self.connection, run_id, &mut projection)?;
         span.succeed();
         return Ok(projection);
       }
@@ -6198,6 +6283,7 @@ impl DurableEventStore {
     {
       projection.workflow_id = Some(binding.workflow_id);
     }
+    hydrate_rich_approval_public_outputs(&self.connection, run_id, &mut projection)?;
     cache_projection_state(&self.projection_cache, run_id, state);
     span.succeed();
     Ok(projection)
@@ -6984,9 +7070,10 @@ impl DurableEventStore {
   ) -> Result<CorrectionInspectionV1, DurableStoreError> {
     let binding = self.run_binding(run_id)?;
     let workflow = self.definition(&binding.definition_hash)?;
-    if workflow.schema_version != crate::COMPILED_MODEL_SCHEMA_VERSION_V19 {
+    if workflow.schema_version < crate::COMPILED_MODEL_SCHEMA_VERSION_V19 {
       return Err(DurableStoreError::Contract(
-        "Correction Inspection v1 is available only for compiled Model v19 runs.".to_string(),
+        "Correction Inspection v1 is available only for compiled Model v19 or later runs."
+          .to_string(),
       ));
     }
     let projection = self.projection(run_id)?;
@@ -8304,6 +8391,7 @@ impl DurableEventStore {
         | crate::COMPILED_MODEL_SCHEMA_VERSION_V17
         | crate::COMPILED_MODEL_SCHEMA_VERSION_V18
         | crate::COMPILED_MODEL_SCHEMA_VERSION_V19
+        | crate::COMPILED_MODEL_SCHEMA_VERSION_V20
     ) {
       return Ok(result(
         RunCancellationStatus::Rejected,
@@ -8452,6 +8540,7 @@ impl DurableEventStore {
         | crate::COMPILED_MODEL_SCHEMA_VERSION_V17
         | crate::COMPILED_MODEL_SCHEMA_VERSION_V18
         | crate::COMPILED_MODEL_SCHEMA_VERSION_V19
+        | crate::COMPILED_MODEL_SCHEMA_VERSION_V20
     ) {
       return Err(DurableStoreError::Contract(
         "Business-outcome authority requires compiled Model v11+.".to_string(),
@@ -12788,6 +12877,52 @@ impl DurableEventStore {
   }
 }
 
+fn hydrate_rich_approval_public_outputs(
+  connection: &Connection,
+  run_id: &str,
+  projection: &mut RunProjection,
+) -> Result<(), DurableStoreError> {
+  for request in projection.rich_approval_requests.values() {
+    if request.status == crate::RichApprovalRequestStatus::Waiting {
+      continue;
+    }
+    let review_json: Option<String> = connection
+      .query_row(
+        "SELECT review_json FROM woml_approval_reviews
+         WHERE run_id = ?1 AND request_id = ?2",
+        params![run_id, request.request_id],
+        |row| row.get(0),
+      )
+      .optional()?;
+    let Some(review_json) = review_json else {
+      return Err(DurableStoreError::Contract(
+        "A settled rich approval has no immutable review snapshot.".to_string(),
+      ));
+    };
+    let review: ReviewPayloadV1 = serde_json::from_str(&review_json)?;
+    let output = projection
+      .context
+      .steps
+      .get_mut(&request.approval_id)
+      .and_then(Value::as_object_mut)
+      .ok_or_else(|| {
+        DurableStoreError::Contract(
+          "A settled rich approval has no public context output.".to_string(),
+        )
+      })?;
+    output.insert(
+      "review".to_string(),
+      serde_json::json!({
+        "digest": request.review_digest,
+        "title": review.title,
+        "risk": review.risk,
+        "artifacts": review.artifacts,
+      }),
+    );
+  }
+  Ok(())
+}
+
 fn random_hex(byte_count: usize) -> Result<String, DurableStoreError> {
   let mut bytes = vec![0_u8; byte_count];
   getrandom(&mut bytes).map_err(|_| {
@@ -17054,6 +17189,63 @@ impl DurableDagEngine {
         .store
         .request_approval_atomically(run_id, generated_event_id(), occurred_at, request)?;
     Ok(token)
+  }
+
+  pub fn request_rich_approval(
+    &mut self,
+    run_id: &str,
+    occurred_at: DateTime<Utc>,
+    binding: &BoundRichApprovalReview,
+  ) -> Result<RunProjection, DurableEngineError> {
+    let ready = self.ready_node_ids(run_id)?;
+    if !ready.iter().any(|node_id| node_id == &binding.approval_id) {
+      return Err(DurableEngineError::Contract(format!(
+        "Rich approval {:?} is not ready to enter waiting state.",
+        binding.approval_id
+      )));
+    }
+    Ok(
+      self
+        .store
+        .create_rich_approval_request(binding, occurred_at)?,
+    )
+  }
+
+  pub fn inspect_rich_approval(
+    &self,
+    run_id: &str,
+    request_id: &str,
+  ) -> Result<RichApprovalInspectionV1, DurableEngineError> {
+    Ok(self.store.inspect_rich_approval(
+      run_id,
+      request_id,
+      RICH_APPROVAL_INSPECTION_DECISION_LIMIT,
+    )?)
+  }
+
+  pub fn settle_pending_rich_approval(
+    &mut self,
+    run_id: &str,
+    reason: RichApprovalResolutionReason,
+    settled_at: DateTime<Utc>,
+  ) -> Result<bool, DurableEngineError> {
+    let projection = self.projection(run_id)?;
+    let Some(request) = projection
+      .rich_approval_requests
+      .values()
+      .find(|request| request.status == crate::RichApprovalRequestStatus::Waiting)
+      .cloned()
+    else {
+      return Ok(false);
+    };
+    self.store.settle_rich_approval_without_vote(
+      run_id,
+      &request.request_id,
+      &request.review_digest,
+      reason,
+      settled_at,
+    )?;
+    Ok(true)
   }
 
   pub fn register_durable_wait(

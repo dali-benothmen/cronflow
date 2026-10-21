@@ -2851,7 +2851,10 @@ impl ProjectionFoldState {
           let decision = data.decision.ok_or_else(|| {
             FoldError::InvalidHistory("A rich approval resolution has no decision.".to_string())
           })?;
-          if projection.status != RunStatus::Waiting
+          let cancellation_resolution = data.reason
+            == Some(crate::RichApprovalResolutionReason::Cancellation)
+            && projection.status == RunStatus::Cancelling;
+          if (projection.status != RunStatus::Waiting && !cancellation_resolution)
             || request.status != RichApprovalRequestStatus::Waiting
             || request.request_id != data.request_id
             || data.review_digest.as_deref() != Some(request.review_digest.as_str())
@@ -2905,7 +2908,11 @@ impl ProjectionFoldState {
               }
             }),
           );
-          projection.status = RunStatus::Running;
+          projection.status = if cancellation_resolution {
+            RunStatus::Cancelling
+          } else {
+            RunStatus::Running
+          };
         } else {
           if projection.status != RunStatus::Waiting {
             return Err(FoldError::InvalidHistory(

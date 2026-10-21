@@ -4,7 +4,11 @@ import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 
-import { compileWoml, parseWoml, type CompiledWorkflowDefinition } from '@woml/compiler';
+import {
+  compileWoml,
+  parseWoml,
+  type CompiledWorkflowDefinition,
+} from '@woml/compiler';
 import {
   compiledDefinitionHash,
   executeApprovalWorkflowWithRust,
@@ -131,33 +135,38 @@ const resultLimitedHostPath = resolve(
 );
 const nativeTest = nativeCorePath === undefined ? test.skip : test;
 
-nativeTest('exposes bounded correction observation and fail-closed recovery through N-API', async () => {
-  const directory = await mkdtemp(join(tmpdir(), 'woml-correction-native-'));
-  const database = join(directory, 'state.sqlite');
-  try {
-    expect(observeCorrectionsV1WithRust(database, { nativeCorePath })).toEqual({
-      profile: 'woml.correction-observation/v1',
-      openSagas: 0,
-      pendingActions: 0,
-      activeAttempts: 0,
-      manualRecoveryActions: 0,
-    });
-    expect(() =>
-      recoverCorrectionWithRust(
-        database,
-        {
-          profile: 'woml.correction-recovery-request/v1',
-          runId: 'run_unknown',
-          action: 'retry',
-          actionId: 'provision:compensate:network',
-        },
-        { nativeCorePath }
-      )
-    ).toThrow();
-  } finally {
-    await rm(directory, { recursive: true, force: true });
+nativeTest(
+  'exposes bounded correction observation and fail-closed recovery through N-API',
+  async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'woml-correction-native-'));
+    const database = join(directory, 'state.sqlite');
+    try {
+      expect(
+        observeCorrectionsV1WithRust(database, { nativeCorePath })
+      ).toEqual({
+        profile: 'woml.correction-observation/v1',
+        openSagas: 0,
+        pendingActions: 0,
+        activeAttempts: 0,
+        manualRecoveryActions: 0,
+      });
+      expect(() =>
+        recoverCorrectionWithRust(
+          database,
+          {
+            profile: 'woml.correction-recovery-request/v1',
+            runId: 'run_unknown',
+            action: 'retry',
+            actionId: 'provision:compensate:network',
+          },
+          { nativeCorePath }
+        )
+      ).toThrow();
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
   }
-});
+);
 
 describe('Trigger Progress v1 decoding', () => {
   test('Accepts every frozen progress fixture', async () => {
@@ -856,55 +865,50 @@ describe('Rust to Bun workflow execution', () => {
     }
   );
 
-  nativeTest(
-    'drains step hooks across approval pause and resume',
-    async () => {
-      const directory = await mkdtemp(join(tmpdir(), 'woml-lec4-approval-'));
-      const database = join(directory, 'state.sqlite');
-      const workflow = compileSource(
-        lifecycleApprovalSource,
-        'lifecycle-approval.woml'
+  nativeTest('drains step hooks across approval pause and resume', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'woml-lec4-approval-'));
+    const database = join(directory, 'state.sqlite');
+    const workflow = compileSource(
+      lifecycleApprovalSource,
+      'lifecycle-approval.woml'
+    );
+    try {
+      const waiting = await executeApprovalWorkflowWithRust(
+        workflow,
+        database,
+        { nativeCorePath, scriptHostPath }
       );
-      try {
-        const waiting = await executeApprovalWorkflowWithRust(
-          workflow,
-          database,
-          { nativeCorePath, scriptHostPath }
-        );
-        expect(waiting.status).toBe('waiting');
-        if (waiting.status !== 'waiting') throw new Error('expected approval');
-        resolveApprovalWithRust(database, waiting.approval.token, 'approved', {
-          nativeCorePath,
-        });
-        const resumed = await resumeApprovalWorkflowWithRust(
-          workflow,
-          database,
-          waiting.runId,
-          { nativeCorePath, scriptHostPath }
-        );
-        expect(resumed.status).toBe('succeeded');
-        if (resumed.status !== 'succeeded') throw new Error('expected success');
-        const requests = resumed.execution.events
-          .filter(event => event.type === 'lifecycle_hook_requested')
-          .map(
-            event => event.data as { event: string; subject: { id: string } }
-          );
-        for (const event of ['step_start', 'step_success', 'step_complete']) {
-          expect(
-            requests
-              .filter(request => request.event === event)
-              .map(request => request.subject.id)
-              .sort()
-          ).toEqual(['finish', 'prepare', 'publish']);
-        }
-        expect(requests.some(request => request.subject.id === 'reject')).toBe(
-          false
-        );
-      } finally {
-        await rm(directory, { recursive: true, force: true });
+      expect(waiting.status).toBe('waiting');
+      if (waiting.status !== 'waiting') throw new Error('expected approval');
+      resolveApprovalWithRust(database, waiting.approval.token!, 'approved', {
+        nativeCorePath,
+      });
+      const resumed = await resumeApprovalWorkflowWithRust(
+        workflow,
+        database,
+        waiting.runId,
+        { nativeCorePath, scriptHostPath }
+      );
+      expect(resumed.status).toBe('succeeded');
+      if (resumed.status !== 'succeeded') throw new Error('expected success');
+      const requests = resumed.execution.events
+        .filter(event => event.type === 'lifecycle_hook_requested')
+        .map(event => event.data as { event: string; subject: { id: string } });
+      for (const event of ['step_start', 'step_success', 'step_complete']) {
+        expect(
+          requests
+            .filter(request => request.event === event)
+            .map(request => request.subject.id)
+            .sort()
+        ).toEqual(['finish', 'prepare', 'publish']);
       }
+      expect(requests.some(request => request.subject.id === 'reject')).toBe(
+        false
+      );
+    } finally {
+      await rm(directory, { recursive: true, force: true });
     }
-  );
+  });
 
   nativeTest(
     'carries model v3 and event v3 through the production native boundary',

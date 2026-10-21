@@ -4485,12 +4485,6 @@ impl CompiledWorkflowDefinition {
 
   pub fn validate_for_durable_execution(&self) -> Result<(), ModelValidationError> {
     let mut issues = self.inspect_structure();
-    if self.schema_version == COMPILED_MODEL_SCHEMA_VERSION_V20 {
-      issues.push(issue(
-        ModelIssueCode::UnsupportedRichApprovalExecution,
-        "Compiled Model v20 rich approval execution is unavailable until the Rust review-binding authority is enabled.",
-      ));
-    }
     self.inspect_executable_profile(&mut issues, true, true, true);
     if issues.is_empty() {
       Ok(())

@@ -213,7 +213,7 @@ async fn approve_and_reject_are_idempotent_and_execute_only_the_selected_route()
     let clock = FixedEngineClock::new(decided_at);
     let accepted = resolve_human_approval_durable(
       database.path().to_path_buf(),
-      &approval.token,
+      approval.token.as_deref().expect("basic approval token"),
       decision,
       &clock,
     )
@@ -223,7 +223,7 @@ async fn approve_and_reject_are_idempotent_and_execute_only_the_selected_route()
 
     let duplicate = resolve_human_approval_durable(
       database.path().to_path_buf(),
-      &approval.token,
+      approval.token.as_deref().expect("basic approval token"),
       decision,
       &FixedEngineClock::new(decided_at + Duration::seconds(1)),
     )
@@ -240,7 +240,7 @@ async fn approve_and_reject_are_idempotent_and_execute_only_the_selected_route()
     assert!(matches!(
       resolve_human_approval_durable(
         database.path().to_path_buf(),
-        &approval.token,
+        approval.token.as_deref().expect("basic approval token"),
         opposite,
         &FixedEngineClock::new(decided_at + Duration::seconds(2)),
       ),
@@ -468,7 +468,7 @@ async fn a_selected_route_can_reach_a_nested_approval_then_finish_after_its_deci
   );
   resolve_human_approval_durable(
     database.path().to_path_buf(),
-    &editorial.token,
+    editorial.token.as_deref().expect("basic approval token"),
     ApprovalDecision::Approved,
     &FixedEngineClock::new(started_at + Duration::minutes(1)),
   )
@@ -488,7 +488,7 @@ async fn a_selected_route_can_reach_a_nested_approval_then_finish_after_its_deci
   assert_ne!(legal.request_id, editorial.request_id);
   resolve_human_approval_durable(
     database.path().to_path_buf(),
-    &legal.token,
+    legal.token.as_deref().expect("basic approval token"),
     ApprovalDecision::Approved,
     &FixedEngineClock::new(started_at + Duration::minutes(3)),
   )
@@ -536,7 +536,7 @@ async fn human_decision_and_timeout_races_have_one_durable_winner() {
     let deadline = approval.expires_at.unwrap();
     let decision_path = database.path().to_path_buf();
     let timeout_path = database.path().to_path_buf();
-    let token = approval.token.clone();
+    let token = approval.token.clone().expect("basic approval token");
     let decision_thread = std::thread::spawn(move || {
       resolve_human_approval_durable(
         decision_path,
@@ -608,7 +608,7 @@ async fn a_human_decision_waits_for_transient_sqlite_contention_without_being_lo
   let connection = Connection::open(database.path()).unwrap();
   connection.execute_batch("BEGIN IMMEDIATE").unwrap();
   let decision_path = database.path().to_path_buf();
-  let token = approval.token;
+  let token = approval.token.expect("basic approval token");
   let decision_thread = std::thread::spawn(move || {
     resolve_human_approval_durable(
       decision_path,
@@ -654,7 +654,7 @@ async fn recovery_during_a_selected_approval_arm_fails_closed_without_replaying_
   );
   resolve_human_approval_durable(
     database.path().to_path_buf(),
-    &approval.token,
+    approval.token.as_deref().expect("basic approval token"),
     ApprovalDecision::Approved,
     &FixedEngineClock::new(started_at + Duration::minutes(1)),
   )
@@ -731,7 +731,7 @@ async fn recovery_after_the_selected_arm_and_before_the_join_continues_downstrea
   );
   resolve_human_approval_durable(
     database.path().to_path_buf(),
-    &approval.token,
+    approval.token.as_deref().expect("basic approval token"),
     ApprovalDecision::Approved,
     &FixedEngineClock::new(started_at + Duration::minutes(1)),
   )

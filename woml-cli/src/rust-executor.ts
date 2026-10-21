@@ -2,7 +2,11 @@ import { existsSync } from 'node:fs';
 import { createRequire } from 'node:module';
 import { resolve } from 'node:path';
 
-import type { CompiledWorkflowDefinition, JsonObject, JsonValue } from '@woml/compiler';
+import type {
+  CompiledWorkflowDefinition,
+  JsonObject,
+  JsonValue,
+} from '@woml/compiler';
 
 import {
   decodeRunPresentationListV1,
@@ -19,27 +23,33 @@ import { profileAsync, profileSync } from './performance-profiler';
 import type { ProcessRuntimeAuthorityV1 } from './process-policy';
 import type { ArtifactRuntimeAuthorityV1 } from './artifact-policy';
 
+export interface ReviewerDirectoryV1 {
+  readonly profile: 'woml.reviewer-directory/v1';
+  readonly version: string;
+  readonly principals: readonly {
+    readonly id: string;
+    readonly roles: readonly string[];
+    readonly identities: readonly {
+      readonly provider: 'slack' | 'telegram' | 'discord' | 'trusted-http';
+      readonly accountId: string;
+      readonly actorId: string;
+    }[];
+  }[];
+}
+
+export interface ReviewerRuntimeAuthorityV1 {
+  readonly reviewers: { readonly directory: ReviewerDirectoryV1 };
+}
+
 export type RuntimeCapabilitiesV1 = Partial<
-  ProcessRuntimeAuthorityV1 & ArtifactRuntimeAuthorityV1
+  ProcessRuntimeAuthorityV1 &
+    ArtifactRuntimeAuthorityV1 &
+    ReviewerRuntimeAuthorityV1
 >;
 
 export interface RustRunEvent {
   readonly eventSchemaVersion:
-    | 1
-    | 2
-    | 3
-    | 4
-    | 5
-    | 6
-    | 7
-    | 8
-    | 9
-    | 10
-    | 11
-    | 12
-    | 13
-    | 14
-    | 15;
+    1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 | 9 | 10 | 11 | 12 | 13 | 14 | 15;
   readonly eventId: string;
   readonly runId: string;
   readonly sequence: number;
@@ -418,9 +428,7 @@ export interface TriggerIngressAdmit {
   readonly definitionHash: string;
   readonly triggerId: string;
   readonly triggerHandler:
-    | 'trigger.slack'
-    | 'trigger.telegram'
-    | 'trigger.discord';
+    'trigger.slack' | 'trigger.telegram' | 'trigger.discord';
   readonly sourceIdentity: string;
   readonly payload: Readonly<Record<string, JsonValue>>;
   readonly receivedAt: string;
@@ -536,7 +544,7 @@ export type RustRunListV1 =
         readonly queue?: string;
         readonly waitingFor?: 'concurrency' | 'rate_limit';
         readonly eligibleAt?: string;
-    }[];
+      }[];
     };
 
 export interface RustRuntimeObservationV1 {
@@ -630,7 +638,8 @@ export interface RustArtifactInspectionV1 {
     readonly contentType: string;
   };
   readonly digestPrefix: string;
-  readonly status: 'available' | 'quarantined' | 'expired' | 'corrupt' | 'deleted';
+  readonly status:
+    'available' | 'quarantined' | 'expired' | 'corrupt' | 'deleted';
   readonly createdAt: string;
   readonly expiresAt: string;
   readonly retentionMs: number;
@@ -695,20 +704,13 @@ export interface RustRunInspectionV2 {
   readonly status: PublicRunStatus;
   readonly businessOutcome: 'undecided' | 'succeeded' | 'failed' | 'cancelled';
   readonly lifecycleStatus:
-    | 'idle'
-    | 'running'
-    | 'finalizing'
-    | 'completed_with_warnings'
-    | 'completed';
+    'idle' | 'running' | 'finalizing' | 'completed_with_warnings' | 'completed';
   readonly hooks: readonly {
     readonly hookId: string;
     readonly subjectKind: 'workflow' | 'step';
     readonly subjectId: string;
     readonly status:
-      | 'requested'
-      | 'running'
-      | 'completed'
-      | 'completed_with_warnings';
+      'requested' | 'running' | 'completed' | 'completed_with_warnings';
     readonly failedActions: number;
   }[];
   readonly warnings: readonly RustLifecycleWarning[];
@@ -737,8 +739,10 @@ export interface RustRunInspectionV2 {
       readonly alias: string;
       readonly definitionDigestPrefix: string;
       readonly kind: 'step' | 'notification-provider';
-      readonly status: 'pending' | 'running' | 'succeeded' | 'failed' | 'cancelled';
-      readonly lifecycleStatus: 'idle' | 'running' | 'completed' | 'completed_with_warnings';
+      readonly status:
+        'pending' | 'running' | 'succeeded' | 'failed' | 'cancelled';
+      readonly lifecycleStatus:
+        'idle' | 'running' | 'completed' | 'completed_with_warnings';
     }[];
   };
   readonly forEach?: {
@@ -775,7 +779,8 @@ export interface RustWaitInspectionV1 {
     readonly waitId: string;
     readonly name: string;
     readonly kind: 'duration' | 'until' | 'signal';
-    readonly status: 'pending' | 'signaled' | 'elapsed' | 'timed_out' | 'cancelled';
+    readonly status:
+      'pending' | 'signaled' | 'elapsed' | 'timed_out' | 'cancelled';
     readonly registeredAt: string;
     readonly signals?: readonly string[];
     readonly correlationDigest?: string;
@@ -789,11 +794,7 @@ export interface RustCorrectionInspectionV1 {
   readonly profile: 'woml.correction-inspection/v1';
   readonly runId: string;
   readonly phase:
-    | 'forward'
-    | 'compensating'
-    | 'cleanup'
-    | 'completed'
-    | 'manual_recovery';
+    'forward' | 'compensating' | 'cleanup' | 'completed' | 'manual_recovery';
   readonly originalOutcome: 'running' | 'succeeded' | 'failed' | 'cancelled';
   readonly sagas: readonly {
     readonly sagaId: string;
@@ -842,12 +843,7 @@ export interface RustLockInspectionV1 {
   readonly lockId: string;
   readonly key: string;
   readonly status:
-    | 'waiting'
-    | 'held'
-    | 'released'
-    | 'timed_out'
-    | 'cancelled'
-    | 'lost';
+    'waiting' | 'held' | 'released' | 'timed_out' | 'cancelled' | 'lost';
   readonly registeredAt: string;
   readonly acquiredAt?: string;
   readonly releasedAt?: string;
@@ -874,10 +870,7 @@ export interface RustRunCancellationResultV1 {
   readonly commandId: string;
   readonly runId: string;
   readonly status:
-    | 'accepted'
-    | 'already_requested'
-    | 'already_cancelled'
-    | 'rejected';
+    'accepted' | 'already_requested' | 'already_cancelled' | 'rejected';
   readonly code?:
     | 'WOML_RUN_NOT_FOUND'
     | 'WOML_RUN_OUTCOME_ALREADY_DECIDED'
@@ -1240,11 +1233,23 @@ interface NativeCore {
     sourcePath: string
   ) => string;
   readonly inspectWomlRunV2: (eventStorePath: string, runId: string) => string;
-  readonly inspectWomlWaitsV1: (eventStorePath: string, runId: string) => string;
-  readonly inspectWomlCorrectionV1?: (eventStorePath: string, runId: string) => string;
-  readonly recoverWomlCorrection?: (eventStorePath: string, requestJson: string) => string;
+  readonly inspectWomlWaitsV1: (
+    eventStorePath: string,
+    runId: string
+  ) => string;
+  readonly inspectWomlCorrectionV1?: (
+    eventStorePath: string,
+    runId: string
+  ) => string;
+  readonly recoverWomlCorrection?: (
+    eventStorePath: string,
+    requestJson: string
+  ) => string;
   readonly observeWomlCorrectionsV1?: (eventStorePath: string) => string;
-  readonly inspectWomlLocksV1?: (eventStorePath: string, runId: string) => string;
+  readonly inspectWomlLocksV1?: (
+    eventStorePath: string,
+    runId: string
+  ) => string;
   readonly observeWomlLocksV1?: (eventStorePath: string) => string;
   readonly cancelWomlRun: (
     eventStorePath: string,
@@ -1326,6 +1331,17 @@ interface NativeCore {
     decision: ApprovalDecision,
     providerActorId?: string
   ) => string;
+  readonly resolveWomlRichApproval: (
+    eventStorePath: string,
+    runId: string,
+    approvalId: string,
+    requestId: string,
+    reviewDigest: string,
+    decision: ApprovalDecision,
+    provider: 'slack' | 'telegram' | 'discord' | 'trusted-http',
+    providerAccountId: string,
+    providerActorId: string
+  ) => string;
   readonly settleWomlApprovalTimeout: (
     eventStorePath: string,
     runId: string,
@@ -1353,8 +1369,16 @@ export interface WaitingApproval {
   readonly description?: string;
   readonly expiresAt?: string;
   readonly onTimeout: 'reject' | 'fail';
-  readonly token: string;
-  readonly credentialExpiresAt: string;
+  readonly token?: string;
+  readonly credentialExpiresAt?: string;
+  readonly reviewDigest?: string;
+  readonly review?: JsonObject;
+  readonly authority?: {
+    readonly required: number;
+    readonly received: number;
+    readonly requiredRoles: readonly string[];
+    readonly representedRoles: readonly string[];
+  };
 }
 
 export interface WaitingTimer {
@@ -1421,11 +1445,28 @@ export interface ApprovalDecisionResult {
   readonly decidedAt: string;
 }
 
+export interface RichApprovalDecisionResult {
+  readonly contract: 'woml.approval-http';
+  readonly version: 2;
+  readonly status:
+    'recorded' | 'resolved' | 'already_recorded' | 'already_resolved';
+  readonly runId: string;
+  readonly approvalId: string;
+  readonly requestId: string;
+  readonly reviewDigest: string;
+}
+
 export type ApprovalErrorCode =
   | 'WOML_APPROVAL_TOKEN_INVALID'
   | 'WOML_APPROVAL_TOKEN_EXPIRED'
   | 'WOML_APPROVAL_EXPIRED'
   | 'WOML_APPROVAL_DECISION_CONFLICT'
+  | 'WOML_APPROVAL_BINDING_MISMATCH'
+  | 'WOML_APPROVAL_REVIEWER_UNKNOWN'
+  | 'WOML_APPROVAL_REVIEWER_FORBIDDEN'
+  | 'WOML_APPROVAL_DUPLICATE_REVIEWER'
+  | 'WOML_APPROVAL_AUTHORITY_UNAVAILABLE'
+  | 'WOML_APPROVAL_ALREADY_RESOLVED'
   | 'WOML_APPROVAL_INTERNAL';
 
 export class ApprovalDecisionError extends Error {
@@ -1550,20 +1591,17 @@ function defaultNativeCorePath(): string {
 
   const local = resolve(
     import.meta.dir,
-    localNativeBinaryName(process.platform, process.arch),
+    localNativeBinaryName(process.platform, process.arch)
   );
   if (existsSync(local)) return local;
 
-  const target = nativeTargetForRuntime(
-    process.platform,
-    process.arch,
-  );
+  const target = nativeTargetForRuntime(process.platform, process.arch);
   const packageName = nativePackageName(target);
   try {
     return createRequire(import.meta.url).resolve(packageName);
   } catch {
     throw new Error(
-      `WOML native package ${packageName} is unavailable. Reinstall woml on this machine and make sure optional dependencies are enabled.`,
+      `WOML native package ${packageName} is unavailable. Reinstall woml on this machine and make sure optional dependencies are enabled.`
     );
   }
 }
@@ -1698,19 +1736,39 @@ export function parseExecutionProgress(json: string): ExecutionProgressV1 {
     value.version === 1 &&
     value.type === 'for_each_progress' &&
     exactKeys(value, [
-      'contract', 'version', 'type', 'runId', 'forEachId', 'status', 'total',
-      'succeeded', 'failed', 'skipped', 'active', 'pending', 'concurrency',
+      'contract',
+      'version',
+      'type',
+      'runId',
+      'forEachId',
+      'status',
+      'total',
+      'succeeded',
+      'failed',
+      'skipped',
+      'active',
+      'pending',
+      'concurrency',
     ]) &&
     typeof value.runId === 'string' &&
     value.runId.length > 0 &&
     typeof value.forEachId === 'string' &&
     value.forEachId.length > 0 &&
-    ['running', 'succeeded', 'failed', 'cancelled'].includes(String(value.status)) &&
-    ['total', 'succeeded', 'failed', 'skipped', 'active', 'pending'].every(
-      key => Number.isSafeInteger(value[key]) && Number(value[key]) >= 0 && Number(value[key]) <= 10_000
+    ['running', 'succeeded', 'failed', 'cancelled'].includes(
+      String(value.status)
     ) &&
-    Number(value.succeeded) + Number(value.failed) + Number(value.skipped) +
-      Number(value.active) + Number(value.pending) === Number(value.total) &&
+    ['total', 'succeeded', 'failed', 'skipped', 'active', 'pending'].every(
+      key =>
+        Number.isSafeInteger(value[key]) &&
+        Number(value[key]) >= 0 &&
+        Number(value[key]) <= 10_000
+    ) &&
+    Number(value.succeeded) +
+      Number(value.failed) +
+      Number(value.skipped) +
+      Number(value.active) +
+      Number(value.pending) ===
+      Number(value.total) &&
     Number.isSafeInteger(value.concurrency) &&
     Number(value.concurrency) >= 1 &&
     Number(value.concurrency) <= 64
@@ -2161,12 +2219,7 @@ function executionResult(value: unknown): value is RustWorkflowExecutionResult {
 
 function waitingApproval(value: unknown): value is WaitingApproval {
   if (!record(value)) return false;
-  return (
-    exactKeys(
-      value,
-      ['approvalId', 'requestId', 'onTimeout', 'token', 'credentialExpiresAt'],
-      ['name', 'description', 'expiresAt']
-    ) &&
+  const common =
     /^[a-z][A-Za-z0-9]*$/.test(String(value.approvalId)) &&
     /^aprreq_[A-Za-z0-9_-]+$/.test(String(value.requestId)) &&
     (value.name === undefined ||
@@ -2175,9 +2228,56 @@ function waitingApproval(value: unknown): value is WaitingApproval {
       (typeof value.description === 'string' &&
         value.description.length > 0)) &&
     (value.expiresAt === undefined || dateTime(value.expiresAt)) &&
-    (value.onTimeout === 'reject' || value.onTimeout === 'fail') &&
-    /^apr_[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+$/.test(String(value.token)) &&
-    dateTime(value.credentialExpiresAt)
+    (value.onTimeout === 'reject' || value.onTimeout === 'fail');
+  if (!common) return false;
+  if ('token' in value || 'credentialExpiresAt' in value) {
+    return (
+      exactKeys(
+        value,
+        [
+          'approvalId',
+          'requestId',
+          'onTimeout',
+          'token',
+          'credentialExpiresAt',
+        ],
+        ['name', 'description', 'expiresAt']
+      ) &&
+      /^apr_[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+$/.test(String(value.token)) &&
+      dateTime(value.credentialExpiresAt)
+    );
+  }
+  return (
+    exactKeys(
+      value,
+      [
+        'approvalId',
+        'requestId',
+        'onTimeout',
+        'reviewDigest',
+        'review',
+        'authority',
+      ],
+      ['name', 'description', 'expiresAt']
+    ) &&
+    /^sha256:[a-f0-9]{64}$/.test(String(value.reviewDigest)) &&
+    record(value.review) &&
+    record(value.authority) &&
+    exactKeys(value.authority, [
+      'required',
+      'received',
+      'requiredRoles',
+      'representedRoles',
+    ]) &&
+    Number.isSafeInteger(value.authority.required) &&
+    Number(value.authority.required) >= 1 &&
+    Number(value.authority.required) <= 20 &&
+    Number.isSafeInteger(value.authority.received) &&
+    Number(value.authority.received) >= 0 &&
+    Array.isArray(value.authority.requiredRoles) &&
+    value.authority.requiredRoles.every(role => typeof role === 'string') &&
+    Array.isArray(value.authority.representedRoles) &&
+    value.authority.representedRoles.every(role => typeof role === 'string')
   );
 }
 
@@ -2461,6 +2561,12 @@ function decodeNativeApprovalError(error: unknown): never {
           decoded.code === 'WOML_APPROVAL_TOKEN_EXPIRED' ||
           decoded.code === 'WOML_APPROVAL_EXPIRED' ||
           decoded.code === 'WOML_APPROVAL_DECISION_CONFLICT' ||
+          decoded.code === 'WOML_APPROVAL_BINDING_MISMATCH' ||
+          decoded.code === 'WOML_APPROVAL_REVIEWER_UNKNOWN' ||
+          decoded.code === 'WOML_APPROVAL_REVIEWER_FORBIDDEN' ||
+          decoded.code === 'WOML_APPROVAL_DUPLICATE_REVIEWER' ||
+          decoded.code === 'WOML_APPROVAL_AUTHORITY_UNAVAILABLE' ||
+          decoded.code === 'WOML_APPROVAL_ALREADY_RESOLVED' ||
           decoded.code === 'WOML_APPROVAL_INTERNAL')
       ) {
         throw new ApprovalDecisionError(decoded.code, decoded.message);
@@ -2549,32 +2655,36 @@ export async function executeWorkflowWithRustDurable(
       `Native core at "${nativePath}" does not expose executeWomlWorkflowDurableWithProgress; rebuild the Rust addon.`
     );
   }
-  const request = profileSync('napi', 'napi.serialize_durable_request', measurements => {
-    const modelJson = JSON.stringify(workflow);
-    const triggerJson = JSON.stringify(options.trigger ?? {});
-    const secretsJson = JSON.stringify(options.resolvedSecrets ?? {});
-    const runtimeModulesJson = JSON.stringify(options.runtimeModules ?? []);
-    if (measurements !== undefined) {
-      measurements.bytes.model = Buffer.byteLength(modelJson);
-      measurements.bytes.trigger = Buffer.byteLength(triggerJson);
-      measurements.bytes.modules = Buffer.byteLength(runtimeModulesJson);
-      measurements.counts.nodes = workflow.graph.nodes.length;
-      measurements.counts.modules = options.runtimeModules?.length ?? 0;
+  const request = profileSync(
+    'napi',
+    'napi.serialize_durable_request',
+    measurements => {
+      const modelJson = JSON.stringify(workflow);
+      const triggerJson = JSON.stringify(options.trigger ?? {});
+      const secretsJson = JSON.stringify(options.resolvedSecrets ?? {});
+      const runtimeModulesJson = JSON.stringify(options.runtimeModules ?? []);
+      if (measurements !== undefined) {
+        measurements.bytes.model = Buffer.byteLength(modelJson);
+        measurements.bytes.trigger = Buffer.byteLength(triggerJson);
+        measurements.bytes.modules = Buffer.byteLength(runtimeModulesJson);
+        measurements.counts.nodes = workflow.graph.nodes.length;
+        measurements.counts.modules = options.runtimeModules?.length ?? 0;
+      }
+      return {
+        arguments: [
+          modelJson,
+          compiledDefinitionHash(workflow),
+          triggerJson,
+          options.bunExecutable ?? process.execPath,
+          options.scriptHostPath ?? defaultScriptHostPath(),
+          timeoutMs,
+          eventStorePath,
+        ] as const,
+        secretsJson,
+        runtimeModulesJson,
+      };
     }
-    return {
-      arguments: [
-        modelJson,
-        compiledDefinitionHash(workflow),
-        triggerJson,
-        options.bunExecutable ?? process.execPath,
-        options.scriptHostPath ?? defaultScriptHostPath(),
-        timeoutMs,
-        eventStorePath,
-      ] as const,
-      secretsJson,
-      runtimeModulesJson,
-    };
-  });
+  );
   const resultJson = await profileAsync(
     'napi',
     'napi.execute_durable',
@@ -2819,6 +2929,74 @@ export function resolveNotificationApprovalWithRust(
   }
 }
 
+export function resolveRichApprovalWithRust(
+  eventStorePath: string,
+  request: {
+    readonly runId: string;
+    readonly approvalId: string;
+    readonly requestId: string;
+    readonly reviewDigest: string;
+    readonly decision: ApprovalDecision;
+    readonly provider: 'slack' | 'telegram' | 'discord' | 'trusted-http';
+    readonly providerAccountId: string;
+    readonly providerActorId: string;
+  },
+  options: Pick<RustExecutorOptions, 'nativeCorePath'> = {}
+): RichApprovalDecisionResult {
+  const path = options.nativeCorePath ?? defaultNativeCorePath();
+  const native = loadNativeCore(path);
+  if (typeof native.resolveWomlRichApproval !== 'function') {
+    throw new Error(
+      `Native core at "${path}" does not expose resolveWomlRichApproval; rebuild the Rust addon.`
+    );
+  }
+  let value: unknown;
+  try {
+    value = JSON.parse(
+      native.resolveWomlRichApproval(
+        eventStorePath,
+        request.runId,
+        request.approvalId,
+        request.requestId,
+        request.reviewDigest,
+        request.decision,
+        request.provider,
+        request.providerAccountId,
+        request.providerActorId
+      )
+    );
+  } catch (error) {
+    if (error instanceof ApprovalDecisionError) throw error;
+    decodeNativeApprovalError(error);
+  }
+  if (
+    !record(value) ||
+    !exactKeys(value, [
+      'contract',
+      'version',
+      'status',
+      'runId',
+      'approvalId',
+      'requestId',
+      'reviewDigest',
+    ]) ||
+    value.contract !== 'woml.approval-http' ||
+    value.version !== 2 ||
+    !['recorded', 'resolved', 'already_recorded', 'already_resolved'].includes(
+      String(value.status)
+    ) ||
+    typeof value.runId !== 'string' ||
+    typeof value.approvalId !== 'string' ||
+    typeof value.requestId !== 'string' ||
+    !/^sha256:[a-f0-9]{64}$/.test(String(value.reviewDigest))
+  ) {
+    throw new Error(
+      'The native core returned an invalid rich approval decision.'
+    );
+  }
+  return value as unknown as RichApprovalDecisionResult;
+}
+
 export function settleApprovalTimeoutWithRust(
   eventStorePath: string,
   runId: string,
@@ -2940,101 +3118,131 @@ export async function startWebhookRuntimeWithRust(
       `Native core at "${nativePath}" does not expose the T4 webhook runtime; rebuild the Rust addon.`
     );
   }
-  const serialized = profileSync('napi', 'napi.serialize_runtime_registration', measurements => {
-    const registrationsJson = JSON.stringify(registrations);
-    const manualTriggersJson = JSON.stringify(options.startupManualTriggers ?? {});
-    if (measurements !== undefined) {
-      measurements.bytes.registrations = Buffer.byteLength(registrationsJson);
-      measurements.bytes.manual_triggers = Buffer.byteLength(manualTriggersJson);
-      measurements.counts.workflows = registrations.length;
-      measurements.counts.nodes = registrations.reduce(
-        (total, registration) => total + registration.workflow.graph.nodes.length,
-        0
+  const serialized = profileSync(
+    'napi',
+    'napi.serialize_runtime_registration',
+    measurements => {
+      const registrationsJson = JSON.stringify(registrations);
+      const manualTriggersJson = JSON.stringify(
+        options.startupManualTriggers ?? {}
       );
-    }
-    return { registrationsJson, manualTriggersJson };
-  });
-  const resultJson = await profileAsync('napi', 'napi.start_trigger_runtime', async measurements => {
-    const result = await native.startWomlWebhookRuntime(
-      serialized.registrationsJson,
-      serialized.manualTriggersJson,
-      `${options.host ?? '127.0.0.1'}:${port}`,
-      eventStorePath,
-      options.bunExecutable ?? process.execPath,
-      options.scriptHostPath ?? defaultScriptHostPath(),
-      timeoutMs,
-      shutdownTimeoutMs,
-      deploymentId,
-      activationId,
-      options.startSuspended ?? false,
-      options.runtimeCapabilities === undefined
-        ? undefined
-        : JSON.stringify(options.runtimeCapabilities),
-      options.signalIngressToken,
-      message => {
-        const decoded: unknown = JSON.parse(message);
-        if (record(decoded) && decoded.contract === 'woml.schedule-progress') {
-          options.onScheduleProgress?.(parseScheduleProgress(message));
-          return;
-        }
-        if (record(decoded) && decoded.contract === 'woml.interval-progress') {
-          options.onIntervalProgress?.(parseIntervalProgress(message));
-          return;
-        }
-        if (
-          record(decoded) &&
-          decoded.contract === 'woml.workflow-call-progress'
-        ) {
-          options.onWorkflowCallProgress?.(parseWorkflowCallProgress(message));
-          return;
-        }
-        if (
-          record(decoded) &&
-          decoded.profile === 'woml.runtime-policy-progress/v1'
-        ) {
-          const progress = parseExecutionProgress(message);
-          if (
-            'profile' in progress &&
-            progress.profile === 'woml.runtime-policy-progress/v1'
-          ) {
-            options.onRuntimePolicyProgress?.(progress);
-          }
-          return;
-        }
-        if (
-          record(decoded) &&
-          decoded.profile === 'woml.runtime-instance/v1' &&
-          typeof decoded.deploymentId === 'string' &&
-          typeof decoded.activationId === 'string' &&
-          typeof decoded.runtimeInstanceId === 'string' &&
-          typeof decoded.runtimeVersion === 'string' &&
-          typeof decoded.nativeVersion === 'string' &&
-          [
-            'starting',
-            'recovering',
-            'ready',
-            'degraded',
-            'draining',
-            'stopped',
-            'failed',
-          ].includes(String(decoded.lifecycle)) &&
-          typeof decoded.startedAt === 'string' &&
-          typeof decoded.heartbeatAt === 'string' &&
-          typeof decoded.leaseExpiresAt === 'string'
-        ) {
-          options.onRuntimeLifecycle?.(decoded as unknown as RuntimeInstanceV1);
-          return;
-        }
-        options.onTriggerProgress?.(parseTriggerProgress(message));
+      if (measurements !== undefined) {
+        measurements.bytes.registrations = Buffer.byteLength(registrationsJson);
+        measurements.bytes.manual_triggers =
+          Buffer.byteLength(manualTriggersJson);
+        measurements.counts.workflows = registrations.length;
+        measurements.counts.nodes = registrations.reduce(
+          (total, registration) =>
+            total + registration.workflow.graph.nodes.length,
+          0
+        );
       }
-    ).catch(decodeTriggerRuntimeError);
-    if (measurements !== undefined) measurements.bytes.result = Buffer.byteLength(result);
-    return result;
-  });
-  const value: unknown = profileSync('napi', 'napi.decode_runtime_start', measurements => {
-    if (measurements !== undefined) measurements.bytes.result = Buffer.byteLength(resultJson);
-    return JSON.parse(resultJson);
-  });
+      return { registrationsJson, manualTriggersJson };
+    }
+  );
+  const resultJson = await profileAsync(
+    'napi',
+    'napi.start_trigger_runtime',
+    async measurements => {
+      const result = await native
+        .startWomlWebhookRuntime(
+          serialized.registrationsJson,
+          serialized.manualTriggersJson,
+          `${options.host ?? '127.0.0.1'}:${port}`,
+          eventStorePath,
+          options.bunExecutable ?? process.execPath,
+          options.scriptHostPath ?? defaultScriptHostPath(),
+          timeoutMs,
+          shutdownTimeoutMs,
+          deploymentId,
+          activationId,
+          options.startSuspended ?? false,
+          options.runtimeCapabilities === undefined
+            ? undefined
+            : JSON.stringify(options.runtimeCapabilities),
+          options.signalIngressToken,
+          message => {
+            const decoded: unknown = JSON.parse(message);
+            if (
+              record(decoded) &&
+              decoded.contract === 'woml.schedule-progress'
+            ) {
+              options.onScheduleProgress?.(parseScheduleProgress(message));
+              return;
+            }
+            if (
+              record(decoded) &&
+              decoded.contract === 'woml.interval-progress'
+            ) {
+              options.onIntervalProgress?.(parseIntervalProgress(message));
+              return;
+            }
+            if (
+              record(decoded) &&
+              decoded.contract === 'woml.workflow-call-progress'
+            ) {
+              options.onWorkflowCallProgress?.(
+                parseWorkflowCallProgress(message)
+              );
+              return;
+            }
+            if (
+              record(decoded) &&
+              decoded.profile === 'woml.runtime-policy-progress/v1'
+            ) {
+              const progress = parseExecutionProgress(message);
+              if (
+                'profile' in progress &&
+                progress.profile === 'woml.runtime-policy-progress/v1'
+              ) {
+                options.onRuntimePolicyProgress?.(progress);
+              }
+              return;
+            }
+            if (
+              record(decoded) &&
+              decoded.profile === 'woml.runtime-instance/v1' &&
+              typeof decoded.deploymentId === 'string' &&
+              typeof decoded.activationId === 'string' &&
+              typeof decoded.runtimeInstanceId === 'string' &&
+              typeof decoded.runtimeVersion === 'string' &&
+              typeof decoded.nativeVersion === 'string' &&
+              [
+                'starting',
+                'recovering',
+                'ready',
+                'degraded',
+                'draining',
+                'stopped',
+                'failed',
+              ].includes(String(decoded.lifecycle)) &&
+              typeof decoded.startedAt === 'string' &&
+              typeof decoded.heartbeatAt === 'string' &&
+              typeof decoded.leaseExpiresAt === 'string'
+            ) {
+              options.onRuntimeLifecycle?.(
+                decoded as unknown as RuntimeInstanceV1
+              );
+              return;
+            }
+            options.onTriggerProgress?.(parseTriggerProgress(message));
+          }
+        )
+        .catch(decodeTriggerRuntimeError);
+      if (measurements !== undefined)
+        measurements.bytes.result = Buffer.byteLength(result);
+      return result;
+    }
+  );
+  const value: unknown = profileSync(
+    'napi',
+    'napi.decode_runtime_start',
+    measurements => {
+      if (measurements !== undefined)
+        measurements.bytes.result = Buffer.byteLength(resultJson);
+      return JSON.parse(resultJson);
+    }
+  );
   if (
     !record(value) ||
     !exactKeys(value, ['runtimeId', 'host', 'port']) ||
@@ -3092,7 +3300,9 @@ export async function submitExternalSignalWithRust(
       value.resolution !== 'resolved') ||
     (value.code !== undefined && typeof value.code !== 'string')
   ) {
-    throw new Error('The native core returned an invalid Signal Result v1 value.');
+    throw new Error(
+      'The native core returned an invalid Signal Result v1 value.'
+    );
   }
   return value as unknown as ExternalSignalOutcomeV1;
 }
@@ -3207,33 +3417,47 @@ export async function submitManualTriggerWithRust(
       `Native core at "${nativePath}" does not expose manual trigger admission; rebuild the Rust addon.`
     );
   }
-  const requestJson = profileSync('napi', 'napi.serialize_manual_trigger', measurements => {
-    const json = JSON.stringify(request);
-    if (measurements !== undefined) {
-      measurements.bytes.request = Buffer.byteLength(json);
-      measurements.identity.invocationId = request.requestId;
-    }
-    return json;
-  });
-  const resultJson = await profileAsync('napi', 'napi.submit_manual_trigger', async measurements => {
-    if (measurements !== undefined) measurements.identity.invocationId = request.requestId;
-    const result = await native
-      .submitWomlManualTrigger(runtimeId, requestJson)
-      .catch(decodeTriggerRuntimeError);
-    if (measurements !== undefined) measurements.bytes.result = Buffer.byteLength(result);
-    return result;
-  });
-  const value: unknown = profileSync('napi', 'napi.decode_manual_trigger', measurements => {
-    const decoded: unknown = JSON.parse(resultJson);
-    if (measurements !== undefined) {
-      measurements.bytes.result = Buffer.byteLength(resultJson);
-      measurements.identity.invocationId = request.requestId;
-      if (record(decoded) && typeof decoded.runId === 'string') {
-        measurements.identity.runId = decoded.runId;
+  const requestJson = profileSync(
+    'napi',
+    'napi.serialize_manual_trigger',
+    measurements => {
+      const json = JSON.stringify(request);
+      if (measurements !== undefined) {
+        measurements.bytes.request = Buffer.byteLength(json);
+        measurements.identity.invocationId = request.requestId;
       }
+      return json;
     }
-    return decoded;
-  });
+  );
+  const resultJson = await profileAsync(
+    'napi',
+    'napi.submit_manual_trigger',
+    async measurements => {
+      if (measurements !== undefined)
+        measurements.identity.invocationId = request.requestId;
+      const result = await native
+        .submitWomlManualTrigger(runtimeId, requestJson)
+        .catch(decodeTriggerRuntimeError);
+      if (measurements !== undefined)
+        measurements.bytes.result = Buffer.byteLength(result);
+      return result;
+    }
+  );
+  const value: unknown = profileSync(
+    'napi',
+    'napi.decode_manual_trigger',
+    measurements => {
+      const decoded: unknown = JSON.parse(resultJson);
+      if (measurements !== undefined) {
+        measurements.bytes.result = Buffer.byteLength(resultJson);
+        measurements.identity.invocationId = request.requestId;
+        if (record(decoded) && typeof decoded.runId === 'string') {
+          measurements.identity.runId = decoded.runId;
+        }
+      }
+      return decoded;
+    }
+  );
   if (
     !record(value) ||
     value.profile !== 'woml.manual-trigger-admission/v1' ||
@@ -3261,13 +3485,7 @@ export async function submitManualTriggerWithRust(
   }
   if (
     value.type === 'rejected' &&
-    exactKeys(value, [
-      'profile',
-      'type',
-      'requestId',
-      'code',
-      'message',
-    ]) &&
+    exactKeys(value, ['profile', 'type', 'requestId', 'code', 'message']) &&
     [
       'WOML_MANUAL_TRIGGER_SELECTION_REQUIRED',
       'WOML_MANUAL_TRIGGER_ADMISSION_CLOSED',
@@ -3412,19 +3630,28 @@ export function inspectRunPresentationWithRust(
       `Native core at "${nativePath}" does not expose Run Presentation v1; rebuild the Rust addon.`
     );
   }
-  const value = profileSync('napi', 'napi.inspect_run_presentation', measurements => {
-    if (measurements !== undefined) measurements.identity.runId = runId;
-    const inspected = callRunManagementNative(() =>
-      native.inspectWomlRunPresentation(eventStorePath, runId)
-    );
-    return inspected;
-  });
-  return profileSync('presentation', 'presentation.decode_run_presentation', measurements => {
-    if (measurements !== undefined) measurements.identity.runId = runId;
-    const encoded = JSON.stringify(value);
-    if (measurements !== undefined) measurements.bytes.presentation = Buffer.byteLength(encoded);
-    return decodeRunPresentationV1(encoded);
-  });
+  const value = profileSync(
+    'napi',
+    'napi.inspect_run_presentation',
+    measurements => {
+      if (measurements !== undefined) measurements.identity.runId = runId;
+      const inspected = callRunManagementNative(() =>
+        native.inspectWomlRunPresentation(eventStorePath, runId)
+      );
+      return inspected;
+    }
+  );
+  return profileSync(
+    'presentation',
+    'presentation.decode_run_presentation',
+    measurements => {
+      if (measurements !== undefined) measurements.identity.runId = runId;
+      const encoded = JSON.stringify(value);
+      if (measurements !== undefined)
+        measurements.bytes.presentation = Buffer.byteLength(encoded);
+      return decodeRunPresentationV1(encoded);
+    }
+  );
 }
 
 export function listRunPresentationsWithRust(
@@ -3462,8 +3689,14 @@ export function hasWorkflowDefinitionWithRust(
   workflowId: string,
   options: Pick<RustExecutorOptions, 'nativeCorePath'> = {}
 ): boolean {
-  if (eventStorePath.length === 0 || workflowId.length === 0 || workflowId.length > 256) {
-    throw new Error('Workflow definition lookup requires a store path and workflow ID.');
+  if (
+    eventStorePath.length === 0 ||
+    workflowId.length === 0 ||
+    workflowId.length > 256
+  ) {
+    throw new Error(
+      'Workflow definition lookup requires a store path and workflow ID.'
+    );
   }
   const nativePath = options.nativeCorePath ?? defaultNativeCorePath();
   const native = loadNativeCore(nativePath);
@@ -3611,7 +3844,9 @@ export function observeRuntimeWithRust(
   const identifiers = (candidate: unknown): candidate is readonly string[] =>
     Array.isArray(candidate) &&
     candidate.length <= 1000 &&
-    candidate.every(item => typeof item === 'string' && item.length > 0 && item.length <= 320);
+    candidate.every(
+      item => typeof item === 'string' && item.length > 0 && item.length <= 320
+    );
   const totals = record(value) ? value.statusTotals : undefined;
   if (
     !record(value) ||
@@ -3638,7 +3873,9 @@ export function observeRuntimeWithRust(
       count => Number.isSafeInteger(count) && Number(count) >= 0
     )
   ) {
-    throw new Error('The native core returned invalid runtime-observation data.');
+    throw new Error(
+      'The native core returned invalid runtime-observation data.'
+    );
   }
   return value as unknown as RustRuntimeObservationV1;
 }
@@ -3672,7 +3909,12 @@ function backupInspection(value: unknown): RustBackupStoreInspection {
     !exactKeys(
       value,
       ['storeVersion', 'definitionHashes'],
-      ['deploymentId', 'activationId', 'runtimeInstanceId', 'runtimeLeaseExpiresAt']
+      [
+        'deploymentId',
+        'activationId',
+        'runtimeInstanceId',
+        'runtimeLeaseExpiresAt',
+      ]
     ) ||
     ![13, 14, 15, 16, 17].includes(Number(value.storeVersion)) ||
     !Array.isArray(value.definitionHashes) ||
@@ -3681,11 +3923,14 @@ function backupInspection(value: unknown): RustBackupStoreInspection {
     !value.definitionHashes.every(digest) ||
     new Set(value.definitionHashes).size !== value.definitionHashes.length ||
     (value.deploymentId !== undefined &&
-      (typeof value.deploymentId !== 'string' || value.deploymentId.length === 0)) ||
+      (typeof value.deploymentId !== 'string' ||
+        value.deploymentId.length === 0)) ||
     (value.activationId !== undefined && !digest(value.activationId)) ||
     (value.runtimeInstanceId !== undefined &&
-      (typeof value.runtimeInstanceId !== 'string' || value.runtimeInstanceId.length === 0)) ||
-    (value.runtimeLeaseExpiresAt !== undefined && !dateTime(value.runtimeLeaseExpiresAt))
+      (typeof value.runtimeInstanceId !== 'string' ||
+        value.runtimeInstanceId.length === 0)) ||
+    (value.runtimeLeaseExpiresAt !== undefined &&
+      !dateTime(value.runtimeLeaseExpiresAt))
   ) {
     throw new BackupOperationError(
       'WOML_BACKUP_VERIFICATION_FAILED',
@@ -3712,7 +3957,9 @@ export function createBackupWithRust(
   fallbackDeploymentId: string,
   options: Pick<RustExecutorOptions, 'nativeCorePath'> = {}
 ): RustBackupStoreInspection {
-  const native = loadNativeCore(options.nativeCorePath ?? defaultNativeCorePath());
+  const native = loadNativeCore(
+    options.nativeCorePath ?? defaultNativeCorePath()
+  );
   if (typeof native.createWomlBackup !== 'function') {
     throw new BackupOperationError(
       'WOML_BACKUP_UNAVAILABLE',
@@ -3734,7 +3981,9 @@ export function inspectBackupStoreWithRust(
   eventStorePath: string,
   options: Pick<RustExecutorOptions, 'nativeCorePath'> = {}
 ): RustBackupStoreInspection {
-  const native = loadNativeCore(options.nativeCorePath ?? defaultNativeCorePath());
+  const native = loadNativeCore(
+    options.nativeCorePath ?? defaultNativeCorePath()
+  );
   if (typeof native.inspectWomlBackupStore !== 'function') {
     throw new BackupOperationError(
       'WOML_BACKUP_UNAVAILABLE',
@@ -3750,7 +3999,9 @@ export function recordVerifiedBackupWithRust(
   completedAt: string,
   options: Pick<RustExecutorOptions, 'nativeCorePath'> = {}
 ): void {
-  const native = loadNativeCore(options.nativeCorePath ?? defaultNativeCorePath());
+  const native = loadNativeCore(
+    options.nativeCorePath ?? defaultNativeCorePath()
+  );
   if (typeof native.recordWomlVerifiedBackup !== 'function') {
     throw new BackupOperationError(
       'WOML_BACKUP_UNAVAILABLE',
@@ -3771,7 +4022,9 @@ export function prepareRestoredStoreWithRust(
   restoredAt: string,
   options: Pick<RustExecutorOptions, 'nativeCorePath'> = {}
 ): RustBackupStoreInspection {
-  const native = loadNativeCore(options.nativeCorePath ?? defaultNativeCorePath());
+  const native = loadNativeCore(
+    options.nativeCorePath ?? defaultNativeCorePath()
+  );
   if (typeof native.prepareWomlRestoredStore !== 'function') {
     throw new BackupOperationError(
       'WOML_RESTORE_UNAVAILABLE',
@@ -3849,7 +4102,9 @@ export function planRetentionWithRust(
   now: string,
   options: Pick<RustExecutorOptions, 'nativeCorePath'> = {}
 ): RustRetentionPlanV1 {
-  const native = loadNativeCore(options.nativeCorePath ?? defaultNativeCorePath());
+  const native = loadNativeCore(
+    options.nativeCorePath ?? defaultNativeCorePath()
+  );
   if (typeof native.planWomlRetention !== 'function') {
     throw new RetentionOperationError(
       'WOML_RETENTION_UNAVAILABLE',
@@ -3902,7 +4157,9 @@ export function executeRetentionWithRust(
   now: string,
   options: Pick<RustExecutorOptions, 'nativeCorePath'> = {}
 ): RustRetentionExecutionV1 {
-  const native = loadNativeCore(options.nativeCorePath ?? defaultNativeCorePath());
+  const native = loadNativeCore(
+    options.nativeCorePath ?? defaultNativeCorePath()
+  );
   if (typeof native.executeWomlRetention !== 'function') {
     throw new RetentionOperationError(
       'WOML_RETENTION_UNAVAILABLE',
@@ -3910,16 +4167,18 @@ export function executeRetentionWithRust(
     );
   }
   try {
-    return decodeRetentionExecution(JSON.parse(
-      native.executeWomlRetention(
-        eventStorePath,
-        JSON.stringify(policy),
-        leaseId,
-        ownerId,
-        compact,
-        now
+    return decodeRetentionExecution(
+      JSON.parse(
+        native.executeWomlRetention(
+          eventStorePath,
+          JSON.stringify(policy),
+          leaseId,
+          ownerId,
+          compact,
+          now
+        )
       )
-    ));
+    );
   } catch (error) {
     if (error instanceof RetentionOperationError) throw error;
     decodeRetentionNativeError(error);
@@ -3967,7 +4226,9 @@ export async function executeRetentionWithRustAsync(
   now: string,
   options: Pick<RustExecutorOptions, 'nativeCorePath'> = {}
 ): Promise<RustRetentionExecutionV1> {
-  const native = loadNativeCore(options.nativeCorePath ?? defaultNativeCorePath());
+  const native = loadNativeCore(
+    options.nativeCorePath ?? defaultNativeCorePath()
+  );
   if (typeof native.executeWomlRetentionAsync !== 'function') {
     throw new RetentionOperationError(
       'WOML_RETENTION_UNAVAILABLE',
@@ -3994,10 +4255,15 @@ export function readLastRetentionResultWithRust(
   eventStorePath: string,
   options: Pick<RustExecutorOptions, 'nativeCorePath'> = {}
 ): RustRetentionResultV1 | undefined {
-  const native = loadNativeCore(options.nativeCorePath ?? defaultNativeCorePath());
-  if (typeof native.readWomlLastRetentionResult !== 'function') return undefined;
+  const native = loadNativeCore(
+    options.nativeCorePath ?? defaultNativeCorePath()
+  );
+  if (typeof native.readWomlLastRetentionResult !== 'function')
+    return undefined;
   try {
-    const value: unknown = JSON.parse(native.readWomlLastRetentionResult(eventStorePath));
+    const value: unknown = JSON.parse(
+      native.readWomlLastRetentionResult(eventStorePath)
+    );
     return value === null ? undefined : retentionResult(value);
   } catch (error) {
     if (error instanceof RetentionOperationError) throw error;
@@ -4013,7 +4279,9 @@ export function maintainArtifactsWithRust(
   dryRun: boolean,
   options: Pick<RustExecutorOptions, 'nativeCorePath'> = {}
 ): RustArtifactMaintenanceV1 {
-  const native = loadNativeCore(options.nativeCorePath ?? defaultNativeCorePath());
+  const native = loadNativeCore(
+    options.nativeCorePath ?? defaultNativeCorePath()
+  );
   if (typeof native.maintainWomlArtifacts !== 'function') {
     throw new RetentionOperationError(
       'WOML_ARTIFACT_MAINTENANCE_UNAVAILABLE',
@@ -4022,14 +4290,16 @@ export function maintainArtifactsWithRust(
   }
   let value: unknown;
   try {
-    value = JSON.parse(native.maintainWomlArtifacts(
-      eventStorePath,
-      JSON.stringify(authority.artifacts.policy),
-      JSON.stringify(authority.artifacts.mode),
-      JSON.stringify(resolvedSecrets),
-      now,
-      dryRun
-    ));
+    value = JSON.parse(
+      native.maintainWomlArtifacts(
+        eventStorePath,
+        JSON.stringify(authority.artifacts.policy),
+        JSON.stringify(authority.artifacts.mode),
+        JSON.stringify(resolvedSecrets),
+        now,
+        dryRun
+      )
+    );
   } catch (error) {
     throw new RetentionOperationError(
       'WOML_ARTIFACT_MAINTENANCE_FAILED',
@@ -4037,13 +4307,25 @@ export function maintainArtifactsWithRust(
     );
   }
   const fields = [
-    'profile', 'kind', 'completedAt', 'eligibleArtifacts', 'eligibleBlobs',
-    'estimatedBytes', 'deletedArtifacts', 'deletedBlobs', 'deletedBytes',
-    'scrubbedBlobs', 'corruptBlobs', 'collectedOrphans', 'liveArtifacts',
-    'liveBlobs', 'liveBytes',
+    'profile',
+    'kind',
+    'completedAt',
+    'eligibleArtifacts',
+    'eligibleBlobs',
+    'estimatedBytes',
+    'deletedArtifacts',
+    'deletedBlobs',
+    'deletedBytes',
+    'scrubbedBlobs',
+    'corruptBlobs',
+    'collectedOrphans',
+    'liveArtifacts',
+    'liveBlobs',
+    'liveBytes',
   ];
   if (
-    !record(value) || !exactKeys(value, fields) ||
+    !record(value) ||
+    !exactKeys(value, fields) ||
     value.profile !== 'woml.artifact-maintenance/v1' ||
     !['plan', 'result'].includes(String(value.kind)) ||
     !dateTime(value.completedAt) ||
@@ -4059,7 +4341,8 @@ export function maintainArtifactsWithRust(
 
 function artifactOperationFailure(error: unknown, fallbackCode: string): never {
   if (error instanceof ArtifactOperationError) throw error;
-  const message = error instanceof Error ? error.message : 'Artifact operation failed.';
+  const message =
+    error instanceof Error ? error.message : 'Artifact operation failed.';
   const code = message.match(/\b(WOML_[A-Z0-9_]+):/)?.[1] ?? fallbackCode;
   throw new ArtifactOperationError(code, message);
 }
@@ -4068,13 +4351,25 @@ function artifactInspection(value: unknown): RustArtifactInspectionV1 {
   if (
     !record(value) ||
     !exactKeys(value, [
-      'profile', 'artifact', 'digestPrefix', 'status', 'createdAt', 'expiresAt',
-      'retentionMs', 'provenance',
+      'profile',
+      'artifact',
+      'digestPrefix',
+      'status',
+      'createdAt',
+      'expiresAt',
+      'retentionMs',
+      'provenance',
     ]) ||
     value.profile !== 'woml.artifact-inspection/v1' ||
     !record(value.artifact) ||
     !exactKeys(value.artifact, [
-      'contract', 'contractVersion', 'id', 'name', 'size', 'sha256', 'contentType',
+      'contract',
+      'contractVersion',
+      'id',
+      'name',
+      'size',
+      'sha256',
+      'contentType',
     ]) ||
     value.artifact.contract !== 'woml.artifact-reference' ||
     value.artifact.contractVersion !== 1 ||
@@ -4087,12 +4382,19 @@ function artifactInspection(value: unknown): RustArtifactInspectionV1 {
     typeof value.artifact.contentType !== 'string' ||
     typeof value.digestPrefix !== 'string' ||
     !/^[0-9a-f]{12}$/.test(value.digestPrefix) ||
-    !['available', 'quarantined', 'expired', 'corrupt', 'deleted'].includes(String(value.status)) ||
+    !['available', 'quarantined', 'expired', 'corrupt', 'deleted'].includes(
+      String(value.status)
+    ) ||
     !dateTime(value.createdAt) ||
     !dateTime(value.expiresAt) ||
     !count(value.retentionMs) ||
     !record(value.provenance) ||
-    !exactKeys(value.provenance, ['workflowId', 'runId', 'nodeId', 'attempt']) ||
+    !exactKeys(value.provenance, [
+      'workflowId',
+      'runId',
+      'nodeId',
+      'attempt',
+    ]) ||
     typeof value.provenance.workflowId !== 'string' ||
     typeof value.provenance.runId !== 'string' ||
     typeof value.provenance.nodeId !== 'string' ||
@@ -4111,7 +4413,9 @@ export function inspectArtifactWithRust(
   artifactId: string,
   options: Pick<RustExecutorOptions, 'nativeCorePath'> = {}
 ): RustArtifactInspectionV1 {
-  const native = loadNativeCore(options.nativeCorePath ?? defaultNativeCorePath());
+  const native = loadNativeCore(
+    options.nativeCorePath ?? defaultNativeCorePath()
+  );
   if (typeof native.inspectWomlArtifact !== 'function') {
     throw new ArtifactOperationError(
       'WOML_ARTIFACT_INSPECTION_UNAVAILABLE',
@@ -4119,7 +4423,9 @@ export function inspectArtifactWithRust(
     );
   }
   try {
-    return artifactInspection(JSON.parse(native.inspectWomlArtifact(eventStorePath, artifactId)));
+    return artifactInspection(
+      JSON.parse(native.inspectWomlArtifact(eventStorePath, artifactId))
+    );
   } catch (error) {
     artifactOperationFailure(error, 'WOML_ARTIFACT_INSPECTION_FAILED');
   }
@@ -4130,7 +4436,9 @@ export function inspectRunArtifactsWithRust(
   runId: string,
   options: Pick<RustExecutorOptions, 'nativeCorePath'> = {}
 ): RustArtifactRunInspectionV1 {
-  const native = loadNativeCore(options.nativeCorePath ?? defaultNativeCorePath());
+  const native = loadNativeCore(
+    options.nativeCorePath ?? defaultNativeCorePath()
+  );
   if (typeof native.inspectWomlRunArtifacts !== 'function') {
     throw new ArtifactOperationError(
       'WOML_ARTIFACT_INSPECTION_UNAVAILABLE',
@@ -4138,7 +4446,9 @@ export function inspectRunArtifactsWithRust(
     );
   }
   try {
-    const value: unknown = JSON.parse(native.inspectWomlRunArtifacts(eventStorePath, runId));
+    const value: unknown = JSON.parse(
+      native.inspectWomlRunArtifacts(eventStorePath, runId)
+    );
     if (
       !record(value) ||
       !exactKeys(value, ['profile', 'runId', 'artifacts', 'truncated']) ||
@@ -4172,7 +4482,9 @@ export function exportArtifactWithRust(
   resolvedSecrets: Readonly<Record<string, string>>,
   options: Pick<RustExecutorOptions, 'nativeCorePath'> = {}
 ): RustArtifactExportV1 {
-  const native = loadNativeCore(options.nativeCorePath ?? defaultNativeCorePath());
+  const native = loadNativeCore(
+    options.nativeCorePath ?? defaultNativeCorePath()
+  );
   if (typeof native.exportWomlArtifact !== 'function') {
     throw new ArtifactOperationError(
       'WOML_ARTIFACT_EXPORT_UNAVAILABLE',
@@ -4180,19 +4492,27 @@ export function exportArtifactWithRust(
     );
   }
   try {
-    const value: unknown = JSON.parse(native.exportWomlArtifact(
-      eventStorePath,
-      destinationPath,
-      artifactId,
-      JSON.stringify(authority.artifacts.policy),
-      JSON.stringify(authority.artifacts.mode),
-      JSON.stringify(resolvedSecrets)
-    ));
+    const value: unknown = JSON.parse(
+      native.exportWomlArtifact(
+        eventStorePath,
+        destinationPath,
+        artifactId,
+        JSON.stringify(authority.artifacts.policy),
+        JSON.stringify(authority.artifacts.mode),
+        JSON.stringify(resolvedSecrets)
+      )
+    );
     if (
       !record(value) ||
       !exactKeys(value, [
-        'profile', 'auditId', 'artifactId', 'name', 'size', 'digestPrefix',
-        'exportedAt', 'verified',
+        'profile',
+        'auditId',
+        'artifactId',
+        'name',
+        'size',
+        'digestPrefix',
+        'exportedAt',
+        'verified',
       ]) ||
       value.profile !== 'woml.artifact-export/v1' ||
       typeof value.auditId !== 'string' ||
@@ -4221,7 +4541,9 @@ export function observeArtifactsWithRust(
   resolvedSecrets: Readonly<Record<string, string>>,
   options: Pick<RustExecutorOptions, 'nativeCorePath'> = {}
 ): RustArtifactObservationV1 {
-  const native = loadNativeCore(options.nativeCorePath ?? defaultNativeCorePath());
+  const native = loadNativeCore(
+    options.nativeCorePath ?? defaultNativeCorePath()
+  );
   if (typeof native.observeWomlArtifacts !== 'function') {
     throw new ArtifactOperationError(
       'WOML_ARTIFACT_OBSERVATION_UNAVAILABLE',
@@ -4229,21 +4551,27 @@ export function observeArtifactsWithRust(
     );
   }
   try {
-    const value: unknown = JSON.parse(native.observeWomlArtifacts(
-      eventStorePath,
-      JSON.stringify(authority.artifacts.policy),
-      JSON.stringify(authority.artifacts.mode),
-      JSON.stringify(resolvedSecrets)
-    ));
+    const value: unknown = JSON.parse(
+      native.observeWomlArtifacts(
+        eventStorePath,
+        JSON.stringify(authority.artifacts.policy),
+        JSON.stringify(authority.artifacts.mode),
+        JSON.stringify(resolvedSecrets)
+      )
+    );
     const numeric = [
-      'transfers', 'transferredBytes', 'transferDurationMs', 'failedTransfers',
-      'corruptArtifacts', 'orphanBlobs', 'liveArtifacts', 'liveBytes',
+      'transfers',
+      'transferredBytes',
+      'transferDurationMs',
+      'failedTransfers',
+      'corruptArtifacts',
+      'orphanBlobs',
+      'liveArtifacts',
+      'liveBytes',
     ];
     if (
       !record(value) ||
-      !exactKeys(value, [
-        'profile', 'backend', 'backendHealthy', ...numeric,
-      ]) ||
+      !exactKeys(value, ['profile', 'backend', 'backendHealthy', ...numeric]) ||
       value.profile !== 'woml.artifact-observation/v1' ||
       !['local', 's3'].includes(String(value.backend)) ||
       typeof value.backendHealthy !== 'boolean' ||
@@ -4260,11 +4588,18 @@ export function observeArtifactsWithRust(
   }
 }
 
-function artifactBackupInventory(value: unknown): RustArtifactBackupInventoryV1 {
+function artifactBackupInventory(
+  value: unknown
+): RustArtifactBackupInventoryV1 {
   if (
     !record(value) ||
     !exactKeys(value, [
-      'profile', 'directory', 'blobCount', 'totalBytes', 'inventoryDigest', 'verified',
+      'profile',
+      'directory',
+      'blobCount',
+      'totalBytes',
+      'inventoryDigest',
+      'verified',
     ]) ||
     value.profile !== 'woml.artifact-backup-inventory/v1' ||
     value.directory !== 'artifacts' ||
@@ -4289,7 +4624,9 @@ export function exportArtifactBackupWithRust(
   resolvedSecrets: Readonly<Record<string, string>>,
   options: Pick<RustExecutorOptions, 'nativeCorePath'> = {}
 ): RustArtifactBackupInventoryV1 {
-  const native = loadNativeCore(options.nativeCorePath ?? defaultNativeCorePath());
+  const native = loadNativeCore(
+    options.nativeCorePath ?? defaultNativeCorePath()
+  );
   if (typeof native.exportWomlArtifactBackup !== 'function') {
     throw new BackupOperationError(
       'WOML_BACKUP_UNAVAILABLE',
@@ -4297,13 +4634,17 @@ export function exportArtifactBackupWithRust(
     );
   }
   try {
-    return artifactBackupInventory(JSON.parse(native.exportWomlArtifactBackup(
-      eventStorePath,
-      destinationPath,
-      JSON.stringify(authority.artifacts.policy),
-      JSON.stringify(authority.artifacts.mode),
-      JSON.stringify(resolvedSecrets)
-    )));
+    return artifactBackupInventory(
+      JSON.parse(
+        native.exportWomlArtifactBackup(
+          eventStorePath,
+          destinationPath,
+          JSON.stringify(authority.artifacts.policy),
+          JSON.stringify(authority.artifacts.mode),
+          JSON.stringify(resolvedSecrets)
+        )
+      )
+    );
   } catch (error) {
     if (error instanceof BackupOperationError) throw error;
     throw new BackupOperationError(
@@ -4320,7 +4661,9 @@ export function restoreArtifactBackupWithRust(
   resolvedSecrets: Readonly<Record<string, string>>,
   options: Pick<RustExecutorOptions, 'nativeCorePath'> = {}
 ): RustArtifactBackupInventoryV1 {
-  const native = loadNativeCore(options.nativeCorePath ?? defaultNativeCorePath());
+  const native = loadNativeCore(
+    options.nativeCorePath ?? defaultNativeCorePath()
+  );
   if (typeof native.restoreWomlArtifactBackup !== 'function') {
     throw new BackupOperationError(
       'WOML_RESTORE_UNAVAILABLE',
@@ -4328,13 +4671,17 @@ export function restoreArtifactBackupWithRust(
     );
   }
   try {
-    return artifactBackupInventory(JSON.parse(native.restoreWomlArtifactBackup(
-      eventStorePath,
-      sourcePath,
-      JSON.stringify(authority.artifacts.policy),
-      JSON.stringify(authority.artifacts.mode),
-      JSON.stringify(resolvedSecrets)
-    )));
+    return artifactBackupInventory(
+      JSON.parse(
+        native.restoreWomlArtifactBackup(
+          eventStorePath,
+          sourcePath,
+          JSON.stringify(authority.artifacts.policy),
+          JSON.stringify(authority.artifacts.mode),
+          JSON.stringify(resolvedSecrets)
+        )
+      )
+    );
   } catch (error) {
     if (error instanceof BackupOperationError) throw error;
     throw new BackupOperationError(
@@ -4349,7 +4696,9 @@ export function verifyArtifactBackupWithRust(
   sourcePath: string,
   options: Pick<RustExecutorOptions, 'nativeCorePath'> = {}
 ): RustArtifactBackupInventoryV1 {
-  const native = loadNativeCore(options.nativeCorePath ?? defaultNativeCorePath());
+  const native = loadNativeCore(
+    options.nativeCorePath ?? defaultNativeCorePath()
+  );
   if (typeof native.verifyWomlArtifactBackup !== 'function') {
     throw new BackupOperationError(
       'WOML_BACKUP_UNAVAILABLE',
@@ -4357,14 +4706,16 @@ export function verifyArtifactBackupWithRust(
     );
   }
   try {
-    return artifactBackupInventory(JSON.parse(
-      native.verifyWomlArtifactBackup(eventStorePath, sourcePath)
-    ));
+    return artifactBackupInventory(
+      JSON.parse(native.verifyWomlArtifactBackup(eventStorePath, sourcePath))
+    );
   } catch (error) {
     if (error instanceof BackupOperationError) throw error;
     throw new BackupOperationError(
       'WOML_BACKUP_VERIFICATION_FAILED',
-      error instanceof Error ? error.message : 'Artifact backup verification failed.'
+      error instanceof Error
+        ? error.message
+        : 'Artifact backup verification failed.'
     );
   }
 }
@@ -4424,7 +4775,11 @@ export function inspectRunV2WithRust(
     exactKeys(candidate, ['counts', 'items']) &&
     record(candidate.counts) &&
     exactKeys(candidate.counts, [
-      'pending', 'running', 'succeeded', 'failed', 'cancelled',
+      'pending',
+      'running',
+      'succeeded',
+      'failed',
+      'cancelled',
       'completedWithWarnings',
     ]) &&
     Object.values(candidate.counts).every(
@@ -4432,20 +4787,27 @@ export function inspectRunV2WithRust(
     ) &&
     Array.isArray(candidate.items) &&
     candidate.items.length <= 256 &&
-    candidate.items.every(item =>
-      record(item) &&
-      exactKeys(item, [
-        'invocationId', 'alias', 'definitionDigestPrefix', 'kind', 'status',
-        'lifecycleStatus',
-      ]) &&
-      typeof item.invocationId === 'string' &&
-      typeof item.alias === 'string' &&
-      /^[a-f0-9]{12}$/.test(String(item.definitionDigestPrefix)) &&
-      ['step', 'notification-provider'].includes(String(item.kind)) &&
-      ['pending', 'running', 'succeeded', 'failed', 'cancelled'].includes(String(item.status)) &&
-      ['idle', 'running', 'completed', 'completed_with_warnings'].includes(
-        String(item.lifecycleStatus)
-      )
+    candidate.items.every(
+      item =>
+        record(item) &&
+        exactKeys(item, [
+          'invocationId',
+          'alias',
+          'definitionDigestPrefix',
+          'kind',
+          'status',
+          'lifecycleStatus',
+        ]) &&
+        typeof item.invocationId === 'string' &&
+        typeof item.alias === 'string' &&
+        /^[a-f0-9]{12}$/.test(String(item.definitionDigestPrefix)) &&
+        ['step', 'notification-provider'].includes(String(item.kind)) &&
+        ['pending', 'running', 'succeeded', 'failed', 'cancelled'].includes(
+          String(item.status)
+        ) &&
+        ['idle', 'running', 'completed', 'completed_with_warnings'].includes(
+          String(item.lifecycleStatus)
+        )
     );
   const forEach = (candidate: unknown): boolean => {
     if (
@@ -4453,44 +4815,84 @@ export function inspectRunV2WithRust(
       !exactKeys(candidate, ['counts', 'items']) ||
       !record(candidate.counts) ||
       !exactKeys(candidate.counts, [
-        'opened', 'active', 'succeeded', 'failed', 'cancelled',
+        'opened',
+        'active',
+        'succeeded',
+        'failed',
+        'cancelled',
       ]) ||
       !Object.values(candidate.counts).every(
-        count => Number.isSafeInteger(count) && Number(count) >= 0 && Number(count) <= 10_000
+        count =>
+          Number.isSafeInteger(count) &&
+          Number(count) >= 0 &&
+          Number(count) <= 10_000
       ) ||
       !Array.isArray(candidate.items) ||
       candidate.items.length > 10_000
-    ) return false;
+    )
+      return false;
     const validItems = candidate.items.every(item => {
       if (
         !record(item) ||
         !exactKeys(
           item,
           [
-            'forEachId', 'status', 'total', 'succeeded', 'failed', 'skipped',
-            'active', 'pending', 'concurrency',
+            'forEachId',
+            'status',
+            'total',
+            'succeeded',
+            'failed',
+            'skipped',
+            'active',
+            'pending',
+            'concurrency',
           ],
           ['failedIndex', 'failedNodeId']
         ) ||
         typeof item.forEachId !== 'string' ||
-        !['active', 'succeeded', 'failed', 'cancelled'].includes(String(item.status)) ||
+        !['active', 'succeeded', 'failed', 'cancelled'].includes(
+          String(item.status)
+        ) ||
         !['total', 'succeeded', 'failed', 'skipped', 'active', 'pending'].every(
-          field => Number.isSafeInteger(item[field]) && Number(item[field]) >= 0 && Number(item[field]) <= 10_000
+          field =>
+            Number.isSafeInteger(item[field]) &&
+            Number(item[field]) >= 0 &&
+            Number(item[field]) <= 10_000
         ) ||
         !Number.isSafeInteger(item.concurrency) ||
         Number(item.concurrency) < 1 ||
         Number(item.concurrency) > 64 ||
-        Number(item.succeeded) + Number(item.failed) + Number(item.skipped) +
-          Number(item.active) + Number(item.pending) !== Number(item.total) ||
+        Number(item.succeeded) +
+          Number(item.failed) +
+          Number(item.skipped) +
+          Number(item.active) +
+          Number(item.pending) !==
+          Number(item.total) ||
         (item.failedIndex !== undefined &&
-          (!Number.isSafeInteger(item.failedIndex) || Number(item.failedIndex) < 0 || Number(item.failedIndex) >= Number(item.total))) ||
-        (item.failedNodeId !== undefined && typeof item.failedNodeId !== 'string')
-      ) return false;
+          (!Number.isSafeInteger(item.failedIndex) ||
+            Number(item.failedIndex) < 0 ||
+            Number(item.failedIndex) >= Number(item.total))) ||
+        (item.failedNodeId !== undefined &&
+          typeof item.failedNodeId !== 'string')
+      )
+        return false;
       return true;
     });
-    if (!validItems || Number(candidate.counts.opened) !== candidate.items.length) return false;
-    for (const status of ['active', 'succeeded', 'failed', 'cancelled'] as const) {
-      if (Number(candidate.counts[status]) !== candidate.items.filter(item => item.status === status).length)
+    if (
+      !validItems ||
+      Number(candidate.counts.opened) !== candidate.items.length
+    )
+      return false;
+    for (const status of [
+      'active',
+      'succeeded',
+      'failed',
+      'cancelled',
+    ] as const) {
+      if (
+        Number(candidate.counts[status]) !==
+        candidate.items.filter(item => item.status === status).length
+      )
         return false;
     }
     return true;
@@ -4513,12 +4915,12 @@ export function inspectRunV2WithRust(
       ['policy', 'forks', 'reusableDefinitions', 'forEach']
     ) ||
     ![
-      'woml.run-inspection/v2', 'woml.run-inspection/v3',
-      'woml.run-inspection/v4', 'woml.run-inspection/v5',
+      'woml.run-inspection/v2',
+      'woml.run-inspection/v3',
+      'woml.run-inspection/v4',
+      'woml.run-inspection/v5',
       'woml.run-inspection/v6',
-    ].includes(
-      String(value.profile)
-    ) ||
+    ].includes(String(value.profile)) ||
     typeof value.runId !== 'string' ||
     typeof value.workflowId !== 'string' ||
     !PUBLIC_RUN_STATUSES.includes(value.status as PublicRunStatus) ||
@@ -4559,12 +4961,21 @@ export function inspectRunV2WithRust(
           !dateTime(value.policy.eligibleAt)) ||
         (value.policy.timeoutAt !== undefined &&
           !dateTime(value.policy.timeoutAt)))) ||
-    (value.profile === 'woml.run-inspection/v2' && value.policy !== undefined) ||
-    (['woml.run-inspection/v4', 'woml.run-inspection/v5', 'woml.run-inspection/v6'].includes(String(value.profile)) &&
+    (value.profile === 'woml.run-inspection/v2' &&
+      value.policy !== undefined) ||
+    ([
+      'woml.run-inspection/v4',
+      'woml.run-inspection/v5',
+      'woml.run-inspection/v6',
+    ].includes(String(value.profile)) &&
       !record(value.forks)) ||
-    (['woml.run-inspection/v5', 'woml.run-inspection/v6'].includes(String(value.profile)) &&
+    (['woml.run-inspection/v5', 'woml.run-inspection/v6'].includes(
+      String(value.profile)
+    ) &&
       !reusableDefinitions(value.reusableDefinitions)) ||
-    (!['woml.run-inspection/v5', 'woml.run-inspection/v6'].includes(String(value.profile)) &&
+    (!['woml.run-inspection/v5', 'woml.run-inspection/v6'].includes(
+      String(value.profile)
+    ) &&
       value.reusableDefinitions !== undefined) ||
     (value.profile === 'woml.run-inspection/v6' && !forEach(value.forEach)) ||
     (value.profile !== 'woml.run-inspection/v6' && value.forEach !== undefined)
@@ -4594,7 +5005,13 @@ export function inspectWaitsV1WithRust(
     exactKeys(
       candidate,
       ['runId', 'waitId', 'name', 'kind', 'status', 'registeredAt'],
-      ['signals', 'correlationDigest', 'deadline', 'resolvedAt', 'winningSignal']
+      [
+        'signals',
+        'correlationDigest',
+        'deadline',
+        'resolvedAt',
+        'winningSignal',
+      ]
     ) &&
     candidate.runId === runId &&
     typeof candidate.waitId === 'string' &&
@@ -4634,7 +5051,9 @@ export function inspectWaitsV1WithRust(
       (!Number.isSafeInteger(value.oldestPendingWaitAgeMs) ||
         Number(value.oldestPendingWaitAgeMs) < 0))
   ) {
-    throw new Error('The native core returned invalid durable-wait inspection data.');
+    throw new Error(
+      'The native core returned invalid durable-wait inspection data.'
+    );
   }
   return value as unknown as RustWaitInspectionV1;
 }
@@ -4692,9 +5111,13 @@ export function inspectCorrectionV1WithRust(
     ]) ||
     value.profile !== 'woml.correction-inspection/v1' ||
     value.runId !== runId ||
-    !['forward', 'compensating', 'cleanup', 'completed', 'manual_recovery'].includes(
-      String(value.phase)
-    ) ||
+    ![
+      'forward',
+      'compensating',
+      'cleanup',
+      'completed',
+      'manual_recovery',
+    ].includes(String(value.phase)) ||
     !['running', 'succeeded', 'failed', 'cancelled'].includes(
       String(value.originalOutcome)
     ) ||
@@ -4706,7 +5129,9 @@ export function inspectCorrectionV1WithRust(
     !value.unresolvedActions.every(unresolved) ||
     typeof value.truncated !== 'boolean'
   ) {
-    throw new Error('The native core returned invalid Correction Inspection v1 data.');
+    throw new Error(
+      'The native core returned invalid Correction Inspection v1 data.'
+    );
   }
   return value as unknown as RustCorrectionInspectionV1;
 }
@@ -4743,7 +5168,9 @@ export function recoverCorrectionWithRust(
     ) ||
     value.auditRecorded !== true
   ) {
-    throw new Error('The native core returned invalid Correction Recovery v1 data.');
+    throw new Error(
+      'The native core returned invalid Correction Recovery v1 data.'
+    );
   }
   return value as unknown as RustCorrectionRecoveryResultV1;
 }
@@ -4785,7 +5212,9 @@ export function observeCorrectionsV1WithRust(
     (value.oldestManualRecoveryAgeMs !== undefined &&
       !count(value.oldestManualRecoveryAgeMs))
   ) {
-    throw new Error('The native core returned invalid Correction Observation v1 data.');
+    throw new Error(
+      'The native core returned invalid Correction Observation v1 data.'
+    );
   }
   return value as unknown as RustCorrectionObservationV1;
 }
@@ -4844,12 +5273,10 @@ export function inspectLocksV1WithRust(
     (candidate.failureCode === undefined ||
       (typeof candidate.failureCode === 'string' &&
         /^WOML_[A-Z0-9_]+$/.test(candidate.failureCode)));
-  if (
-    !Array.isArray(value) ||
-    value.length > 100 ||
-    !value.every(lock)
-  ) {
-    throw new Error('The native core returned invalid Lock Inspection v1 data.');
+  if (!Array.isArray(value) || value.length > 100 || !value.every(lock)) {
+    throw new Error(
+      'The native core returned invalid Lock Inspection v1 data.'
+    );
   }
   return value as unknown as readonly RustLockInspectionV1[];
 }
@@ -4892,7 +5319,9 @@ export function observeLocksV1WithRust(
     !count(value.acquisitionTimeouts) ||
     (value.oldestWaiterAgeMs !== undefined && !count(value.oldestWaiterAgeMs))
   ) {
-    throw new Error('The native core returned invalid Lock Observation v1 data.');
+    throw new Error(
+      'The native core returned invalid Lock Observation v1 data.'
+    );
   }
   return value as unknown as RustLockObservationV1;
 }
@@ -5225,8 +5654,7 @@ export async function runNotificationProviderJourneyWithRust(
       options.bunExecutable ?? process.execPath,
       options.notificationHostPath ?? defaultNotificationHostPath(),
       timeoutMs,
-      options.customNotificationHostPath ??
-        defaultCustomNotificationHostPath(),
+      options.customNotificationHostPath ?? defaultCustomNotificationHostPath(),
       options.scriptHostPath ?? defaultScriptHostPath(),
       options.approvalBaseUrl,
       JSON.stringify(options.resolvedSecrets ?? {})

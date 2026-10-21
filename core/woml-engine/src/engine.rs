@@ -1490,6 +1490,7 @@ pub(crate) fn validate_payload_against_definition(
           | crate::COMPILED_MODEL_SCHEMA_VERSION_V17
           | crate::COMPILED_MODEL_SCHEMA_VERSION_V18
           | crate::COMPILED_MODEL_SCHEMA_VERSION_V19
+          | crate::COMPILED_MODEL_SCHEMA_VERSION_V20
       ) {
         return Err("Lifecycle and run-control events require compiled Model v11+.".to_string());
       }
@@ -1505,6 +1506,8 @@ pub(crate) fn validate_payload_against_definition(
           | crate::COMPILED_MODEL_SCHEMA_VERSION_V16
           | crate::COMPILED_MODEL_SCHEMA_VERSION_V17
           | crate::COMPILED_MODEL_SCHEMA_VERSION_V18
+          | crate::COMPILED_MODEL_SCHEMA_VERSION_V19
+          | crate::COMPILED_MODEL_SCHEMA_VERSION_V20
       ) {
         return Err("Lifecycle hook events require compiled Model v11+.".to_string());
       }
@@ -1544,6 +1547,8 @@ pub(crate) fn validate_payload_against_definition(
           | crate::COMPILED_MODEL_SCHEMA_VERSION_V16
           | crate::COMPILED_MODEL_SCHEMA_VERSION_V17
           | crate::COMPILED_MODEL_SCHEMA_VERSION_V18
+          | crate::COMPILED_MODEL_SCHEMA_VERSION_V19
+          | crate::COMPILED_MODEL_SCHEMA_VERSION_V20
       ) || !action_exists
       {
         return Err("Lifecycle action event references an unknown Model v11+ action.".to_string());
@@ -1567,6 +1572,8 @@ pub(crate) fn validate_payload_against_definition(
           | crate::COMPILED_MODEL_SCHEMA_VERSION_V16
           | crate::COMPILED_MODEL_SCHEMA_VERSION_V17
           | crate::COMPILED_MODEL_SCHEMA_VERSION_V18
+          | crate::COMPILED_MODEL_SCHEMA_VERSION_V19
+          | crate::COMPILED_MODEL_SCHEMA_VERSION_V20
       ) || !action_exists
       {
         return Err(
@@ -1774,7 +1781,7 @@ pub(crate) fn validate_payload_against_definition(
     RunEventPayload::SagaStarted(data)
     | RunEventPayload::SagaForwardSucceeded(data)
     | RunEventPayload::SagaCorrectionCompleted(data) => {
-      if workflow.schema_version != crate::COMPILED_MODEL_SCHEMA_VERSION_V19
+      if workflow.schema_version < crate::COMPILED_MODEL_SCHEMA_VERSION_V19
         || workflow
           .graph
           .sagas
@@ -1803,7 +1810,7 @@ pub(crate) fn validate_payload_against_definition(
               && action.for_step_id.as_deref() == Some(data.for_step_id.as_str())
           })
         });
-      if workflow.schema_version != crate::COMPILED_MODEL_SCHEMA_VERSION_V19 || !valid {
+      if workflow.schema_version < crate::COMPILED_MODEL_SCHEMA_VERSION_V19 || !valid {
         return Err("Compensation registration does not match Model v19.".to_string());
       }
     }
@@ -1876,7 +1883,7 @@ fn validate_correction_action(
         })
     }
   });
-  if workflow.schema_version != crate::COMPILED_MODEL_SCHEMA_VERSION_V19 || !exists {
+  if workflow.schema_version < crate::COMPILED_MODEL_SCHEMA_VERSION_V19 || !exists {
     return Err(format!(
       "Correction action {action_id:?} does not match saga {saga_id:?}."
     ));
@@ -2892,6 +2899,7 @@ fn validate_reusable_lifecycle_binding(
       | crate::COMPILED_MODEL_SCHEMA_VERSION_V17
       | crate::COMPILED_MODEL_SCHEMA_VERSION_V18
       | crate::COMPILED_MODEL_SCHEMA_VERSION_V19
+      | crate::COMPILED_MODEL_SCHEMA_VERSION_V20
   ) {
     return Err("Reusable lifecycle events require compiled Model v14 or later.".to_string());
   }

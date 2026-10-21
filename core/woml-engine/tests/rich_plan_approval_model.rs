@@ -2,8 +2,7 @@ use std::path::PathBuf;
 
 use serde_json::Value;
 use woml_engine::{
-  CompiledWorkflowDefinition, ModelIssueCode, ReviewPayloadV1, ReviewerDirectoryV1,
-  REVIEWER_DIRECTORY_PROFILE,
+  CompiledWorkflowDefinition, ReviewPayloadV1, ReviewerDirectoryV1, REVIEWER_DIRECTORY_PROFILE,
 };
 
 const MODEL: &str =
@@ -35,16 +34,12 @@ fn rust_and_typescript_share_fail_closed_review_and_directory_wire_shapes() {
 }
 
 #[test]
-fn reviewed_model_v20_is_structurally_valid_but_not_yet_executable() {
+fn reviewed_model_v20_is_structurally_valid_and_durably_executable() {
   let workflow = model();
   workflow.validate_structure().expect("Model v20 structure");
-  let issues = workflow
+  workflow
     .validate_for_durable_execution()
-    .expect_err("RPA1 must fail closed before the Rust review authority")
-    .issues;
-  assert!(issues
-    .iter()
-    .any(|issue| issue.code == ModelIssueCode::UnsupportedRichApprovalExecution));
+    .expect("RPA5 enables Model v20 execution behind runtime reviewer authority");
 }
 
 #[test]
