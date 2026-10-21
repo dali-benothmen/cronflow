@@ -1135,8 +1135,8 @@ fn validate_store(connection: &Connection) -> Result<(), DurableStateError> {
     .optional()
     .map_err(sqlite_unavailable)?;
   // State v1 was introduced by Store v13 and remains unchanged inside the
-  // Durable state shares the current Store v16 envelope. Its own tables remain
-  // unchanged; Store v16 adds locks beside durable-state and wait tables.
+  // current Store v17 envelope. Store v16 added locks and Store v17 adds
+  // correction state beside the durable-state and wait tables.
   if version
     .as_deref()
     .and_then(|value| value.parse::<u32>().ok())

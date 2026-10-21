@@ -2770,14 +2770,18 @@ async fn continue_runtime<E: RuntimeDagEngine>(
 ) -> Result<WorkflowRuntimeOutcome, RuntimeExecutionError> {
   let mut host = None;
   drive_workflow_lifecycle(engine, run_id, options, &mut host).await?;
-  let mut execution = continue_runtime_loop(
+  // The runtime loop intentionally supports every control-flow and correction
+  // primitive. Keep its generated future off the comparatively small test and
+  // worker thread stacks; adding a new primitive must not increase the stack
+  // required by workflows that never use it.
+  let mut execution = Box::pin(continue_runtime_loop(
     engine,
     run_id,
     terminal_node_id,
     &mut execution_order,
     options,
     &mut host,
-  )
+  ))
   .await;
   if execution.is_err() && engine.projection(run_id)?.status == RunStatus::Cancelling {
     settle_cancelling_run(engine, run_id, options.clock.now(), options)?;
@@ -10805,7 +10809,7 @@ enum ScriptNodeOutcome {
   WorkflowSucceeded,
   RetryScheduled,
   Cancelled,
-  SagaFailed(StepAttemptFailedData),
+  SagaFailed(Box<StepAttemptFailedData>),
 }
 
 fn compensation_registration(
@@ -11897,7 +11901,7 @@ async fn settle_script_attempt_failure<E: RuntimeDagEngine>(
     StepFailureDisposition::RunFailed => {}
   }
   if saga_failure_deferred {
-    return Ok(ScriptNodeOutcome::SagaFailed(failure_event));
+    return Ok(ScriptNodeOutcome::SagaFailed(Box::new(failure_event)));
   }
   if reusable_step_descriptor(engine.workflow(), node_id).is_some() && host.is_none() {
     *host = Some(options.acquire_script_host().await?);
