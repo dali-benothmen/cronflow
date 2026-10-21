@@ -10652,6 +10652,7 @@ async fn execute_script_node<E: RuntimeDagEngine>(
   let mut cancellation_sent = false;
   let mut timeout_sent = false;
   let mut lease_loss_sent = false;
+  let mut interruption_ack_timed_out = false;
   let completed = loop {
     tokio::select! {
       result = &mut execution => break result,
@@ -10678,10 +10679,23 @@ async fn execute_script_node<E: RuntimeDagEngine>(
           }
         }
       }
+      _ = tokio::time::sleep(SCRIPT_HOST_INTERRUPT_GRACE), if cancellation_sent || timeout_sent || lease_loss_sent => {
+        interruption_ack_timed_out = true;
+        break Err(ScriptHostClientError::HostCrashed(
+          "the script host did not acknowledge invocation interruption before its deadline"
+            .to_string(),
+        ));
+      }
     }
   };
   drop(execution);
   drop(artifact_cleanup);
+  if interruption_ack_timed_out {
+    // A host that cannot settle an interrupted Worker cannot safely execute
+    // correction or later workflow work. Dropping it terminates the child
+    // process (`kill_on_drop`) and the next action acquires a fresh host.
+    *host = None;
+  }
   settle_workflow_timeout_if_due(engine, run_id, options.clock.now(), options)?;
   if timeout_sent || engine.projection(run_id)?.timeout_reached_at.is_some() {
     let projection = engine.projection(run_id)?;
@@ -11632,6 +11646,7 @@ fn final_result<E: RuntimeDagEngine>(
 }
 
 const CANCELLATION_POLL_INTERVAL: Duration = Duration::from_millis(25);
+const SCRIPT_HOST_INTERRUPT_GRACE: Duration = Duration::from_secs(2);
 
 fn cancelled_run_error<E: RuntimeDagEngine>(
   engine: &E,

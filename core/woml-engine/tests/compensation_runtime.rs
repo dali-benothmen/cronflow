@@ -196,6 +196,10 @@ impl Drop for TemporaryDatabase {
 }
 
 fn runtime_options() -> Option<RuntimeExecutionOptions> {
+  runtime_options_with_host("woml-cli/src/script-host.ts")
+}
+
+fn runtime_options_with_host(relative_host: &str) -> Option<RuntimeExecutionOptions> {
   std::process::Command::new("bun")
     .arg("--version")
     .output()
@@ -203,7 +207,9 @@ fn runtime_options() -> Option<RuntimeExecutionOptions> {
     .status
     .success()
     .then_some(())?;
-  let host = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../woml-cli/src/script-host.ts");
+  let host = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+    .join("../..")
+    .join(relative_host);
   host.exists().then(|| {
     RuntimeExecutionOptions::new(
       ScriptHostProcessOptions::new(PathBuf::from("bun"), host),
@@ -406,28 +412,12 @@ async fn corrective_attempts_use_v11_bindings_and_durable_retry_identity() {
 
 #[tokio::test]
 async fn cancellation_compensates_completed_work_and_runs_cleanup_before_settlement() {
-  let Some(options) = runtime_options() else {
+  let Some(options) =
+    runtime_options_with_host("woml-cli/tests/fixtures/nonresponsive-cancel-script-host.ts")
+  else {
     return;
   };
-  let mut workflow = model();
-  let deployment = workflow
-    .graph
-    .nodes
-    .iter_mut()
-    .find(|node| node.id == "deployApplication")
-    .expect("deployment node");
-  let woml_engine::model::ValueExpression::Object { fields } = &mut deployment.inputs else {
-    panic!("deployment inputs")
-  };
-  fields.insert(
-    "source".to_string(),
-    woml_engine::model::ValueExpression::Literal {
-      value: Value::String(
-        "await new Promise(resolve => setTimeout(resolve, 5000)); return { deployed: true };"
-          .to_string(),
-      ),
-    },
-  );
+  let workflow = model();
   workflow.validate_structure().unwrap();
 
   let database = TemporaryDatabase::new("cancel-correction");
@@ -451,7 +441,7 @@ async fn cancellation_compensates_completed_work_and_runs_cleanup_before_settlem
   let runtime = tokio::spawn(async move {
     execute_admitted_trigger_run_durable(runtime_database, &runtime_run_id, options).await
   });
-  tokio::time::timeout(std::time::Duration::from_secs(4), async {
+  tokio::time::timeout(std::time::Duration::from_secs(10), async {
     loop {
       if control
         .projection(&run_id)
@@ -475,7 +465,7 @@ async fn cancellation_compensates_completed_work_and_runs_cleanup_before_settlem
     .request_run_cancellation(&run_id, "cancel-saga", chrono::Utc::now())
     .unwrap();
 
-  let error = tokio::time::timeout(std::time::Duration::from_secs(5), runtime)
+  let error = tokio::time::timeout(std::time::Duration::from_secs(10), runtime)
     .await
     .expect("saga cancellation settles promptly")
     .unwrap()
