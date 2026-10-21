@@ -42,7 +42,7 @@ function diagnostic(source: string): WomlValidationError | WomlCompileError {
   throw new Error('Expected rich approval authoring to fail.');
 }
 
-describe('WOML Rich Plan Approvals RPA0 and RPA1', () => {
+describe('WOML Rich Plan Approvals', () => {
   test('freezes every shared v1/v2/v3 contract with fail-closed schemas', () => {
     const ajv = new Ajv2020({ allErrors: true, strict: false });
     ajv.addFormat('date-time', {
@@ -53,6 +53,8 @@ describe('WOML Rich Plan Approvals RPA0 and RPA1', () => {
     });
     for (const name of [
       'artifact-reference.v1.schema.json',
+      'artifact-inspection.v1.schema.json',
+      'artifact-run-inspection.v1.schema.json',
       'review-payload.v1.schema.json',
       'reviewer-directory.v1.schema.json',
       'rich-plan-approvals.v1.schema.json',
@@ -62,6 +64,9 @@ describe('WOML Rich Plan Approvals RPA0 and RPA1', () => {
       'approval-http.v2.schema.json',
       'notification-provider-host.v3.schema.json',
       'approval-inspection.v2.schema.json',
+      'wait-inspection.v1.schema.json',
+      'correction-inspection.v1.schema.json',
+      'run-inspection.v11.schema.json',
     ]) {
       ajv.addSchema(JSON.parse(readFileSync(resolve(schemaRoot, name), 'utf8')));
     }
@@ -92,6 +97,65 @@ describe('WOML Rich Plan Approvals RPA0 and RPA1', () => {
         true
       );
     }
+
+    const inspectRun = ajv.getSchema(
+      'https://woml.dev/schemas/run-inspection/v11'
+    )!;
+    const inspected = {
+      profile: 'woml.run-inspection/v11',
+      runId: 'run_review_1',
+      workflowId: 'review-test',
+      status: 'waiting',
+      businessOutcome: 'undecided',
+      lifecycleStatus: 'idle',
+      hooks: [],
+      warnings: [],
+      cancellation: { requested: false },
+      policy: {},
+      forks: {},
+      reusableDefinitions: {},
+      forEach: {},
+      artifacts: {
+        profile: 'woml.artifact-run-inspection/v1',
+        runId: 'run_review_1',
+        artifacts: [],
+        truncated: false,
+      },
+      approvals: {
+        pending: 1,
+        items: [{
+          approvalId: 'approveDeployment',
+          requestId: 'aprreq_review_1',
+          status: 'pending',
+          reviewDigest: `sha256:${'a'.repeat(64)}`,
+          review: {
+            title: 'Deploy payments-api',
+            summary: 'Apply the reviewed plan.',
+            risk: 'high',
+          },
+          required: 2,
+          received: 1,
+          requiredRoles: ['production-owner', 'security-owner'],
+          representedRoles: ['production-owner'],
+          directoryVersion: `sha256:${'b'.repeat(64)}`,
+          requestedAt: '2026-10-21T12:00:00Z',
+          deadline: '2026-10-22T12:00:00Z',
+          decisions: [{
+            principalId: 'reviewer-a',
+            decision: 'approved',
+            provider: 'slack',
+            providerAccountId: 'T0123456789',
+            roles: ['production-owner'],
+            decidedAt: '2026-10-21T12:05:00Z',
+          }],
+          totalDecisions: 1,
+          decisionsTruncated: false,
+        }],
+        truncated: false,
+      },
+    };
+    expect(inspectRun(inspected), JSON.stringify(inspectRun.errors)).toBe(true);
+    expect(inspectRun({ ...inspected, token: 'forbidden' })).toBe(false);
   });
 
   test('deep-equals the reviewed Model v20 golden fixture', () => {

@@ -1500,6 +1500,58 @@ pub struct RunInspectionV6 {
   pub for_each: RunInspectionForEachV6,
 }
 
+pub const RUN_INSPECTION_RICH_APPROVAL_LIMIT: usize = 100;
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RunInspectionRichApprovalV11 {
+  pub approval_id: String,
+  pub request_id: String,
+  pub status: String,
+  pub review_digest: String,
+  pub review: ReviewPayloadV1,
+  pub required: u32,
+  pub received: u32,
+  pub required_roles: Vec<String>,
+  pub represented_roles: Vec<String>,
+  pub directory_version: String,
+  pub requested_at: DateTime<Utc>,
+  #[serde(skip_serializing_if = "Option::is_none")]
+  pub deadline: Option<DateTime<Utc>>,
+  #[serde(skip_serializing_if = "Option::is_none")]
+  pub resolved_at: Option<DateTime<Utc>>,
+  pub decisions: Vec<RichApprovalDecisionInspection>,
+  pub total_decisions: u32,
+  pub decisions_truncated: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RunInspectionRichApprovalsV11 {
+  pub pending: u32,
+  pub items: Vec<RunInspectionRichApprovalV11>,
+  pub truncated: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RunInspectionV11 {
+  pub profile: &'static str,
+  pub run_id: String,
+  pub workflow_id: String,
+  pub status: PublicRunStatus,
+  pub business_outcome: InspectedBusinessOutcome,
+  pub lifecycle_status: crate::projection::LifecycleStatus,
+  pub hooks: Vec<RunInspectionHookV2>,
+  pub warnings: Vec<crate::event::LifecycleWarning>,
+  pub cancellation: RunInspectionCancellationV2,
+  pub policy: RunInspectionPolicyV3,
+  pub forks: RunInspectionForksV4,
+  pub reusable_definitions: RunInspectionReusableDefinitionsV5,
+  pub for_each: RunInspectionForEachV6,
+  pub approvals: RunInspectionRichApprovalsV11,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ForkRecoveryBranchV1 {
@@ -6982,6 +7034,93 @@ impl DurableEventStore {
       forks: base.forks,
       reusable_definitions: base.reusable_definitions,
       for_each: RunInspectionForEachV6 { counts, items },
+    })
+  }
+
+  pub fn inspect_run_v11(&self, run_id: &str) -> Result<RunInspectionV11, DurableStoreError> {
+    let base = self.inspect_run_v6(run_id)?;
+    let binding = self.run_binding(run_id)?;
+    let workflow = self.definition(&binding.definition_hash)?;
+    if workflow.schema_version < crate::COMPILED_MODEL_SCHEMA_VERSION_V20 {
+      return Err(DurableStoreError::Contract(
+        "Run Inspection v11 is available only for compiled Model v20 or later runs.".to_string(),
+      ));
+    }
+    let projection = self.projection(run_id)?;
+    let total = projection.rich_approval_requests.len();
+    let mut items = Vec::new();
+    for request in projection
+      .rich_approval_requests
+      .values()
+      .take(RUN_INSPECTION_RICH_APPROVAL_LIMIT)
+    {
+      let inspection = self.inspect_rich_approval(
+        run_id,
+        &request.request_id,
+        RICH_APPROVAL_INSPECTION_DECISION_LIMIT,
+      )?;
+      let approval_deadline = workflow
+        .approval(&request.approval_id)
+        .and_then(|approval| approval.timeout_ms)
+        .and_then(|milliseconds| i64::try_from(milliseconds).ok())
+        .and_then(|milliseconds| {
+          request
+            .requested_at
+            .checked_add_signed(chrono::Duration::milliseconds(milliseconds))
+        });
+      let deadline = match (approval_deadline, projection.timeout_at) {
+        (Some(approval), Some(workflow)) => Some(approval.min(workflow)),
+        (Some(approval), None) => Some(approval),
+        (None, Some(workflow)) => Some(workflow),
+        (None, None) => None,
+      };
+      let received = request
+        .decisions
+        .values()
+        .filter(|decision| decision.decision == ApprovalDecision::Approved)
+        .count() as u32;
+      items.push(RunInspectionRichApprovalV11 {
+        approval_id: inspection.approval_id,
+        request_id: inspection.request_id,
+        status: inspection.status,
+        review_digest: inspection.review_digest,
+        review: inspection.review,
+        required: inspection.required,
+        received,
+        required_roles: inspection.required_roles,
+        represented_roles: request.represented_roles.clone(),
+        directory_version: inspection.directory_version,
+        requested_at: request.requested_at,
+        deadline,
+        resolved_at: inspection.resolved_at,
+        decisions: inspection.decisions,
+        total_decisions: inspection.total_decisions,
+        decisions_truncated: inspection.decisions_truncated,
+      });
+    }
+    let pending = items
+      .iter()
+      .filter(|approval| approval.status == "pending")
+      .count() as u32;
+    Ok(RunInspectionV11 {
+      profile: "woml.run-inspection/v11",
+      run_id: base.run_id,
+      workflow_id: base.workflow_id,
+      status: base.status,
+      business_outcome: base.business_outcome,
+      lifecycle_status: base.lifecycle_status,
+      hooks: base.hooks,
+      warnings: base.warnings,
+      cancellation: base.cancellation,
+      policy: base.policy,
+      forks: base.forks,
+      reusable_definitions: base.reusable_definitions,
+      for_each: base.for_each,
+      approvals: RunInspectionRichApprovalsV11 {
+        pending,
+        items,
+        truncated: total > RUN_INSPECTION_RICH_APPROVAL_LIMIT,
+      },
     })
   }
 

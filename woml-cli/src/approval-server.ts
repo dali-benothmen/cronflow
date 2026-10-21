@@ -304,6 +304,73 @@ function approvalPage(outcome: WaitingOutcome, nonce: string): string {
 </html>`;
 }
 
+function richApprovalPage(outcome: WaitingOutcome, nonce: string): string {
+  const review = outcome.approval.review ?? {};
+  const text = (value: unknown, fallback = '') =>
+    typeof value === 'string' ? value : fallback;
+  const rows = (value: unknown) => Array.isArray(value)
+    ? value.filter((item): item is Record<string, unknown> =>
+        typeof item === 'object' && item !== null && !Array.isArray(item)
+      )
+    : [];
+  const title = text(review.title, outcome.approval.name ?? outcome.approval.approvalId);
+  const summary = text(review.summary, outcome.approval.description ?? 'Review the proposed operation.');
+  const risk = text(review.risk, 'unknown');
+  const authority = outcome.approval.authority!;
+  const digest = outcome.approval.reviewDigest!;
+  const changes = rows(review.changes).slice(0, 10).map(change =>
+    `<li><strong>${escapeHtml(text(change.action, 'change'))}</strong> ${escapeHtml(text(change.target, 'target'))}<br><span>${escapeHtml(text(change.summary))}</span></li>`
+  ).join('');
+  const checks = rows(review.checks).slice(0, 10).map(check =>
+    `<li><strong>${escapeHtml(text(check.status, 'unknown'))}</strong> ${escapeHtml(text(check.name, 'check'))}</li>`
+  ).join('');
+  const artifacts = rows(review.artifacts).slice(0, 10).map(artifact =>
+    `<li>${escapeHtml(text(artifact.name, 'artifact'))} · ${Number.isSafeInteger(artifact.size) ? Number(artifact.size) : 0} bytes<br><code>${escapeHtml(text(artifact.sha256).slice(0, 19))}…</code></li>`
+  ).join('');
+  const section = (heading: string, content: string, total: number) => content.length === 0
+    ? ''
+    : `<section><h2>${heading}</h2><ul>${content}</ul>${total > 10 ? `<p class="meta">+${total - 10} more in operator inspection</p>` : ''}</section>`;
+  const deadline = outcome.approval.expiresAt === undefined
+    ? 'No workflow deadline'
+    : new Date(outcome.approval.expiresAt).toLocaleString();
+  return `<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>${escapeHtml(title)}</title>
+  <style nonce="${nonce}">
+    :root { color-scheme: light dark; font-family: system-ui, sans-serif; }
+    body { margin: 0; background: Canvas; color: CanvasText; }
+    main { width: min(48rem, calc(100% - 3rem)); margin: 3rem auto; }
+    header, section { padding: 1.25rem 1.5rem; border: 1px solid color-mix(in srgb, CanvasText 18%, transparent); border-radius: .8rem; margin-bottom: 1rem; }
+    h1, h2 { margin-top: 0; } h2 { font-size: 1rem; } ul { padding-left: 1.25rem; } li { margin: .65rem 0; }
+    .meta { opacity: .72; } .risk { font-weight: 700; text-transform: uppercase; }
+    code { overflow-wrap: anywhere; }
+  </style>
+</head>
+<body>
+  <main>
+    <header>
+      <p class="meta">WOML reviewed operation · ${escapeHtml(outcome.workflowId)}</p>
+      <h1>${escapeHtml(title)}</h1>
+      <p>${escapeHtml(summary)}</p>
+      <p><span class="risk">${escapeHtml(risk)} risk</span> · Quorum ${authority.received}/${authority.required}</p>
+      <p class="meta">Required roles: ${escapeHtml(authority.requiredRoles.join(', ') || 'none')}</p>
+      <p class="meta">Digest: <code>${escapeHtml(digest)}</code><br>Deadline: ${escapeHtml(deadline)}</p>
+    </header>
+    ${section('Key changes', changes, rows(review.changes).length)}
+    ${section('Checks', checks, rows(review.checks).length)}
+    ${section('Reviewed artifacts', artifacts, rows(review.artifacts).length)}
+    <section>
+      <h2>Trusted decision required</h2>
+      <p>This page is read-only. Approve or reject through a configured Slack, Telegram, Discord, or trusted identity gateway. The provider identity—not this browser page—determines reviewer roles.</p>
+    </section>
+  </main>
+</body>
+</html>`;
+}
+
 function scheduleAt(deadline: string, callback: () => void): () => void {
   let timer: ReturnType<typeof setTimeout> | undefined;
   let cancelled = false;
@@ -378,6 +445,16 @@ export async function serveApprovalAndWait(
         }
         if (rich && url.pathname === richPath) {
           if (request.method === 'GET') {
+            if (request.headers.get('accept')?.includes('text/html')) {
+              const nonce = randomBytes(18).toString('base64url');
+              return new Response(richApprovalPage(outcome, nonce), {
+                status: 200,
+                headers: {
+                  ...securityHeaders('text/html; charset=utf-8'),
+                  'Content-Security-Policy': `default-src 'none'; style-src 'nonce-${nonce}'; img-src 'none'; frame-ancestors 'none'; base-uri 'none'; form-action 'none'`,
+                },
+              });
+            }
             return json(
               {
                 contract: 'woml.approval-http',

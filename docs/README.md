@@ -21,6 +21,7 @@ or schema documents to write and run a workflow.
 | Terminal output and manual triggers | [Terminal experience](woml-terminal-experience.md) |
 | Lifecycle and cancellation | [Lifecycle and run control](woml-lifecycle-and-run-control.md) |
 | Approvals and notifications | [Notifications](woml-notifications.md) |
+| Immutable plan review, roles, and quorum | [Rich Plan Approvals](woml-rich-plan-approvals.md) |
 | Services overview | [Services](woml-services.md) |
 | Supervised local tools | [Process execution](woml-process.md) |
 | HTTP | [Outbound HTTP](woml-http-services.md) |

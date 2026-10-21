@@ -11,6 +11,7 @@ use crate::ProviderMessageIdentity;
 pub const NOTIFICATION_PROVIDER_PROTOCOL: &str = "woml.notification-provider-host";
 pub const NOTIFICATION_PROVIDER_PROTOCOL_VERSION: u32 = 1;
 pub const INFORMATIONAL_NOTIFICATION_PROVIDER_PROTOCOL_VERSION: u32 = 2;
+pub const RICH_APPROVAL_NOTIFICATION_PROVIDER_PROTOCOL_VERSION: u32 = 3;
 pub const NOTIFICATION_PROVIDER_MAX_FRAME_BYTES: usize = 1024 * 1024;
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
@@ -179,6 +180,110 @@ pub struct InformationalNotificationDeliverMessage {
   pub language: Option<String>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct RichApprovalNotificationAuthority {
+  pub required: u32,
+  pub received: u32,
+  pub required_roles: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct RichApprovalNotificationPresentation {
+  pub title: String,
+  pub summary: String,
+  pub risk: crate::ReviewRiskV1,
+  pub authority: RichApprovalNotificationAuthority,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct RichApprovalDecisionCapability {
+  pub url: String,
+  pub token: String,
+  pub expires_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct RichApprovalNotificationDeliverMessage {
+  pub protocol: String,
+  pub protocol_version: u32,
+  pub message_type: String,
+  pub mode: String,
+  pub invocation_id: String,
+  pub run_id: String,
+  pub approval_id: String,
+  pub request_id: String,
+  pub delivery_id: String,
+  pub provider: String,
+  pub destination: String,
+  pub review_digest: String,
+  pub presentation: RichApprovalNotificationPresentation,
+  pub decision_capability: RichApprovalDecisionCapability,
+}
+
+impl RichApprovalNotificationDeliverMessage {
+  pub fn validate(&self) -> Result<(), String> {
+    let valid_roles = self.presentation.authority.required_roles.len() <= 16
+      && self
+        .presentation
+        .authority
+        .required_roles
+        .iter()
+        .all(|role| {
+          !role.is_empty()
+            && role.chars().count() <= 64
+            && role.chars().all(|character| {
+              character.is_ascii_lowercase()
+                || character.is_ascii_digit()
+                || matches!(character, '-' | '_' | '.')
+            })
+        });
+    if self.protocol != NOTIFICATION_PROVIDER_PROTOCOL
+      || self.protocol_version != RICH_APPROVAL_NOTIFICATION_PROVIDER_PROTOCOL_VERSION
+      || self.message_type != "deliver"
+      || self.mode != "rich-approval"
+      || self.invocation_id.is_empty()
+      || self.invocation_id.chars().count() > 320
+      || self.run_id.is_empty()
+      || self.run_id.chars().count() > 320
+      || self.approval_id.is_empty()
+      || self.request_id.is_empty()
+      || self.delivery_id.is_empty()
+      || !matches!(
+        self.provider.as_str(),
+        "slack" | "telegram" | "discord" | "custom"
+      )
+      || self.destination.is_empty()
+      || self.destination.chars().count() > 320
+      || !valid_sha256_digest(&self.review_digest)
+      || self.presentation.title.is_empty()
+      || self.presentation.title.chars().count() > 160
+      || self.presentation.summary.chars().count() > 2_000
+      || !(1..=20).contains(&self.presentation.authority.required)
+      || self.presentation.authority.received > self.presentation.authority.required
+      || !valid_roles
+      || self.decision_capability.url.is_empty()
+      || self.decision_capability.url.chars().count() > 4_096
+      || self.decision_capability.token.len() < 32
+      || self.decision_capability.token.len() > 4_096
+    {
+      return Err("The provider host received an invalid rich approval presentation.".to_string());
+    }
+    Ok(())
+  }
+}
+
+fn valid_sha256_digest(value: &str) -> bool {
+  value.len() == 71
+    && value.starts_with("sha256:")
+    && value[7..]
+      .bytes()
+      .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct NotificationUpdateMessage {
@@ -345,5 +450,50 @@ mod tests {
     }))
     .expect("Discord completion message");
     completed.validate().expect("Discord delivery identity");
+  }
+
+  #[test]
+  fn provider_host_v3_accepts_only_bounded_digest_bound_presentations() {
+    let message: RichApprovalNotificationDeliverMessage =
+      serde_json::from_value(serde_json::json!({
+        "protocol": NOTIFICATION_PROVIDER_PROTOCOL,
+        "protocolVersion": RICH_APPROVAL_NOTIFICATION_PROVIDER_PROTOCOL_VERSION,
+        "messageType": "deliver",
+        "mode": "rich-approval",
+        "invocationId": "inv_review_1",
+        "runId": "run_review_1",
+        "approvalId": "approveDeployment",
+        "requestId": "aprreq_review_1",
+        "deliveryId": "approveDeployment:notify:0:channel:0",
+        "provider": "slack",
+        "destination": "C0123456789",
+        "reviewDigest": format!("sha256:{}", "a".repeat(64)),
+        "presentation": {
+          "title": "Deploy payments-api to production",
+          "summary": "Create 2, modify 4, and destroy 1 infrastructure resource.",
+          "risk": "high",
+          "authority": {
+            "required": 2,
+            "received": 1,
+            "requiredRoles": ["production-owner", "security-owner"]
+          }
+        },
+        "decisionCapability": {
+          "url": "http://127.0.0.1:7331/api/v2/approvals/run_review_1/aprreq_review_1",
+          "token": "a".repeat(32),
+          "expiresAt": "2026-10-21T12:30:00Z"
+        }
+      }))
+      .expect("Provider Host v3 fixture");
+    message
+      .validate()
+      .expect("bounded rich approval presentation");
+
+    let mut stale = message.clone();
+    stale.review_digest = "sha256:stale".to_string();
+    assert!(stale.validate().is_err());
+    let mut over_quorum = message;
+    over_quorum.presentation.authority.received = 3;
+    assert!(over_quorum.validate().is_err());
   }
 }

@@ -32,6 +32,7 @@ secret names, and optional production configuration.
 ```bash
 woml run <workflow.woml|directory>... \
   [--config <path>] [--process-policy <path>|--allow-process <aliases>] \
+  [--artifact-policy <path>] [--reviewer-directory <path>] \
   [--host <address>] [--port <port>] \
   [--state <path>] [--trigger <manualTriggerId>] [--resume <runId>] \
   [--approval-port <port>] [--json] [--verbose] \
@@ -51,11 +52,15 @@ non-default store.
 `--allow-process bun,git` grants only those resolved executable aliases to a
 reviewed foreground run. It is rejected with `--background`. Use
 `--process-policy <path>` for long-lived or background Process v1 authority.
+`--reviewer-directory <path>` supplies operator-owned canonical reviewer
+identities and roles for Rich Plan Approvals; missing authority fails closed
+before the workflow reaches a protected effect.
 
 ### `woml test`
 
 ```bash
 woml test <workflow.woml> [--process-policy <path>|--allow-process <aliases>] \
+  [--artifact-policy <path>] [--reviewer-directory <path>] \
   [--state <path>] \
   [--trigger <manualTriggerId>] [--resume <runId>] \
   [--approval-port <port>]
@@ -106,8 +111,8 @@ woml stop [--state <path>] [--json]
 
 - `inspect` is the live, colored terminal view of runtime and run health.
 - `list` filters recent durable runs.
-- `get` shows one redacted run, its steps, attempts, waits, control flow, and
-  bounded metadata for artifacts created by that run.
+- `get` shows one redacted run, its steps, attempts, waits, control flow,
+  bounded artifact metadata, and Rich Approval review/quorum/audit state.
 - `cancel` records a durable cancellation request and propagates it through
   supervised work.
 - `recover` records one state-checked operator decision for an ambiguous
@@ -118,7 +123,10 @@ woml stop [--state <path>] [--json]
 - `stop` gracefully stops the background runtime that owns the selected store.
 
 Run and runtime inspection deliberately omit payloads, secrets, credentials,
-and operation keys.
+operation keys, provider tokens, and raw identity assertions. Rich Approval
+Inspection v11 is an operator surface and may show bounded canonical principal,
+provider-account, role, and decision history; that protected audit data never
+enters ordinary workflow script context.
 
 ### Inspect and export durable artifacts
 

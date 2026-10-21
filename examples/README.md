@@ -50,6 +50,10 @@ All destinations for one approval share one durable decision: approving or
 rejecting through any delivery settles the same waiting step. Provider setup is
 documented in [Communication providers](../docs/woml-communication-providers.md).
 
+For immutable infrastructure plans, role-based quorum, durable reviewer
+identity, and auditable evidence, use the
+[`richApprovals/`](richApprovals/) Terraform and AI-remediation examples.
+
 ## 4. Reuse code
 
 | Feature | Example |

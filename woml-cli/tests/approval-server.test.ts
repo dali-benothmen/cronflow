@@ -366,6 +366,22 @@ describe('trusted approval HTTP v2', () => {
     expect(review.review.title).toBe('Deploy payments-api to production');
     expect(review.authority).toEqual(richWaitingOutcome().approval.authority);
 
+    const pageResponse = await fetch(url, {
+      headers: { Accept: 'text/html' },
+    });
+    expect(pageResponse.status).toBe(200);
+    expect(pageResponse.headers.get('content-security-policy')).toContain(
+      "default-src 'none'"
+    );
+    const page = await pageResponse.text();
+    expect(page).toContain('Deploy payments-api to production');
+    expect(page).toContain('Quorum');
+    expect(page).toContain('Quorum 0/2');
+    expect(page).toContain('production-owner');
+    expect(page).toContain('aaaaaaaaaaaa');
+    expect(page).not.toContain('signed-1');
+    expect(page).not.toContain('providerActorId');
+
     const stale = await fetch(url, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },

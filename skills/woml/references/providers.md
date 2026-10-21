@@ -244,6 +244,13 @@ WOML settles configured notification delivery before waiting. At least one deliv
 
 Approval provider tags do not accept informational `message`; WOML builds the approval prompt and actions. Lifecycle provider tags require `message` and never carry decision authority.
 
+Rich approvals render one bounded Provider Host v3 presentation across Slack,
+Telegram, Discord, and custom providers: title, risk, summary, key evidence,
+digest prefix, and quorum progress. Provider callbacks must supply an
+authenticated account/actor identity that maps through the operator-owned
+Reviewer Directory. A custom provider without trusted callback identity may
+display the review but must not contribute to role/quorum authority.
+
 ## Custom notification providers
 
 Import a `.woml` definition containing `<provider kind="notification">` and use the alias directly under `<notify>`. Read [modules.md](modules.md). Custom providers transport WOML's bounded notification object; they do not own approval tokens, durable retries, or decision settlement.

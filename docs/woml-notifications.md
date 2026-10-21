@@ -27,6 +27,15 @@ Approval messages may contain interactive buttons and are handled by
 Notification Provider Host v1. See the Human Approval implementation plan and
 the notification protocol documents for provider contracts and diagnostics.
 
+When `<approval>` has a `review`, providers use Notification Provider Host v3.
+Every destination receives the same bounded title, risk, summary, key evidence,
+artifact metadata, digest prefix, and quorum progress. Full evidence stays on
+the local/operator inspection surface. Reviewer clicks count only after the
+provider's authenticated account/actor identity maps through the configured
+Reviewer Directory; a custom provider without trusted identity may render the
+review but cannot contribute to role-based quorum. See
+[Rich Plan Approvals](woml-rich-plan-approvals.md).
+
 ## Informational lifecycle notifications
 
 Lifecycle hooks may send Slack messages without creating an approval:

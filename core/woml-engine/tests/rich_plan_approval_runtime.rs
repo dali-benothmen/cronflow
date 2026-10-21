@@ -117,6 +117,20 @@ async fn model_v20_preserves_partial_quorum_across_restart_and_continues_once() 
   assert!(first_wait.credential_expires_at.is_none());
   let digest = first_wait.review_digest.clone().unwrap();
   assert_eq!(first_wait.authority.as_ref().unwrap().received, 0);
+  let pending_inspection = DurableEventStore::open(database.path())
+    .unwrap()
+    .inspect_run_v11(&run_id)
+    .unwrap();
+  assert_eq!(pending_inspection.profile, "woml.run-inspection/v11");
+  assert_eq!(pending_inspection.approvals.pending, 1);
+  assert_eq!(pending_inspection.approvals.items.len(), 1);
+  assert_eq!(pending_inspection.approvals.items[0].review_digest, digest);
+  assert_eq!(pending_inspection.approvals.items[0].received, 0);
+  assert_eq!(
+    pending_inspection.approvals.items[0].review.title,
+    "Deploy payments-api to production"
+  );
+  assert!(pending_inspection.approvals.items[0].deadline.is_some());
 
   let first_vote = vote(
     database.path(),
@@ -131,6 +145,16 @@ async fn model_v20_preserves_partial_quorum_across_restart_and_continues_once() 
   );
   assert_eq!(first_vote.status, RichApprovalDecisionStatus::Pending);
   assert_eq!(first_vote.received, 1);
+  let partial_inspection = DurableEventStore::open(database.path())
+    .unwrap()
+    .inspect_run_v11(&run_id)
+    .unwrap();
+  assert_eq!(partial_inspection.approvals.items[0].received, 1);
+  assert_eq!(partial_inspection.approvals.items[0].decisions.len(), 1);
+  assert_eq!(
+    partial_inspection.approvals.items[0].represented_roles,
+    vec!["production-owner"]
+  );
 
   // A new runtime instance reconstructs the immutable review and partial
   // quorum from SQLite; it does not mint a basic token or replay buildReview.

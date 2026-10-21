@@ -1,0 +1,78 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://woml.dev/schemas/run-inspection/v11",
+  "title": "WOML Rich-Approval-Aware Safe Run Inspection v11",
+  "description": "Bounded operator inspection with artifacts, waits, locks, correction state, and immutable rich approval evidence.",
+  "x-status": "rich-plan-approvals-rpa7-frozen",
+  "x-forbiddenFields": ["context", "payload", "result", "path", "url", "signedUrl", "credentials", "body", "secret", "token", "assertion", "stack", "operationKey", "idempotencyKey", "providerActorId"],
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["profile", "runId", "workflowId", "status", "businessOutcome", "lifecycleStatus", "hooks", "warnings", "cancellation", "policy", "forks", "reusableDefinitions", "forEach", "artifacts", "approvals"],
+  "properties": {
+    "profile": { "const": "woml.run-inspection/v11" },
+    "runId": { "type": "string", "minLength": 1, "maxLength": 320 },
+    "workflowId": { "type": "string", "minLength": 1, "maxLength": 256 },
+    "status": { "enum": ["not_started", "queued", "running", "waiting", "cancelling", "finalizing", "succeeded", "failed", "cancelled"] },
+    "businessOutcome": { "enum": ["undecided", "succeeded", "failed", "cancelled"] },
+    "lifecycleStatus": { "enum": ["idle", "running", "finalizing", "completed_with_warnings", "completed"] },
+    "hooks": { "type": "array", "maxItems": 1024 },
+    "warnings": { "type": "array", "maxItems": 128 },
+    "cancellation": { "type": "object" },
+    "policy": { "type": "object" },
+    "forks": { "type": "object" },
+    "reusableDefinitions": { "type": "object" },
+    "forEach": { "type": "object" },
+    "artifacts": { "$ref": "https://woml.dev/schemas/artifact-run-inspection/v1" },
+    "durableWaits": { "$ref": "https://woml.dev/schemas/wait-inspection/v1" },
+    "locks": { "type": "array", "maxItems": 100 },
+    "correction": { "$ref": "https://woml.dev/schemas/correction-inspection/v1" },
+    "approvals": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["pending", "items", "truncated"],
+      "properties": {
+        "pending": { "type": "integer", "minimum": 0, "maximum": 100 },
+        "items": { "type": "array", "maxItems": 100, "items": { "$ref": "#/$defs/approval" } },
+        "truncated": { "type": "boolean" }
+      }
+    }
+  },
+  "$defs": {
+    "approval": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["approvalId", "requestId", "status", "reviewDigest", "review", "required", "received", "requiredRoles", "representedRoles", "directoryVersion", "requestedAt", "decisions", "totalDecisions", "decisionsTruncated"],
+      "properties": {
+        "approvalId": { "type": "string", "pattern": "^[a-z][A-Za-z0-9]*$" },
+        "requestId": { "type": "string", "pattern": "^aprreq_[A-Za-z0-9_-]+$" },
+        "status": { "enum": ["pending", "approved", "rejected", "expired", "cancelled", "invalidated"] },
+        "reviewDigest": { "type": "string", "pattern": "^sha256:[a-f0-9]{64}$" },
+        "review": { "$ref": "https://woml.dev/schemas/review-payload/v1" },
+        "required": { "type": "integer", "minimum": 1, "maximum": 20 },
+        "received": { "type": "integer", "minimum": 0, "maximum": 20 },
+        "requiredRoles": { "type": "array", "maxItems": 16, "items": { "type": "string" } },
+        "representedRoles": { "type": "array", "maxItems": 16, "items": { "type": "string" } },
+        "directoryVersion": { "type": "string", "minLength": 1, "maxLength": 256 },
+        "requestedAt": { "type": "string", "format": "date-time" },
+        "deadline": { "type": "string", "format": "date-time" },
+        "resolvedAt": { "type": "string", "format": "date-time" },
+        "decisions": { "type": "array", "maxItems": 100, "items": { "$ref": "#/$defs/decision" } },
+        "totalDecisions": { "type": "integer", "minimum": 0 },
+        "decisionsTruncated": { "type": "boolean" }
+      }
+    },
+    "decision": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["principalId", "decision", "provider", "providerAccountId", "roles", "decidedAt"],
+      "properties": {
+        "principalId": { "type": "string", "minLength": 1, "maxLength": 256 },
+        "decision": { "enum": ["approved", "rejected"] },
+        "provider": { "enum": ["slack", "telegram", "discord", "trusted-http"] },
+        "providerAccountId": { "type": "string", "minLength": 1, "maxLength": 256 },
+        "roles": { "type": "array", "maxItems": 64, "items": { "type": "string" } },
+        "decidedAt": { "type": "string", "format": "date-time" }
+      }
+    }
+  }
+}

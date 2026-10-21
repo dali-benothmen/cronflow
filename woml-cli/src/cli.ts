@@ -1277,6 +1277,48 @@ function formatRunInspection(
       `Warnings: ${inspection.warnings.map(warning => warning.code).join(', ')}`
     );
   }
+  if (inspection.approvals !== undefined && inspection.approvals.items.length > 0) {
+    lines.push('Rich approvals:');
+    for (const approval of inspection.approvals.items) {
+      const review = approval.review as {
+        readonly title?: unknown;
+        readonly risk?: unknown;
+        readonly artifacts?: unknown;
+      };
+      const title = typeof review.title === 'string' ? review.title : approval.approvalId;
+      const risk = typeof review.risk === 'string' ? review.risk : 'unknown';
+      lines.push(
+        `  ${approval.approvalId}: ${approval.status} · ${approval.received}/${approval.required} approvals · risk ${risk}`
+      );
+      lines.push(`    Review: ${title}`);
+      lines.push(`    Digest: ${approval.reviewDigest.slice(0, 19)}…`);
+      if (approval.requiredRoles.length > 0) {
+        lines.push(`    Required roles: ${approval.requiredRoles.join(', ')}`);
+        lines.push(
+          `    Represented roles: ${approval.representedRoles.length === 0 ? 'none' : approval.representedRoles.join(', ')}`
+        );
+      }
+      lines.push(`    Reviewer directory: ${approval.directoryVersion}`);
+      if (approval.deadline !== undefined) lines.push(`    Deadline: ${approval.deadline}`);
+      if (Array.isArray(review.artifacts) && review.artifacts.length > 0) {
+        lines.push(`    Reviewed artifacts: ${review.artifacts.length}`);
+      }
+      for (const decision of approval.decisions) {
+        const roles = decision.roles.length === 0 ? '' : ` · ${decision.roles.join(', ')}`;
+        lines.push(
+          `    ${decision.decision}: ${decision.principalId} via ${decision.provider}${roles} · ${decision.decidedAt}`
+        );
+      }
+      if (approval.decisionsTruncated) {
+        lines.push(
+          `    ${approval.totalDecisions - approval.decisions.length} additional decision(s) omitted.`
+        );
+      }
+    }
+    if (inspection.approvals.truncated) {
+      lines.push('  Additional rich approvals were omitted from this bounded view.');
+    }
+  }
   if (artifacts !== undefined && artifacts.length > 0) {
     lines.push('Artifacts:');
     for (const artifact of artifacts) {
@@ -7115,7 +7157,20 @@ async function runCliUnprofiled(
         { nativeCorePath: dependencies.nativeCorePath }
       );
       const publicResult =
-        correctionInspection !== undefined
+        result.profile === 'woml.run-inspection/v11'
+          ? {
+              ...result,
+              profile: 'woml.run-inspection/v11' as const,
+              artifacts: artifactInspection,
+              ...(waitInspection.waits.length === 0
+                ? {}
+                : { durableWaits: waitInspection }),
+              ...(lockInspection.length === 0 ? {} : { locks: lockInspection }),
+              ...(correctionInspection === undefined
+                ? {}
+                : { correction: correctionInspection }),
+            }
+          : correctionInspection !== undefined
           ? {
               ...result,
               profile: 'woml.run-inspection/v10' as const,
