@@ -54,6 +54,7 @@ import {
   type WomlDefinitionPackageV12,
   type WomlDefinitionPackageV13,
   type WomlDefinitionPackageV14,
+  type WomlDefinitionPackageV15,
 } from '@woml/compiler';
 import {
   compiledDefinitionHash,
@@ -119,6 +120,10 @@ import {
   observeArtifactsWithRust,
   type RustArtifactInspectionV1,
 } from './rust-executor';
+import {
+  loadReviewerDirectory,
+  ReviewerDirectoryLoadError,
+} from './reviewer-directory';
 import {
   ApprovalServerBindError,
   DEFAULT_APPROVAL_PORT,
@@ -282,11 +287,11 @@ class CliInputError extends Error {
 }
 
 function runUsage(): string {
-  return 'Usage: woml run <workflow.woml|directory>... [--config <path>] [--process-policy <path>|--allow-process <aliases>] [--artifact-policy <path>] [--host <address>] [--port <port>] [--state <path>] [--trigger <manualTriggerId>] [--resume <runId>] [--approval-port <port>] [--json] [--verbose] [--color=auto|always|never] [--background|-d]';
+  return 'Usage: woml run <workflow.woml|directory>... [--config <path>] [--process-policy <path>|--allow-process <aliases>] [--artifact-policy <path>] [--reviewer-directory <path>] [--host <address>] [--port <port>] [--state <path>] [--trigger <manualTriggerId>] [--resume <runId>] [--approval-port <port>] [--json] [--verbose] [--color=auto|always|never] [--background|-d]';
 }
 
 function testUsage(): string {
-  return 'Usage: woml test <workflow.woml> [--process-policy <path>|--allow-process <aliases>] [--artifact-policy <path>] [--state <path>] [--trigger <manualTriggerId>] [--resume <runId>] [--approval-port <port>]';
+  return 'Usage: woml test <workflow.woml> [--process-policy <path>|--allow-process <aliases>] [--artifact-policy <path>] [--reviewer-directory <path>] [--state <path>] [--trigger <manualTriggerId>] [--resume <runId>] [--approval-port <port>]';
 }
 
 function listUsage(): string {
@@ -366,6 +371,7 @@ interface RunArguments {
   readonly configPath?: string;
   readonly processPolicyPath?: string;
   readonly artifactPolicyPath?: string;
+  readonly reviewerDirectoryPath?: string;
   readonly allowProcess?: string;
   readonly runtimeCapabilities?: RuntimeCapabilitiesV1;
   readonly stateExplicit: boolean;
@@ -416,6 +422,7 @@ function parseRunArguments(args: readonly string[]): RunArguments {
   let configPath: string | undefined;
   let processPolicyPath: string | undefined;
   let artifactPolicyPath: string | undefined;
+  let reviewerDirectoryPath: string | undefined;
   let allowProcess: string | undefined;
   let stateExplicit = false;
   let hostExplicit = false;
@@ -452,6 +459,7 @@ function parseRunArguments(args: readonly string[]): RunArguments {
         option !== '--config' &&
         option !== '--process-policy' &&
         option !== '--artifact-policy' &&
+        option !== '--reviewer-directory' &&
         option !== '--allow-process' &&
         option !== '--resume' &&
         option !== '--approval-port' &&
@@ -498,6 +506,14 @@ function parseRunArguments(args: readonly string[]): RunArguments {
         );
       }
       artifactPolicyPath = value;
+    } else if (option === '--reviewer-directory') {
+      if (value.length === 0) {
+        throw new CliInputError(
+          'WOML_CLI_ARGUMENTS_INVALID',
+          '--reviewer-directory requires a non-empty JSON file path.'
+        );
+      }
+      reviewerDirectoryPath = value;
     } else if (option === '--allow-process') {
       if (value.length === 0) {
         throw new CliInputError(
@@ -589,6 +605,7 @@ function parseRunArguments(args: readonly string[]): RunArguments {
     ...(configPath === undefined ? {} : { configPath }),
     ...(processPolicyPath === undefined ? {} : { processPolicyPath }),
     ...(artifactPolicyPath === undefined ? {} : { artifactPolicyPath }),
+    ...(reviewerDirectoryPath === undefined ? {} : { reviewerDirectoryPath }),
     ...(allowProcess === undefined ? {} : { allowProcess }),
     stateExplicit,
     hostExplicit,
@@ -634,10 +651,20 @@ async function resolveRunArgumentsConfiguration(
           args.artifactPolicyPath,
           background ? 'background' : 'foreground'
         );
-  const runtimeCapabilities: RuntimeCapabilitiesV1 | undefined =
-    processCapabilities === undefined && artifactCapabilities === undefined
+  const reviewerCapabilities =
+    args.reviewerDirectoryPath === undefined
       ? undefined
-      : { ...processCapabilities, ...artifactCapabilities };
+      : await loadReviewerDirectory(args.reviewerDirectoryPath);
+  const runtimeCapabilities: RuntimeCapabilitiesV1 | undefined =
+    processCapabilities === undefined &&
+    artifactCapabilities === undefined &&
+    reviewerCapabilities === undefined
+      ? undefined
+      : {
+          ...processCapabilities,
+          ...artifactCapabilities,
+          ...reviewerCapabilities,
+        };
   if (args.command !== 'run') {
     return {
       ...args,
@@ -1214,9 +1241,7 @@ function formatRunInspection(
             ? ''
             : ` · held ${lock.heldMs} ms`;
       const fence =
-        lock.fencingToken === undefined
-          ? ''
-          : ` · fence ${lock.fencingToken}`;
+        lock.fencingToken === undefined ? '' : ` · fence ${lock.fencingToken}`;
       lines.push(`  ${lock.lockId}: ${lock.status}${timing}${fence}`);
       lines.push(`    Resource: ${lock.key}`);
       if (lock.deadline !== undefined && lock.status === 'waiting') {
@@ -1229,7 +1254,9 @@ function formatRunInspection(
         lines.push(`    Failure: ${lock.failureCode}`);
       }
     }
-    if (locks.some(lock => lock.status === 'waiting' || lock.status === 'held')) {
+    if (
+      locks.some(lock => lock.status === 'waiting' || lock.status === 'held')
+    ) {
       lines.push(`Cancel safely: woml cancel ${inspection.runId}`);
       lines.push('WOML intentionally provides no force-unlock command.');
     }
@@ -1249,6 +1276,48 @@ function formatRunInspection(
     lines.push(
       `Warnings: ${inspection.warnings.map(warning => warning.code).join(', ')}`
     );
+  }
+  if (inspection.approvals !== undefined && inspection.approvals.items.length > 0) {
+    lines.push('Rich approvals:');
+    for (const approval of inspection.approvals.items) {
+      const review = approval.review as {
+        readonly title?: unknown;
+        readonly risk?: unknown;
+        readonly artifacts?: unknown;
+      };
+      const title = typeof review.title === 'string' ? review.title : approval.approvalId;
+      const risk = typeof review.risk === 'string' ? review.risk : 'unknown';
+      lines.push(
+        `  ${approval.approvalId}: ${approval.status} · ${approval.received}/${approval.required} approvals · risk ${risk}`
+      );
+      lines.push(`    Review: ${title}`);
+      lines.push(`    Digest: ${approval.reviewDigest.slice(0, 19)}…`);
+      if (approval.requiredRoles.length > 0) {
+        lines.push(`    Required roles: ${approval.requiredRoles.join(', ')}`);
+        lines.push(
+          `    Represented roles: ${approval.representedRoles.length === 0 ? 'none' : approval.representedRoles.join(', ')}`
+        );
+      }
+      lines.push(`    Reviewer directory: ${approval.directoryVersion}`);
+      if (approval.deadline !== undefined) lines.push(`    Deadline: ${approval.deadline}`);
+      if (Array.isArray(review.artifacts) && review.artifacts.length > 0) {
+        lines.push(`    Reviewed artifacts: ${review.artifacts.length}`);
+      }
+      for (const decision of approval.decisions) {
+        const roles = decision.roles.length === 0 ? '' : ` · ${decision.roles.join(', ')}`;
+        lines.push(
+          `    ${decision.decision}: ${decision.principalId} via ${decision.provider}${roles} · ${decision.decidedAt}`
+        );
+      }
+      if (approval.decisionsTruncated) {
+        lines.push(
+          `    ${approval.totalDecisions - approval.decisions.length} additional decision(s) omitted.`
+        );
+      }
+    }
+    if (inspection.approvals.truncated) {
+      lines.push('  Additional rich approvals were omitted from this bounded view.');
+    }
   }
   if (artifacts !== undefined && artifacts.length > 0) {
     lines.push('Artifacts:');
@@ -1290,7 +1359,9 @@ function formatRunInspection(
       }
     }
     if (correction.truncated) {
-      lines.push('  Additional unresolved actions were omitted from this bounded view.');
+      lines.push(
+        '  Additional unresolved actions were omitted from this bounded view.'
+      );
     }
   }
   return `${lines.join('\n')}\n`;
@@ -1587,6 +1658,9 @@ function formatError(
 
   if (error instanceof ArtifactPolicyError) {
     return `WOML artifact policy error [${error.code}]: ${error.message}`;
+  }
+  if (error instanceof ReviewerDirectoryLoadError) {
+    return `WOML approval authority error [${error.code}]: ${error.message}`;
   }
   if (error instanceof ArtifactOperationError) {
     return `WOML artifact error [${error.code}]: ${error.message}`;
@@ -1913,7 +1987,8 @@ function promoteForLifecycleAuthority(
     workflow.schemaVersion === 16 ||
     workflow.schemaVersion === 17 ||
     workflow.schemaVersion === 18 ||
-    workflow.schemaVersion === 19
+    workflow.schemaVersion === 19 ||
+    workflow.schemaVersion === 20
   ) {
     return workflow;
   }
@@ -1996,6 +2071,7 @@ function runtimeModulesFromPackage(
     | WomlDefinitionPackageV12
     | WomlDefinitionPackageV13
     | WomlDefinitionPackageV14
+    | WomlDefinitionPackageV15
 ): readonly RustRuntimeModuleArtifact[] {
   const modules = definitionPackage.modules.map(module => {
     const bundle = definitionPackage.artifacts.find(
@@ -2023,7 +2099,9 @@ function runtimeModulesFromPackage(
     definitionPackage.schemaVersion !== 10 &&
     definitionPackage.schemaVersion !== 11 &&
     definitionPackage.schemaVersion !== 12 &&
-    definitionPackage.schemaVersion !== 13
+    definitionPackage.schemaVersion !== 13 &&
+    definitionPackage.schemaVersion !== 14 &&
+    definitionPackage.schemaVersion !== 15
   )
     return modules;
   const seen = new Set<string>();
@@ -2912,21 +2990,21 @@ async function runSingleCheckCommand(
         reusablePackage?.schemaVersion === 14
           ? `Compiled Model v19 package: ${reusablePackage.rootHash}\nExecution: compensation and cleanup authoring is validated; durable correction execution begins in CC2–CC4.\n`
           : reusablePackage?.schemaVersion === 13
-          ? `Compiled Model v18 package: ${reusablePackage.rootHash}\nExecution: lock authoring and lowering are validated; the durable lock runtime begins in LL2–LL4.\n`
-          : reusablePackage?.schemaVersion === 11
-          ? `Compiled Model v16 package: ${reusablePackage.rootHash}\nExecution: <for-each>, modules, and reusable steps are runnable together.\n`
-          : reusablePackage?.schemaVersion === 10 &&
-              reusablePackage.workflow.model.communication.providers.some(
-                provider => provider.provider === 'discord'
-              )
-            ? `Compiled Model v15 package: ${reusablePackage.rootHash}\nExecution: Discord triggers, notifications, approval buttons, and services.discord.send() are executable through the durable Rust runtime.\n`
-            : reusablePackage?.schemaVersion === 10
-              ? `Compiled Model v15 package: ${reusablePackage.rootHash}\nExecution: custom definitions and Telegram triggers, notifications, and messaging are runnable together.\n`
-              : reusablePackage !== undefined
-                ? `Compiled Model v14 package: ${reusablePackage.rootHash}\nExecution: custom steps and notification providers are runnable.\n`
-                : reusableGraph.root.kind === 'workflow'
-                  ? 'Execution: reusable provider source is validated; custom notification providers begin in SCP5.\n'
-                  : 'Execution: reusable definitions are imported by workflows and are not independently runnable.\n'
+            ? `Compiled Model v18 package: ${reusablePackage.rootHash}\nExecution: lock authoring and lowering are validated; the durable lock runtime begins in LL2–LL4.\n`
+            : reusablePackage?.schemaVersion === 11
+              ? `Compiled Model v16 package: ${reusablePackage.rootHash}\nExecution: <for-each>, modules, and reusable steps are runnable together.\n`
+              : reusablePackage?.schemaVersion === 10 &&
+                  reusablePackage.workflow.model.communication.providers.some(
+                    provider => provider.provider === 'discord'
+                  )
+                ? `Compiled Model v15 package: ${reusablePackage.rootHash}\nExecution: Discord triggers, notifications, approval buttons, and services.discord.send() are executable through the durable Rust runtime.\n`
+                : reusablePackage?.schemaVersion === 10
+                  ? `Compiled Model v15 package: ${reusablePackage.rootHash}\nExecution: custom definitions and Telegram triggers, notifications, and messaging are runnable together.\n`
+                  : reusablePackage !== undefined
+                    ? `Compiled Model v14 package: ${reusablePackage.rootHash}\nExecution: custom steps and notification providers are runnable.\n`
+                    : reusableGraph.root.kind === 'workflow'
+                      ? 'Execution: reusable provider source is validated; custom notification providers begin in SCP5.\n'
+                      : 'Execution: reusable definitions are imported by workflows and are not independently runnable.\n'
       );
       return 0;
     }
@@ -2981,9 +3059,7 @@ async function runSingleCheckCommand(
       io.stdout(
         'Compiled Model v19 passed compensation and cleanup frontend validation.\n'
       );
-      io.stdout(
-        'Execution: corrective runtime execution begins in CC2–CC4.\n'
-      );
+      io.stdout('Execution: corrective runtime execution begins in CC2–CC4.\n');
       return 0;
     }
     if (hasLock) {
@@ -3620,8 +3696,16 @@ function printWaitingApproval(
   io.stderr(
     `Deadline: ${approval.expiresAt ?? 'none'} (${approval.onTimeout} on timeout)\n`
   );
-  io.stderr(`Current URL expires: ${approval.credentialExpiresAt}\n`);
-  io.stderr(`Approval URL: ${url}\n`);
+  if (approval.reviewDigest !== undefined && approval.authority !== undefined) {
+    io.stderr(`Review digest: ${approval.reviewDigest}\n`);
+    io.stderr(
+      `Quorum: ${approval.authority.received}/${approval.authority.required}\n`
+    );
+    io.stderr(`Review endpoint: ${url}\n`);
+  } else {
+    io.stderr(`Current URL expires: ${approval.credentialExpiresAt}\n`);
+    io.stderr(`Approval URL: ${url}\n`);
+  }
   io.stderr(
     `Recovery: woml run ${JSON.stringify(filePath)} --state ${JSON.stringify(
       statePath
@@ -3778,7 +3862,8 @@ function workflowSecretReferences(
     workflow.schemaVersion === 16 ||
     workflow.schemaVersion === 17 ||
     workflow.schemaVersion === 18 ||
-    workflow.schemaVersion === 19
+    workflow.schemaVersion === 19 ||
+    workflow.schemaVersion === 20
   ) {
     for (const descriptor of workflow.graph.forEach) {
       for (const node of descriptor.body.nodes) {
@@ -3789,7 +3874,7 @@ function workflowSecretReferences(
       }
     }
   }
-  if (workflow.schemaVersion === 19) {
+  if (workflow.schemaVersion === 19 || workflow.schemaVersion === 20) {
     for (const saga of workflow.graph.sagas) {
       for (const action of [...saga.compensations, ...saga.cleanup]) {
         collectSecretReferences(action.node.inputs, references);
@@ -3804,7 +3889,8 @@ function workflowSecretReferences(
   workflow.schemaVersion === 16 ||
   workflow.schemaVersion === 17 ||
   workflow.schemaVersion === 18 ||
-  workflow.schemaVersion === 19
+  workflow.schemaVersion === 19 ||
+  workflow.schemaVersion === 20
     ? (workflow.reusableDefinitions ?? [])
     : []) {
     for (const prop of definition.props) {
@@ -3949,7 +4035,13 @@ async function runNotificationWorkflow(
     const waiting = outcome;
     printNotificationApproval(io, waiting, args.filePath, args.statePath);
     const hasCustomProvider =
-      (workflow.schemaVersion === 14 || workflow.schemaVersion === 15) &&
+      (workflow.schemaVersion === 14 ||
+        workflow.schemaVersion === 15 ||
+        workflow.schemaVersion === 16 ||
+        workflow.schemaVersion === 17 ||
+        workflow.schemaVersion === 18 ||
+        workflow.schemaVersion === 19 ||
+        workflow.schemaVersion === 20) &&
       (workflow.reusableDefinitions ?? []).some(
         definition => definition.kind === 'notification-provider'
       );
@@ -4290,7 +4382,8 @@ async function executeOneShot(
     workflow.schemaVersion !== 16 &&
     workflow.schemaVersion !== 17 &&
     workflow.schemaVersion !== 18 &&
-    workflow.schemaVersion !== 19
+    workflow.schemaVersion !== 19 &&
+    workflow.schemaVersion !== 20
   ) {
     throw new CliInputError(
       'WOML_RESUME_REQUIRES_DURABLE_WORKFLOW',
@@ -4324,7 +4417,8 @@ async function executeOneShot(
     workflow.schemaVersion === 16 ||
     workflow.schemaVersion === 17 ||
     workflow.schemaVersion === 18 ||
-    workflow.schemaVersion === 19
+    workflow.schemaVersion === 19 ||
+    workflow.schemaVersion === 20
   ) {
     await mkdir(dirname(args.statePath), { recursive: true });
     const onProgress = durableRetryProgress(io, args);
@@ -5180,9 +5274,10 @@ async function activateWorkflows(
     if (productionSources.length > 0) {
       await mkdir(dirname(args.statePath), { recursive: true });
       const store = dependencies.createSecretStore();
-      const hasSignalWait = productionSources.some(source =>
-        'waits' in source.workflow.graph &&
-        source.workflow.graph.waits?.some(wait => wait.kind === 'signal')
+      const hasSignalWait = productionSources.some(
+        source =>
+          'waits' in source.workflow.graph &&
+          source.workflow.graph.waits?.some(wait => wait.kind === 'signal')
       );
       const signalIngressToken = hasSignalWait
         ? await store.get('WOML_SIGNAL_TOKEN')
@@ -7061,48 +7156,64 @@ async function runCliUnprofiled(
         get.runId,
         { nativeCorePath: dependencies.nativeCorePath }
       );
-      const waitInspection = inspectWaitsV1WithRust(
-        get.statePath,
-        get.runId,
-        { nativeCorePath: dependencies.nativeCorePath }
-      );
-      const lockInspection = inspectLocksV1WithRust(
-        get.statePath,
-        get.runId,
-        { nativeCorePath: dependencies.nativeCorePath }
-      );
+      const waitInspection = inspectWaitsV1WithRust(get.statePath, get.runId, {
+        nativeCorePath: dependencies.nativeCorePath,
+      });
+      const lockInspection = inspectLocksV1WithRust(get.statePath, get.runId, {
+        nativeCorePath: dependencies.nativeCorePath,
+      });
       const correctionInspection = inspectCorrectionV1WithRust(
         get.statePath,
         get.runId,
         { nativeCorePath: dependencies.nativeCorePath }
       );
-      const publicResult = correctionInspection !== undefined ? {
-        ...result,
-        profile: 'woml.run-inspection/v10' as const,
-        artifacts: artifactInspection,
-        ...(waitInspection.waits.length === 0
-          ? {}
-          : { durableWaits: waitInspection }),
-        ...(lockInspection.length === 0 ? {} : { locks: lockInspection }),
-        correction: correctionInspection,
-      } : lockInspection.length > 0 ? {
-        ...result,
-        profile: 'woml.run-inspection/v9' as const,
-        artifacts: artifactInspection,
-        ...(waitInspection.waits.length === 0
-          ? {}
-          : { durableWaits: waitInspection }),
-        locks: lockInspection,
-      } : waitInspection.waits.length === 0 ? {
-        ...result,
-        profile: 'woml.run-inspection/v7' as const,
-        artifacts: artifactInspection,
-      } : {
-        ...result,
-        profile: 'woml.run-inspection/v8' as const,
-        artifacts: artifactInspection,
-        durableWaits: waitInspection,
-      };
+      const publicResult =
+        result.profile === 'woml.run-inspection/v11'
+          ? {
+              ...result,
+              profile: 'woml.run-inspection/v11' as const,
+              artifacts: artifactInspection,
+              ...(waitInspection.waits.length === 0
+                ? {}
+                : { durableWaits: waitInspection }),
+              ...(lockInspection.length === 0 ? {} : { locks: lockInspection }),
+              ...(correctionInspection === undefined
+                ? {}
+                : { correction: correctionInspection }),
+            }
+          : correctionInspection !== undefined
+          ? {
+              ...result,
+              profile: 'woml.run-inspection/v10' as const,
+              artifacts: artifactInspection,
+              ...(waitInspection.waits.length === 0
+                ? {}
+                : { durableWaits: waitInspection }),
+              ...(lockInspection.length === 0 ? {} : { locks: lockInspection }),
+              correction: correctionInspection,
+            }
+          : lockInspection.length > 0
+            ? {
+                ...result,
+                profile: 'woml.run-inspection/v9' as const,
+                artifacts: artifactInspection,
+                ...(waitInspection.waits.length === 0
+                  ? {}
+                  : { durableWaits: waitInspection }),
+                locks: lockInspection,
+              }
+            : waitInspection.waits.length === 0
+              ? {
+                  ...result,
+                  profile: 'woml.run-inspection/v7' as const,
+                  artifacts: artifactInspection,
+                }
+              : {
+                  ...result,
+                  profile: 'woml.run-inspection/v8' as const,
+                  artifacts: artifactInspection,
+                  durableWaits: waitInspection,
+                };
       io.stdout(
         get.json
           ? `${JSON.stringify(publicResult)}\n`

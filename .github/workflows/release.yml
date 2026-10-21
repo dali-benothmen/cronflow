@@ -78,6 +78,8 @@ jobs:
           bun scripts/verify-locks-and-leases-release.ts
           bun run test:compensation-and-cleanup-authoring
           bun scripts/verify-compensation-and-cleanup-release.ts
+          bun run test:rich-plan-approvals-authoring
+          bun scripts/verify-rich-plan-approvals-release.ts
       - name: Run the final source and dependency security review
         run: |
           bun run test:final-review

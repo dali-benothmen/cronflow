@@ -1,0 +1,18 @@
+{
+  "profile": "woml.rich-plan-approvals-performance-budgets/v1",
+  "authority": "local-sqlite",
+  "budgets": {
+    "requestCreationP95Ms": 100,
+    "decisionAdmissionP95Ms": 100,
+    "projectionP95Ms": 100,
+    "renderingP95Ms": 25,
+    "tenThousandDecisionInspectionP95Ms": 500,
+    "maximumInspectionDecisions": 100,
+    "maximumInspectionApprovals": 100
+  },
+  "notes": [
+    "Rust budgets measure warm durable-store operations after SQLite startup.",
+    "Rendering measures one bounded provider-neutral review presentation in Bun.",
+    "CI uses generous cross-platform ceilings; benchmark changes require review rather than weaker identity, durability, or quorum semantics."
+  ]
+}

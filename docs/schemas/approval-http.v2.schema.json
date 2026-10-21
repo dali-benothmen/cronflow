@@ -1,0 +1,36 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://woml.dev/schemas/approval-http/v2",
+  "title": "WOML Rich Approval HTTP Contract v2",
+  "x-status": "rich-plan-approvals-rpa0-frozen",
+  "oneOf": [{ "$ref": "#/$defs/review" }, { "$ref": "#/$defs/decision" }, { "$ref": "#/$defs/result" }, { "$ref": "#/$defs/error" }],
+  "$defs": {
+    "digest": { "type": "string", "pattern": "^sha256:[a-f0-9]{64}$" },
+    "review": {
+      "type": "object", "additionalProperties": false,
+      "required": ["contract", "version", "runId", "approvalId", "requestId", "reviewDigest", "review", "authority"],
+      "properties": {
+        "contract": { "const": "woml.approval-http" }, "version": { "const": 2 },
+        "runId": { "type": "string", "minLength": 1 }, "approvalId": { "type": "string", "pattern": "^[a-z][A-Za-z0-9]*$" },
+        "requestId": { "type": "string", "pattern": "^aprreq_[A-Za-z0-9_-]+$" }, "reviewDigest": { "$ref": "#/$defs/digest" },
+        "review": { "$ref": "https://woml.dev/schemas/review-payload/v1" },
+        "authority": { "type": "object", "additionalProperties": false, "required": ["required", "received", "requiredRoles", "representedRoles"], "properties": { "required": { "type": "integer", "minimum": 1, "maximum": 20 }, "received": { "type": "integer", "minimum": 0, "maximum": 20 }, "requiredRoles": { "type": "array", "maxItems": 16, "items": { "type": "string" } }, "representedRoles": { "type": "array", "maxItems": 16, "items": { "type": "string" } } } }
+      }
+    },
+    "decision": {
+      "type": "object", "additionalProperties": false, "required": ["decision", "reviewDigest", "identity"],
+      "properties": {
+        "decision": { "enum": ["approved", "rejected"] }, "reviewDigest": { "$ref": "#/$defs/digest" },
+        "identity": { "type": "object", "additionalProperties": false, "required": ["gateway", "assertion"], "properties": { "gateway": { "type": "string", "minLength": 1, "maxLength": 128 }, "assertion": { "type": "string", "minLength": 1, "maxLength": 8192 } } }
+      }
+    },
+    "result": {
+      "type": "object", "additionalProperties": false, "required": ["contract", "version", "status", "runId", "approvalId", "requestId", "reviewDigest"],
+      "properties": { "contract": { "const": "woml.approval-http" }, "version": { "const": 2 }, "status": { "enum": ["recorded", "resolved", "already_recorded", "already_resolved"] }, "runId": { "type": "string" }, "approvalId": { "type": "string" }, "requestId": { "type": "string" }, "reviewDigest": { "$ref": "#/$defs/digest" } }
+    },
+    "error": {
+      "type": "object", "additionalProperties": false, "required": ["contract", "version", "error"],
+      "properties": { "contract": { "const": "woml.approval-http" }, "version": { "const": 2 }, "error": { "type": "object", "additionalProperties": false, "required": ["code", "message"], "properties": { "code": { "type": "string", "pattern": "^WOML_APPROVAL_[A-Z0-9_]+$" }, "message": { "type": "string", "minLength": 1, "maxLength": 1024 } } } }
+    }
+  }
+}

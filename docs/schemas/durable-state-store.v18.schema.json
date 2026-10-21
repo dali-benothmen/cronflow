@@ -1,0 +1,23 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://woml.dev/schemas/durable-state-store/v18",
+  "title": "WOML Rich Approval Durable Store Contract v18",
+  "type": "object", "additionalProperties": false,
+  "required": ["schemaVersion", "profile", "tables", "invariants", "migration", "restore"],
+  "properties": {
+    "schemaVersion": { "const": 18 },
+    "profile": { "const": "woml.durable-store/v18" },
+    "tables": {
+      "type": "object", "additionalProperties": false,
+      "required": ["approvalReviews", "approvalReviewerDecisions", "approvalArtifactPins"],
+      "properties": {
+        "approvalReviews": { "type": "array", "minItems": 12, "uniqueItems": true, "items": { "type": "string" } },
+        "approvalReviewerDecisions": { "type": "array", "minItems": 9, "uniqueItems": true, "items": { "type": "string" } },
+        "approvalArtifactPins": { "type": "array", "minItems": 5, "uniqueItems": true, "items": { "type": "string" } }
+      }
+    },
+    "invariants": { "type": "array", "minItems": 7, "uniqueItems": true, "items": { "type": "string" } },
+    "migration": { "type": "object", "additionalProperties": false, "required": ["from", "additive", "futureVersionsFailClosed"], "properties": { "from": { "const": 17 }, "additive": { "const": true }, "futureVersionsFailClosed": { "const": true } } },
+    "restore": { "type": "object", "additionalProperties": false, "required": ["preserveSnapshots", "preserveVotes", "verifyArtifactPins"], "properties": { "preserveSnapshots": { "const": true }, "preserveVotes": { "const": true }, "verifyArtifactPins": { "const": true } } }
+  }
+}

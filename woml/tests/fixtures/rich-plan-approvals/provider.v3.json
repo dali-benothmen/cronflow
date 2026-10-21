@@ -1,0 +1,16 @@
+{
+  "protocol": "woml.notification-provider-host",
+  "protocolVersion": 3,
+  "messageType": "deliver",
+  "mode": "rich-approval",
+  "invocationId": "inv_review_1",
+  "runId": "run_review_1",
+  "approvalId": "approveDeployment",
+  "requestId": "aprreq_review_1",
+  "deliveryId": "approveDeployment:notify:0:channel:0",
+  "provider": "slack",
+  "destination": "C0123456789",
+  "reviewDigest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "presentation": { "title": "Deploy payments-api to production", "summary": "Create 2, modify 4, and destroy 1 infrastructure resource.", "risk": "high", "authority": { "required": 2, "received": 0, "requiredRoles": ["production-owner", "security-owner"] } },
+  "decisionCapability": { "url": "https://runtime.example/approvals/aprreq_review_1", "token": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "expiresAt": "2026-10-21T12:30:00Z" }
+}

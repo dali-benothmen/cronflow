@@ -51,6 +51,7 @@ export {
   type WomlDefinitionPackageV12,
   type WomlDefinitionPackageV13,
   type WomlDefinitionPackageV14,
+  type WomlDefinitionPackageV15,
   type WomlDefinitionPackageReusableDefinitionV9,
   type WomlModuleResolverOptions,
   type WomlModuleServiceUsageInspection,

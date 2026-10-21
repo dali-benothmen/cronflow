@@ -5,6 +5,7 @@ import {
   type ApprovalDecision,
   type ApprovalDecisionResult,
   type ApprovalTimeoutResult,
+  type RichApprovalDecisionResult,
   type RustApprovalRuntimeOutcome,
 } from './rust-executor';
 
@@ -16,6 +17,12 @@ type WaitingOutcome = Extract<
 >;
 
 export type ApprovalWaitReason = 'decision' | 'timeout' | 'refresh';
+
+export interface VerifiedRichApprovalIdentity {
+  readonly provider: 'slack' | 'telegram' | 'discord' | 'trusted-http';
+  readonly providerAccountId: string;
+  readonly providerActorId: string;
+}
 
 export interface ApprovalServerOptions {
   readonly outcome: WaitingOutcome;
@@ -33,7 +40,29 @@ export interface ApprovalServerOptions {
     capability: string,
     decision: ApprovalDecision
   ) => ApprovalDecisionResult;
+  readonly verifyRichIdentity?: (
+    gateway: string,
+    assertion: string
+  ) => VerifiedRichApprovalIdentity;
+  readonly onRichDecision?: (request: {
+    readonly runId: string;
+    readonly approvalId: string;
+    readonly requestId: string;
+    readonly reviewDigest: string;
+    readonly decision: ApprovalDecision;
+    readonly identity: VerifiedRichApprovalIdentity;
+  }) => RichApprovalDecisionResult;
   readonly signal?: AbortSignal;
+}
+
+function isRichApproval(outcome: WaitingOutcome): boolean {
+  return outcome.approval.reviewDigest !== undefined;
+}
+
+function richApprovalPath(outcome: WaitingOutcome): string {
+  return `/api/v2/approvals/${encodeURIComponent(outcome.runId)}/${encodeURIComponent(
+    outcome.approval.requestId
+  )}`;
 }
 
 export class ApprovalServerBindError extends Error {
@@ -80,6 +109,48 @@ function approvalError(
       error: { code, message },
     },
     status
+  );
+}
+
+function richApprovalError(
+  status: number,
+  code: string,
+  message: string
+): Response {
+  return json(
+    {
+      contract: 'woml.approval-http',
+      version: 2,
+      error: { code, message },
+    },
+    status
+  );
+}
+
+function richErrorResponse(error: unknown): Response {
+  if (!(error instanceof ApprovalDecisionError)) {
+    return richApprovalError(
+      500,
+      'WOML_APPROVAL_INTERNAL',
+      'The reviewer decision could not be safely confirmed.'
+    );
+  }
+  const statuses: Partial<Record<typeof error.code, number>> = {
+    WOML_APPROVAL_BINDING_MISMATCH: 409,
+    WOML_APPROVAL_REVIEWER_UNKNOWN: 404,
+    WOML_APPROVAL_REVIEWER_FORBIDDEN: 403,
+    WOML_APPROVAL_DUPLICATE_REVIEWER: 409,
+    WOML_APPROVAL_AUTHORITY_UNAVAILABLE: 503,
+    WOML_APPROVAL_ALREADY_RESOLVED: 409,
+    WOML_APPROVAL_EXPIRED: 410,
+    WOML_APPROVAL_DECISION_CONFLICT: 409,
+  };
+  return richApprovalError(
+    statuses[error.code] ?? 500,
+    error.code,
+    error.code === 'WOML_APPROVAL_AUTHORITY_UNAVAILABLE'
+      ? 'Trusted reviewer identity is temporarily unavailable.'
+      : 'The reviewer decision was denied.'
   );
 }
 
@@ -143,6 +214,15 @@ function errorResponse(error: unknown): {
         response: approvalError(
           500,
           error.code,
+          'The approval decision could not be safely confirmed.'
+        ),
+        shouldResume: false,
+      };
+    default:
+      return {
+        response: approvalError(
+          500,
+          'WOML_APPROVAL_INTERNAL',
           'The approval decision could not be safely confirmed.'
         ),
         shouldResume: false,
@@ -224,6 +304,73 @@ function approvalPage(outcome: WaitingOutcome, nonce: string): string {
 </html>`;
 }
 
+function richApprovalPage(outcome: WaitingOutcome, nonce: string): string {
+  const review = outcome.approval.review ?? {};
+  const text = (value: unknown, fallback = '') =>
+    typeof value === 'string' ? value : fallback;
+  const rows = (value: unknown) => Array.isArray(value)
+    ? value.filter((item): item is Record<string, unknown> =>
+        typeof item === 'object' && item !== null && !Array.isArray(item)
+      )
+    : [];
+  const title = text(review.title, outcome.approval.name ?? outcome.approval.approvalId);
+  const summary = text(review.summary, outcome.approval.description ?? 'Review the proposed operation.');
+  const risk = text(review.risk, 'unknown');
+  const authority = outcome.approval.authority!;
+  const digest = outcome.approval.reviewDigest!;
+  const changes = rows(review.changes).slice(0, 10).map(change =>
+    `<li><strong>${escapeHtml(text(change.action, 'change'))}</strong> ${escapeHtml(text(change.target, 'target'))}<br><span>${escapeHtml(text(change.summary))}</span></li>`
+  ).join('');
+  const checks = rows(review.checks).slice(0, 10).map(check =>
+    `<li><strong>${escapeHtml(text(check.status, 'unknown'))}</strong> ${escapeHtml(text(check.name, 'check'))}</li>`
+  ).join('');
+  const artifacts = rows(review.artifacts).slice(0, 10).map(artifact =>
+    `<li>${escapeHtml(text(artifact.name, 'artifact'))} · ${Number.isSafeInteger(artifact.size) ? Number(artifact.size) : 0} bytes<br><code>${escapeHtml(text(artifact.sha256).slice(0, 19))}…</code></li>`
+  ).join('');
+  const section = (heading: string, content: string, total: number) => content.length === 0
+    ? ''
+    : `<section><h2>${heading}</h2><ul>${content}</ul>${total > 10 ? `<p class="meta">+${total - 10} more in operator inspection</p>` : ''}</section>`;
+  const deadline = outcome.approval.expiresAt === undefined
+    ? 'No workflow deadline'
+    : new Date(outcome.approval.expiresAt).toLocaleString();
+  return `<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>${escapeHtml(title)}</title>
+  <style nonce="${nonce}">
+    :root { color-scheme: light dark; font-family: system-ui, sans-serif; }
+    body { margin: 0; background: Canvas; color: CanvasText; }
+    main { width: min(48rem, calc(100% - 3rem)); margin: 3rem auto; }
+    header, section { padding: 1.25rem 1.5rem; border: 1px solid color-mix(in srgb, CanvasText 18%, transparent); border-radius: .8rem; margin-bottom: 1rem; }
+    h1, h2 { margin-top: 0; } h2 { font-size: 1rem; } ul { padding-left: 1.25rem; } li { margin: .65rem 0; }
+    .meta { opacity: .72; } .risk { font-weight: 700; text-transform: uppercase; }
+    code { overflow-wrap: anywhere; }
+  </style>
+</head>
+<body>
+  <main>
+    <header>
+      <p class="meta">WOML reviewed operation · ${escapeHtml(outcome.workflowId)}</p>
+      <h1>${escapeHtml(title)}</h1>
+      <p>${escapeHtml(summary)}</p>
+      <p><span class="risk">${escapeHtml(risk)} risk</span> · Quorum ${authority.received}/${authority.required}</p>
+      <p class="meta">Required roles: ${escapeHtml(authority.requiredRoles.join(', ') || 'none')}</p>
+      <p class="meta">Digest: <code>${escapeHtml(digest)}</code><br>Deadline: ${escapeHtml(deadline)}</p>
+    </header>
+    ${section('Key changes', changes, rows(review.changes).length)}
+    ${section('Checks', checks, rows(review.checks).length)}
+    ${section('Reviewed artifacts', artifacts, rows(review.artifacts).length)}
+    <section>
+      <h2>Trusted decision required</h2>
+      <p>This page is read-only. Approve or reject through a configured Slack, Telegram, Discord, or trusted identity gateway. The provider identity—not this browser page—determines reviewer roles.</p>
+    </section>
+  </main>
+</body>
+</html>`;
+}
+
 function scheduleAt(deadline: string, callback: () => void): () => void {
   let timer: ReturnType<typeof setTimeout> | undefined;
   let cancelled = false;
@@ -247,8 +394,12 @@ export async function serveApprovalAndWait(
   options: ApprovalServerOptions
 ): Promise<ApprovalWaitReason> {
   const { outcome } = options;
-  const tokenPath = `/approvals/${outcome.approval.token}`;
-  const decisionPath = `/api/v1/approvals/${outcome.approval.token}/decision`;
+  const rich = isRichApproval(outcome);
+  const tokenPath = rich ? undefined : `/approvals/${outcome.approval.token}`;
+  const decisionPath = rich
+    ? undefined
+    : `/api/v1/approvals/${outcome.approval.token}/decision`;
+  const richPath = richApprovalPath(outcome);
   const origin = `http://127.0.0.1:${options.port}`;
   let complete!: (reason: ApprovalWaitReason) => void;
   let completed = false;
@@ -292,7 +443,131 @@ export async function serveApprovalAndWait(
             return mapped.response;
           }
         }
-        if (request.method === 'GET' && url.pathname === tokenPath) {
+        if (rich && url.pathname === richPath) {
+          if (request.method === 'GET') {
+            if (request.headers.get('accept')?.includes('text/html')) {
+              const nonce = randomBytes(18).toString('base64url');
+              return new Response(richApprovalPage(outcome, nonce), {
+                status: 200,
+                headers: {
+                  ...securityHeaders('text/html; charset=utf-8'),
+                  'Content-Security-Policy': `default-src 'none'; style-src 'nonce-${nonce}'; img-src 'none'; frame-ancestors 'none'; base-uri 'none'; form-action 'none'`,
+                },
+              });
+            }
+            return json(
+              {
+                contract: 'woml.approval-http',
+                version: 2,
+                status: 'pending',
+                workflowId: outcome.workflowId,
+                runId: outcome.runId,
+                approvalId: outcome.approval.approvalId,
+                requestId: outcome.approval.requestId,
+                reviewDigest: outcome.approval.reviewDigest,
+                review: outcome.approval.review,
+                authority: outcome.approval.authority,
+                expiresAt: outcome.approval.expiresAt ?? null,
+              },
+              200
+            );
+          }
+          if (request.method !== 'POST') {
+            return richApprovalError(
+              405,
+              'WOML_APPROVAL_REQUEST_INVALID',
+              'Only GET and POST are supported for this review.'
+            );
+          }
+          if (
+            options.verifyRichIdentity === undefined ||
+            options.onRichDecision === undefined
+          ) {
+            return richApprovalError(
+              503,
+              'WOML_APPROVAL_AUTHORITY_UNAVAILABLE',
+              'No trusted reviewer identity gateway is configured.'
+            );
+          }
+          const contentType = request.headers.get('content-type');
+          if (
+            contentType?.split(';', 1)[0]?.trim().toLowerCase() !==
+            'application/json'
+          ) {
+            return richApprovalError(
+              400,
+              'WOML_APPROVAL_REQUEST_INVALID',
+              'Content-Type must be application/json.'
+            );
+          }
+          const text = await request.text();
+          if (new TextEncoder().encode(text).byteLength > 16_384) {
+            return richApprovalError(
+              413,
+              'WOML_APPROVAL_REQUEST_INVALID',
+              'The reviewer decision body is too large.'
+            );
+          }
+          let body: unknown;
+          try {
+            body = JSON.parse(text);
+          } catch {
+            return richApprovalError(
+              400,
+              'WOML_APPROVAL_REQUEST_INVALID',
+              'The reviewer decision body must be valid JSON.'
+            );
+          }
+          if (
+            typeof body !== 'object' ||
+            body === null ||
+            Array.isArray(body) ||
+            Object.keys(body).sort().join(',') !==
+              'assertion,decision,gateway,reviewDigest' ||
+            !('decision' in body) ||
+            (body.decision !== 'approved' && body.decision !== 'rejected') ||
+            !('reviewDigest' in body) ||
+            body.reviewDigest !== outcome.approval.reviewDigest ||
+            !('gateway' in body) ||
+            typeof body.gateway !== 'string' ||
+            body.gateway.length < 1 ||
+            body.gateway.length > 128 ||
+            !('assertion' in body) ||
+            typeof body.assertion !== 'string' ||
+            body.assertion.length < 1 ||
+            body.assertion.length > 12_000
+          ) {
+            return richApprovalError(
+              400,
+              'WOML_APPROVAL_REQUEST_INVALID',
+              'The reviewer decision envelope is invalid or stale.'
+            );
+          }
+          try {
+            const identity = options.verifyRichIdentity(
+              body.gateway,
+              body.assertion
+            );
+            const result = options.onRichDecision({
+              runId: outcome.runId,
+              approvalId: outcome.approval.approvalId,
+              requestId: outcome.approval.requestId,
+              reviewDigest: outcome.approval.reviewDigest!,
+              decision: body.decision,
+              identity,
+            });
+            if (
+              result.status === 'resolved' ||
+              result.status === 'already_resolved'
+            ) {
+              finishAfterResponse('decision');
+            }
+            return json(result, 200);
+          } catch (error) {
+            return richErrorResponse(error);
+          }
+        }
+        if (!rich && request.method === 'GET' && url.pathname === tokenPath) {
           const nonce = randomBytes(18).toString('base64url');
           return new Response(approvalPage(outcome, nonce), {
             status: 200,
@@ -302,7 +577,11 @@ export async function serveApprovalAndWait(
             },
           });
         }
-        if (request.method !== 'POST' || url.pathname !== decisionPath) {
+        if (
+          rich ||
+          request.method !== 'POST' ||
+          url.pathname !== decisionPath
+        ) {
           return approvalError(
             404,
             'WOML_APPROVAL_TOKEN_INVALID',
@@ -344,7 +623,7 @@ export async function serveApprovalAndWait(
         }
         try {
           const result = options.onDecision(
-            outcome.approval.token,
+            outcome.approval.token!,
             body.decision
           );
           finishAfterResponse('decision');
@@ -386,19 +665,19 @@ export async function serveApprovalAndWait(
             complete('timeout');
           }
         });
+  const credentialExpiresAt = outcome.approval.credentialExpiresAt;
   const credentialExpiresBeforeDeadline =
-    outcome.approval.expiresAt === undefined ||
-    Date.parse(outcome.approval.credentialExpiresAt) <
-      Date.parse(outcome.approval.expiresAt);
-  const stopCredentialRefresh = credentialExpiresBeforeDeadline
-    ? scheduleAt(outcome.approval.credentialExpiresAt, () =>
-        complete('refresh')
-      )
-    : () => {};
+    credentialExpiresAt !== undefined &&
+    (outcome.approval.expiresAt === undefined ||
+      Date.parse(credentialExpiresAt) < Date.parse(outcome.approval.expiresAt));
+  const stopCredentialRefresh =
+    credentialExpiresBeforeDeadline && credentialExpiresAt !== undefined
+      ? scheduleAt(credentialExpiresAt, () => complete('refresh'))
+      : () => {};
   const abort = () => complete('refresh');
   options.signal?.addEventListener('abort', abort, { once: true });
 
-  options.onListening(`${origin}${tokenPath}`);
+  options.onListening(`${origin}${rich ? richPath : tokenPath}`);
   try {
     return await waiting;
   } finally {

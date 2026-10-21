@@ -13,10 +13,10 @@ use crate::{
   COMPILED_MODEL_SCHEMA_VERSION_V15, COMPILED_MODEL_SCHEMA_VERSION_V16,
   COMPILED_MODEL_SCHEMA_VERSION_V17, COMPILED_MODEL_SCHEMA_VERSION_V18,
   COMPILED_MODEL_SCHEMA_VERSION_V19, COMPILED_MODEL_SCHEMA_VERSION_V2,
-  COMPILED_MODEL_SCHEMA_VERSION_V3, COMPILED_MODEL_SCHEMA_VERSION_V4,
-  COMPILED_MODEL_SCHEMA_VERSION_V5, COMPILED_MODEL_SCHEMA_VERSION_V6,
-  COMPILED_MODEL_SCHEMA_VERSION_V7, COMPILED_MODEL_SCHEMA_VERSION_V8,
-  COMPILED_MODEL_SCHEMA_VERSION_V9,
+  COMPILED_MODEL_SCHEMA_VERSION_V20, COMPILED_MODEL_SCHEMA_VERSION_V3,
+  COMPILED_MODEL_SCHEMA_VERSION_V4, COMPILED_MODEL_SCHEMA_VERSION_V5,
+  COMPILED_MODEL_SCHEMA_VERSION_V6, COMPILED_MODEL_SCHEMA_VERSION_V7,
+  COMPILED_MODEL_SCHEMA_VERSION_V8, COMPILED_MODEL_SCHEMA_VERSION_V9,
 };
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -586,6 +586,9 @@ pub(crate) struct ApprovalDefinition {
   pub description: Option<String>,
   pub timeout_ms: Option<u64>,
   pub on_timeout: String,
+  pub review: Option<ValueExpression>,
+  pub required_approvals: Option<u32>,
+  pub required_roles: Vec<String>,
   pub notifications: Vec<NotificationDefinition>,
 }
 
@@ -701,6 +704,7 @@ pub enum ModelIssueCode {
   UnsupportedLockExecution,
   InvalidSaga,
   UnsupportedSagaExecution,
+  UnsupportedRichApprovalExecution,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -878,6 +882,7 @@ fn inspect_reusable_contract(
       | COMPILED_MODEL_SCHEMA_VERSION_V17
       | COMPILED_MODEL_SCHEMA_VERSION_V18
       | COMPILED_MODEL_SCHEMA_VERSION_V19
+      | COMPILED_MODEL_SCHEMA_VERSION_V20
   ) || definitions.is_empty()
     || definitions.len() > 256
   {
@@ -1872,6 +1877,7 @@ fn inspect_lifecycle_contract(workflow: &CompiledWorkflowDefinition, issues: &mu
       | COMPILED_MODEL_SCHEMA_VERSION_V17
       | COMPILED_MODEL_SCHEMA_VERSION_V18
       | COMPILED_MODEL_SCHEMA_VERSION_V19
+      | COMPILED_MODEL_SCHEMA_VERSION_V20
   ) {
     issues.push(issue(
       ModelIssueCode::InvalidLifecycle,
@@ -2010,7 +2016,8 @@ fn inspect_runtime_policy_contract(
       | COMPILED_MODEL_SCHEMA_VERSION_V16
       | COMPILED_MODEL_SCHEMA_VERSION_V17
       | COMPILED_MODEL_SCHEMA_VERSION_V18
-      | COMPILED_MODEL_SCHEMA_VERSION_V19,
+      | COMPILED_MODEL_SCHEMA_VERSION_V19
+      | COMPILED_MODEL_SCHEMA_VERSION_V20,
       Some(policy),
     ) => {
       let has_policy = policy.concurrency.is_some()
@@ -2053,7 +2060,8 @@ fn inspect_runtime_policy_contract(
       | COMPILED_MODEL_SCHEMA_VERSION_V16
       | COMPILED_MODEL_SCHEMA_VERSION_V17
       | COMPILED_MODEL_SCHEMA_VERSION_V18
-      | COMPILED_MODEL_SCHEMA_VERSION_V19,
+      | COMPILED_MODEL_SCHEMA_VERSION_V19
+      | COMPILED_MODEL_SCHEMA_VERSION_V20,
       None,
     ) => issues.push(issue(
       ModelIssueCode::InvalidRuntimePolicy,
@@ -2452,7 +2460,29 @@ fn approval_notifications(
   Some(notifications)
 }
 
-fn approval_wait_inputs(node: Option<&CompiledWorkflowNode>, provider_ids: &HashSet<&str>) -> bool {
+fn valid_reviewer_role(role: &str) -> bool {
+  if role.is_empty() || role.len() > 64 {
+    return false;
+  }
+  let mut segments = role.split(['-', '_', '.']);
+  let Some(first) = segments.next() else {
+    return false;
+  };
+  let valid_segment = |segment: &str, require_letter: bool| {
+    !segment.is_empty()
+      && (!require_letter || segment.as_bytes()[0].is_ascii_lowercase())
+      && segment
+        .bytes()
+        .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit())
+  };
+  valid_segment(first, true) && segments.all(|segment| valid_segment(segment, false))
+}
+
+fn approval_wait_inputs(
+  node: Option<&CompiledWorkflowNode>,
+  provider_ids: &HashSet<&str>,
+  schema_version: u32,
+) -> bool {
   let Some(node) = node else {
     return false;
   };
@@ -2465,13 +2495,17 @@ fn approval_wait_inputs(node: Option<&CompiledWorkflowNode>, provider_ids: &Hash
   let ValueExpression::Object { fields } = &node.inputs else {
     return false;
   };
-  if !(1..=3).contains(&fields.len()) {
+  if !(1..=6).contains(&fields.len()) {
     return false;
   }
-  if fields
-    .keys()
-    .any(|key| key != "timeoutMs" && key != "onTimeout" && key != "notifications")
-  {
+  if fields.keys().any(|key| {
+    key != "timeoutMs"
+      && key != "onTimeout"
+      && key != "notifications"
+      && key != "review"
+      && key != "requiredApprovals"
+      && key != "requiredRoles"
+  }) {
     return false;
   }
   let valid_timeout = fields.get("timeoutMs").is_none_or(|value| {
@@ -2497,7 +2531,33 @@ fn approval_wait_inputs(node: Option<&CompiledWorkflowNode>, provider_ids: &Hash
         .all(|value| value.as_str().is_some_and(|text| !text.is_empty()))
   });
   let valid_notifications = approval_notifications(&node.id, fields, provider_ids).is_some();
-  valid_timeout && valid_policy && valid_metadata && valid_notifications
+  let rich_count = usize::from(fields.contains_key("review"))
+    + usize::from(fields.contains_key("requiredApprovals"))
+    + usize::from(fields.contains_key("requiredRoles"));
+  let valid_rich_review = rich_count == 0
+    || rich_count == 3
+      && schema_version == COMPILED_MODEL_SCHEMA_VERSION_V20
+      && matches!(
+        fields.get("review"),
+        Some(ValueExpression::ContextReference { path })
+          if path.len() >= 2 && path[0] == "steps" && valid_public_structural_id(&path[1])
+      )
+      && matches!(
+        fields.get("requiredApprovals"),
+        Some(ValueExpression::Literal { value })
+          if value.as_u64().is_some_and(|count| (1..=20).contains(&count))
+      )
+      && matches!(
+        fields.get("requiredRoles"),
+        Some(ValueExpression::Array { items })
+          if items.len() <= 16
+            && items.iter().all(|item| matches!(item, ValueExpression::Literal { value } if value.as_str().is_some_and(valid_reviewer_role)))
+            && items.windows(2).all(|pair| {
+              let (ValueExpression::Literal { value: left }, ValueExpression::Literal { value: right }) = (&pair[0], &pair[1]) else { return false; };
+              left.as_str().zip(right.as_str()).is_some_and(|(left, right)| left < right)
+            })
+      );
+  valid_timeout && valid_policy && valid_metadata && valid_notifications && valid_rich_review
 }
 
 fn approval_join_inputs(node: Option<&CompiledWorkflowNode>) -> bool {
@@ -2537,6 +2597,7 @@ fn inspect_approval_contract(workflow: &CompiledWorkflowDefinition, issues: &mut
     .map(|node| (node.id.as_str(), node))
     .collect();
   let mut groups: BTreeMap<&str, Vec<&CompiledWorkflowEdge>> = BTreeMap::new();
+  let mut rich_approval_count = 0usize;
 
   for edge in &workflow.graph.edges {
     if let Some(approval_id) = edge.approval_id.as_deref() {
@@ -2641,6 +2702,11 @@ fn inspect_approval_contract(workflow: &CompiledWorkflowDefinition, issues: &mut
     let has_notifications = wait.is_some_and(|node| {
       matches!(&node.inputs, ValueExpression::Object { fields } if fields.contains_key("notifications"))
     });
+    if wait.is_some_and(|node| {
+      matches!(&node.inputs, ValueExpression::Object { fields } if fields.contains_key("review"))
+    }) {
+      rich_approval_count += 1;
+    }
     if has_notifications && workflow.schema_version < COMPILED_MODEL_SCHEMA_VERSION_V5 {
       issues.push(issue(
         ModelIssueCode::InvalidNotificationGroup,
@@ -2649,7 +2715,7 @@ fn inspect_approval_contract(workflow: &CompiledWorkflowDefinition, issues: &mut
     }
 
     if !valid_public_structural_id(approval_id)
-      || !approval_wait_inputs(wait, &provider_ids)
+      || !approval_wait_inputs(wait, &provider_ids, workflow.schema_version)
       || !approval_join_inputs(join)
       || !routes_are_valid
       || edges.len() != expected_edges
@@ -2662,6 +2728,13 @@ fn inspect_approval_contract(workflow: &CompiledWorkflowDefinition, issues: &mut
         ),
       ));
     }
+  }
+
+  if workflow.schema_version == COMPILED_MODEL_SCHEMA_VERSION_V20 && rich_approval_count == 0 {
+    issues.push(issue(
+      ModelIssueCode::InvalidApprovalGroup,
+      "Compiled Model v20 requires at least one complete rich approval descriptor.",
+    ));
   }
 
   for node in &workflow.graph.nodes {
@@ -3577,10 +3650,12 @@ fn inspect_saga_contract(workflow: &CompiledWorkflowDefinition, issues: &mut Vec
     ));
     return;
   };
-  if sagas.is_empty() || sagas.len() > 64 {
+  if (workflow.schema_version == COMPILED_MODEL_SCHEMA_VERSION_V19 && sagas.is_empty())
+    || sagas.len() > 64
+  {
     issues.push(issue(
       ModelIssueCode::InvalidSaga,
-      "Compiled Model v19 requires between 1 and 64 sagas.",
+      "Compiled Model v19 requires between 1 and 64 sagas; Model v20 permits an empty inherited collection.",
     ));
     return;
   }
@@ -4243,6 +4318,29 @@ impl CompiledWorkflowDefinition {
         ValueExpression::Literal { value } => value.as_str().map(str::to_string),
         _ => None,
       })?;
+    let review = fields.get("review").cloned();
+    let required_approvals = fields
+      .get("requiredApprovals")
+      .and_then(|expression| match expression {
+        ValueExpression::Literal { value } => value.as_u64(),
+        _ => None,
+      })
+      .and_then(|value| u32::try_from(value).ok());
+    let required_roles = fields
+      .get("requiredRoles")
+      .and_then(|expression| match expression {
+        ValueExpression::Array { items } => Some(
+          items
+            .iter()
+            .filter_map(|item| match item {
+              ValueExpression::Literal { value } => value.as_str().map(str::to_string),
+              _ => None,
+            })
+            .collect(),
+        ),
+        _ => None,
+      })
+      .unwrap_or_default();
     let provider_ids = reusable_provider_ids(self);
     let notifications = approval_notifications(approval_id, fields, &provider_ids)?;
     Some(ApprovalDefinition {
@@ -4261,6 +4359,9 @@ impl CompiledWorkflowDefinition {
         .map(str::to_string),
       timeout_ms,
       on_timeout,
+      review,
+      required_approvals,
+      required_roles,
       notifications,
     })
   }
@@ -4424,6 +4525,7 @@ impl CompiledWorkflowDefinition {
         | COMPILED_MODEL_SCHEMA_VERSION_V17
         | COMPILED_MODEL_SCHEMA_VERSION_V18
         | COMPILED_MODEL_SCHEMA_VERSION_V19
+        | COMPILED_MODEL_SCHEMA_VERSION_V20
     ) {
       issues.push(issue(
         ModelIssueCode::UnsupportedSchemaVersion,
@@ -4466,7 +4568,8 @@ impl CompiledWorkflowDefinition {
         | COMPILED_MODEL_SCHEMA_VERSION_V16
         | COMPILED_MODEL_SCHEMA_VERSION_V17
         | COMPILED_MODEL_SCHEMA_VERSION_V18
-        | COMPILED_MODEL_SCHEMA_VERSION_V19,
+        | COMPILED_MODEL_SCHEMA_VERSION_V19
+        | COMPILED_MODEL_SCHEMA_VERSION_V20,
         Some(runtime),
       ) => {
         let reserved = [
@@ -4534,6 +4637,7 @@ impl CompiledWorkflowDefinition {
           | COMPILED_MODEL_SCHEMA_VERSION_V17
           | COMPILED_MODEL_SCHEMA_VERSION_V18
           | COMPILED_MODEL_SCHEMA_VERSION_V19
+          | COMPILED_MODEL_SCHEMA_VERSION_V20
       )
     {
       issues.push(issue(
@@ -4555,7 +4659,8 @@ impl CompiledWorkflowDefinition {
         | COMPILED_MODEL_SCHEMA_VERSION_V16
         | COMPILED_MODEL_SCHEMA_VERSION_V17
         | COMPILED_MODEL_SCHEMA_VERSION_V18
-        | COMPILED_MODEL_SCHEMA_VERSION_V19,
+        | COMPILED_MODEL_SCHEMA_VERSION_V19
+        | COMPILED_MODEL_SCHEMA_VERSION_V20,
         Some(communication),
       ) => {
         let valid = communication.profile_version == 1
@@ -5008,7 +5113,7 @@ impl CompiledWorkflowDefinition {
         }
         ("engine.parallel-join", ValueExpression::Object { fields }) => fields.is_empty(),
         ("engine.approval-wait", ValueExpression::Object { .. }) if allow_approval => {
-          approval_wait_inputs(Some(node), &provider_ids)
+          approval_wait_inputs(Some(node), &provider_ids, self.schema_version)
         }
         ("engine.approval-join", ValueExpression::Object { fields }) if allow_approval => {
           fields.is_empty()

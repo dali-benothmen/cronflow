@@ -1372,6 +1372,9 @@ arrives. It is not an attribute on `<step>` and is not wrapped by `<step>`.
 | `description` | No | String | Human-readable explanation of the requested decision. |
 | `timeout` | No | Duration | Maximum durable waiting period; omission means no WOML-level deadline. |
 | `on-timeout` | No | Enum | `reject` or `fail`; defaults to `fail`. |
+| `review` | No | Exact context reference | Prior durable step output matching Review Payload v1. Enables rich approval. |
+| `approvals` | No | Integer | Distinct canonical principals required (1–20); valid only with `review`. |
+| `required-roles` | No | Role list | Operator-owned roles that approving principals must collectively represent; valid only with `review`. |
 
 Like the other structural elements, `<approval>` does not accept child metadata
 tags.
@@ -1503,6 +1506,34 @@ decision arm executes. Omitting `on-timeout` uses `fail`.
 
 Timeout processing and HTTP decisions must compete through one atomic
 persistence decision so only one terminal outcome wins.
+
+### 12.4 Rich Plan Approvals
+
+A rich approval adds immutable review evidence, distinct-person quorum, and
+operator-owned role requirements. Its `review` must be an exact reference to an
+already-visible durable step output. WOML validates and canonicalizes Review
+Payload v1, verifies referenced artifacts, rejects known secrets, and binds the
+result to the workflow definition, run/request identity, quorum policy, roles,
+and Reviewer Directory version with SHA-256.
+
+```xml
+<approval
+  id="approvePlan"
+  review="{{context.steps.buildReview.review}}"
+  approvals="2"
+  required-roles="production-owner security-owner"
+  timeout="24h"
+  on-timeout="reject">
+  <when-approved>...</when-approved>
+  <when-rejected>...</when-rejected>
+</approval>
+```
+
+Rich approvals require `woml run ... --reviewer-directory <file>`. Distinct
+provider identities map to canonical principals inside Rust; workflow source
+and callbacks cannot grant roles. Read
+[Rich Plan Approvals](woml-rich-plan-approvals.md) for the payload schema,
+identity setup, quorum behavior, recovery, inspection, and examples.
 
 ## 13. `<parallel>`
 

@@ -57,10 +57,11 @@ function workflowNodes(
     ...(workflow.schemaVersion === 16 ||
     workflow.schemaVersion === 17 ||
     workflow.schemaVersion === 18 ||
-    workflow.schemaVersion === 19
+    workflow.schemaVersion === 19 ||
+    workflow.schemaVersion === 20
       ? [
           ...workflow.graph.forEach.flatMap(descriptor => descriptor.body.nodes),
-          ...(workflow.schemaVersion === 19
+          ...(workflow.schemaVersion === 19 || workflow.schemaVersion === 20
             ? workflow.graph.sagas.flatMap(saga => [
                 ...saga.compensations.map(action => action.node),
                 ...saga.cleanup.map(action => action.node),

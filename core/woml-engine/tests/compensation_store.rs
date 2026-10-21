@@ -211,14 +211,14 @@ fn future_store_versions_fail_closed() {
   let connection = Connection::open(database.path()).unwrap();
   connection
     .execute(
-      "UPDATE woml_store_metadata SET value = '18' WHERE key = 'schema_version'",
+      "UPDATE woml_store_metadata SET value = '19' WHERE key = 'schema_version'",
       [],
     )
     .unwrap();
   drop(connection);
   assert!(matches!(
     DurableEventStore::open(database.path()),
-    Err(DurableStoreError::UnsupportedStoreVersion(version)) if version == "18"
+    Err(DurableStoreError::UnsupportedStoreVersion(version)) if version == "19"
   ));
 }
 

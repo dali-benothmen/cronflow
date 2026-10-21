@@ -1,0 +1,19 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://woml.dev/schemas/notification-provider-host/v3",
+  "title": "WOML Rich Approval Notification Provider Host v3",
+  "x-status": "rich-plan-approvals-rpa0-frozen",
+  "x-forbiddenFields": ["reviewBodyMutation", "secretValues", "artifactBody", "canonicalPrincipalId", "roles"],
+  "type": "object", "additionalProperties": false,
+  "required": ["protocol", "protocolVersion", "messageType", "mode", "invocationId", "runId", "approvalId", "requestId", "deliveryId", "provider", "destination", "reviewDigest", "presentation", "decisionCapability"],
+  "properties": {
+    "protocol": { "const": "woml.notification-provider-host" }, "protocolVersion": { "const": 3 },
+    "messageType": { "const": "deliver" }, "mode": { "const": "rich-approval" },
+    "invocationId": { "type": "string", "minLength": 1, "maxLength": 320 }, "runId": { "type": "string", "minLength": 1, "maxLength": 320 },
+    "approvalId": { "type": "string", "pattern": "^[a-z][A-Za-z0-9]*$" }, "requestId": { "type": "string", "pattern": "^aprreq_[A-Za-z0-9_-]+$" },
+    "deliveryId": { "type": "string", "minLength": 1, "maxLength": 320 }, "provider": { "enum": ["slack", "telegram", "discord", "custom"] },
+    "destination": { "type": "string", "minLength": 1, "maxLength": 320 }, "reviewDigest": { "type": "string", "pattern": "^sha256:[a-f0-9]{64}$" },
+    "presentation": { "type": "object", "additionalProperties": false, "required": ["title", "summary", "risk", "authority"], "properties": { "title": { "type": "string", "maxLength": 160 }, "summary": { "type": "string", "maxLength": 2000 }, "risk": { "enum": ["low", "medium", "high", "critical"] }, "authority": { "type": "object", "additionalProperties": false, "required": ["required", "received", "requiredRoles"], "properties": { "required": { "type": "integer", "minimum": 1, "maximum": 20 }, "received": { "type": "integer", "minimum": 0, "maximum": 20 }, "requiredRoles": { "type": "array", "maxItems": 16, "items": { "type": "string" } } } } } },
+    "decisionCapability": { "type": "object", "additionalProperties": false, "required": ["url", "token", "expiresAt"], "properties": { "url": { "type": "string", "format": "uri" }, "token": { "type": "string", "minLength": 32, "maxLength": 4096 }, "expiresAt": { "type": "string", "format": "date-time" } } }
+  }
+}

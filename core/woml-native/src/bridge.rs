@@ -19,19 +19,21 @@ use woml_engine::{
   export_artifact_backup, inspect_artifact, inspect_backup_store, inspect_run_artifacts,
   last_retention_result, maintain_artifacts, observe_artifacts, plan_retention,
   prepare_restored_store, recent_run_presentations_from_store_v1, record_verified_backup,
-  recover_durable_runs, resolve_human_approval_durable, restore_artifact_backup,
-  resume_workflow_durable, resume_workflow_durable_any_outcome, resume_workflow_durable_outcome,
-  run_notification_provider_journey_with_custom, run_presentation_from_store_v1,
-  settle_approval_timeout_durable, verify_artifact_backup, ApprovalDecision,
-  ApprovalDecisionOutcome, ArtifactPolicyV1, ArtifactRuntimeMode, BackupError,
+  recover_durable_runs, resolve_human_approval_durable, resolve_rich_approval_durable,
+  restore_artifact_backup, resume_workflow_durable, resume_workflow_durable_any_outcome,
+  resume_workflow_durable_outcome, run_notification_provider_journey_with_custom,
+  run_presentation_from_store_v1, settle_approval_timeout_durable, verify_artifact_backup,
+  ApprovalDecision, ApprovalDecisionOutcome, ArtifactPolicyV1, ArtifactRuntimeMode, BackupError,
   CompiledReusableInvocation, CompiledWorkflowDefinition, CorrectionRecoveryRequestV1,
   CustomNotificationJourneyOptions, CustomProviderScriptArtifact, DurableEventStore,
   DurableStoreError, ExternalSignalAdmissionOutcome, ExternalSignalAdmissionRequest,
   ExternalTriggerAdmissionCommand, IntervalProgress, IntervalProgressReporter, LifecycleProgress,
   NotificationHostClientError, NotificationHostProcessOptions, NotificationJourneyDiagnostics,
   NotificationJourneyError, ParallelFailurePolicy, ProcessPolicyV1, ProcessRuntimeMode,
-  RetentionError, RetentionPolicyV1, RunFailure, RunPresentationError, RunStatus,
-  RuntimeExecutionError, RuntimeExecutionOptions, RuntimeModuleArtifact, RuntimePolicyProgress,
+  RetentionError, RetentionPolicyV1, ReviewerDirectoryAuthorityV1, ReviewerDirectoryV1,
+  ReviewerIdentityClaimV1, ReviewerProviderV1, RichApprovalDecisionStatus,
+  RichApprovalIdentityDecision, RunFailure, RunPresentationError, RunStatus, RuntimeExecutionError,
+  RuntimeExecutionOptions, RuntimeModuleArtifact, RuntimePolicyProgress,
   RuntimePolicyProgressReporter, ScheduleProgress, ScheduleProgressReporter,
   ScriptHostProcessOptions, SystemEngineClock, TimerWaitSettlement, TriggerAdmissionRequest,
   TriggerProgress, TriggerProgressReporter, WebhookDefinitionRegistration, WebhookRuntimeError,
@@ -232,6 +234,18 @@ struct NativeApprovalDecisionOutcome {
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
+struct NativeRichApprovalDecisionOutcome {
+  contract: &'static str,
+  version: u32,
+  status: &'static str,
+  run_id: String,
+  approval_id: String,
+  request_id: String,
+  review_digest: String,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
 struct NativeApprovalError {
   kind: &'static str,
   code: &'static str,
@@ -255,6 +269,30 @@ fn native_approval_error(error: RuntimeExecutionError) -> napi::Error {
       "WOML_APPROVAL_DECISION_CONFLICT",
       "A different human decision is already durable.",
     ),
+    RuntimeExecutionError::DurableStore(DurableStoreError::RichApprovalBindingMismatch) => (
+      "WOML_APPROVAL_BINDING_MISMATCH",
+      "The decision does not match the immutable review.",
+    ),
+    RuntimeExecutionError::DurableStore(DurableStoreError::RichApprovalReviewerConflict) => (
+      "WOML_APPROVAL_DUPLICATE_REVIEWER",
+      "The reviewer already recorded a different decision.",
+    ),
+    RuntimeExecutionError::DurableStore(DurableStoreError::ReviewerDirectory(error)) => (
+      error.code(),
+      "The reviewer identity is not authorized for this review.",
+    ),
+    RuntimeExecutionError::DurableStore(DurableStoreError::RichApprovalNotFound) => (
+      "WOML_APPROVAL_ALREADY_RESOLVED",
+      "The rich approval request is unavailable or already retired.",
+    ),
+    RuntimeExecutionError::InvalidConfiguration(message)
+      if message.starts_with("WOML_APPROVAL_AUTHORITY_UNAVAILABLE") =>
+    {
+      (
+        "WOML_APPROVAL_AUTHORITY_UNAVAILABLE",
+        "The trusted reviewer authority is unavailable.",
+      )
+    }
     _ => (
       "WOML_APPROVAL_INTERNAL",
       "The approval decision could not be safely confirmed.",
@@ -777,6 +815,8 @@ struct NativeRuntimeCapabilities {
   process: Option<NativeProcessRuntime>,
   #[serde(default)]
   artifacts: Option<NativeArtifactRuntime>,
+  #[serde(default)]
+  reviewers: Option<NativeReviewerRuntime>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -791,6 +831,12 @@ struct NativeProcessRuntime {
 struct NativeArtifactRuntime {
   mode: ArtifactRuntimeMode,
   policy: ArtifactPolicyV1,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct NativeReviewerRuntime {
+  directory: ReviewerDirectoryV1,
 }
 
 fn apply_runtime_capabilities(
@@ -809,10 +855,16 @@ fn apply_runtime_capabilities(
       .map_err(|error| napi::Error::from_reason(error.to_string())),
     None => Ok(options),
   }?;
-  match capabilities.artifacts {
+  let options = match capabilities.artifacts {
     Some(artifacts) => options
       .with_artifact_policy(artifacts.policy, artifacts.mode)
       .map_err(|error| napi::Error::from_reason(error.to_string())),
+    None => Ok(options),
+  }?;
+  match capabilities.reviewers {
+    Some(reviewers) => ReviewerDirectoryAuthorityV1::from_document(reviewers.directory)
+      .map(|authority| options.with_reviewer_directory(Arc::new(authority)))
+      .map_err(|error| napi::Error::from_reason(format!("{}: {error}", error.code()))),
     None => Ok(options),
   }
 }
@@ -1497,6 +1549,78 @@ pub fn resolve_woml_notification_approval(
     outcome,
   })
   .map_err(|error| napi::Error::from_reason(format!("Could not encode approval decision: {error}")))
+}
+
+/// Internal ingress used only after the provider host or trusted HTTP gateway
+/// has authenticated the provider account and actor. The active Reviewer
+/// Directory is runtime-owned and cannot be supplied by this decision call.
+#[napi]
+#[allow(clippy::too_many_arguments)]
+pub fn resolve_woml_rich_approval(
+  event_store_path: String,
+  run_id: String,
+  approval_id: String,
+  request_id: String,
+  review_digest: String,
+  decision: String,
+  provider: String,
+  provider_account_id: String,
+  provider_actor_id: String,
+) -> napi::Result<String> {
+  let decision = match decision.as_str() {
+    "approved" => ApprovalDecision::Approved,
+    "rejected" => ApprovalDecision::Rejected,
+    _ => {
+      return Err(napi::Error::from_reason(
+        "Approval decision must be approved or rejected.".to_string(),
+      ))
+    }
+  };
+  let provider = match provider.as_str() {
+    "slack" => ReviewerProviderV1::Slack,
+    "telegram" => ReviewerProviderV1::Telegram,
+    "discord" => ReviewerProviderV1::Discord,
+    "trusted-http" => ReviewerProviderV1::TrustedHttp,
+    _ => {
+      return Err(napi::Error::from_reason(
+        "Rich approval provider identity is unsupported.".to_string(),
+      ))
+    }
+  };
+  let outcome = resolve_rich_approval_durable(
+    PathBuf::from(event_store_path),
+    RichApprovalIdentityDecision {
+      run_id: run_id.clone(),
+      request_id: request_id.clone(),
+      review_digest: review_digest.clone(),
+      decision,
+      identity: ReviewerIdentityClaimV1 {
+        provider,
+        account_id: provider_account_id,
+        actor_id: provider_actor_id,
+      },
+      decided_at: Utc::now(),
+    },
+  )
+  .map_err(native_approval_error)?;
+  let status = match outcome.status {
+    RichApprovalDecisionStatus::Pending => "recorded",
+    RichApprovalDecisionStatus::Approved | RichApprovalDecisionStatus::Rejected => "resolved",
+    RichApprovalDecisionStatus::Idempotent => "already_recorded",
+    RichApprovalDecisionStatus::AlreadyResolved => "already_resolved",
+  };
+  serde_json::to_string(&NativeRichApprovalDecisionOutcome {
+    contract: "woml.approval-http",
+    version: 2,
+    status,
+    run_id,
+    approval_id,
+    request_id,
+    review_digest,
+  })
+  .map_err(|error| {
+    napi::Error::from_reason(format!("Could not encode rich approval decision: {error}"))
+  })
 }
 
 #[napi]
@@ -2588,7 +2712,13 @@ pub fn inspect_woml_run_v2(event_store_path: String, run_id: String) -> napi::Re
   let workflow = store
     .definition(&binding.definition_hash)
     .map_err(|error| native_run_management_error("WOML_RUN_INSPECTION_FAILED", error))?;
-  let inspection = if workflow.schema_version >= 16 {
+  let inspection = if workflow.schema_version >= 20 {
+    serde_json::to_value(
+      store
+        .inspect_run_v11(&run_id)
+        .map_err(|error| native_run_management_error("WOML_RUN_INSPECTION_FAILED", error))?,
+    )
+  } else if workflow.schema_version >= 16 {
     serde_json::to_value(
       store
         .inspect_run_v6(&run_id)

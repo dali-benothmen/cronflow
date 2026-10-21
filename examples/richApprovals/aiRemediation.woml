@@ -1,0 +1,70 @@
+<woml>
+  <workflow id="reviewed-ai-remediation" name="Reviewed AI remediation" description="Turns an incident diagnosis into bounded evidence before any repair command can run." version="1.0.0">
+    <triggers><manual id="start" /></triggers>
+    <steps>
+      <step id="diagnose" name="Collect deployment health">
+        <script>
+          return await services.process.run({
+            executable: "kubectl",
+            args: ["get", "deployment", "payments-api", "--namespace", "production", "-o", "json"],
+            timeout: "30s",
+            output: { stdout: "capture", stderr: "capture", maxBytes: 131072 }
+          }, { name: "kubectl-read" });
+        </script>
+      </step>
+
+      <step id="propose" name="Build a reviewable remediation">
+        <script>
+          // Replace this deterministic proposal with your preferred LLM module.
+          // The approval authority still validates and binds the returned object.
+          const deployment = JSON.parse(context.steps.diagnose.stdout);
+          return {
+            review: {
+              title: "Restart payments-api after failed rollout",
+              summary: "The deployment has unavailable replicas. Restart it and wait for a healthy rollout.",
+              risk: "medium",
+              facts: [
+                { label: "Available replicas", value: String(deployment.status?.availableReplicas ?? 0) },
+                { label: "Desired replicas", value: String(deployment.spec?.replicas ?? 0) }
+              ],
+              changes: [
+                { action: "update", target: "deployment/payments-api", summary: "Trigger one Kubernetes rollout restart in namespace production." }
+              ],
+              checks: [
+                { name: "Deployment evidence collected", status: context.steps.diagnose.exitCode === 0 ? "passed" : "failed" }
+              ],
+              artifacts: []
+            }
+          };
+        </script>
+      </step>
+
+      <approval id="approveRemediation" name="Approve remediation" description="The operator sees the proposed effect before WOML executes it." review="{{context.steps.propose.review}}" approvals="1" required-roles="incident-commander" timeout="30m" on-timeout="reject">
+        <when-approved>
+          <step id="restart" name="Restart and verify the deployment">
+            <script>
+              const restart = await services.process.run({
+                executable: "kubectl",
+                args: ["rollout", "restart", "deployment/payments-api", "--namespace", "production"],
+                timeout: "30s",
+                output: { stdout: "capture", stderr: "capture", maxBytes: 32768 }
+              }, { name: "kubectl-remediate" });
+              const verify = await services.process.run({
+                executable: "kubectl",
+                args: ["rollout", "status", "deployment/payments-api", "--namespace", "production", "--timeout=120s"],
+                timeout: "130s",
+                output: { stdout: "capture", stderr: "capture", maxBytes: 32768 }
+              }, { name: "kubectl-read" });
+              return { restart, verify };
+            </script>
+          </step>
+        </when-approved>
+        <when-rejected>
+          <step id="declined"><script>return { remediated: false, reason: "review-rejected" };</script></step>
+        </when-rejected>
+      </approval>
+
+      <step id="result"><script>return context.steps.approveRemediation;</script></step>
+    </steps>
+  </workflow>
+</woml>

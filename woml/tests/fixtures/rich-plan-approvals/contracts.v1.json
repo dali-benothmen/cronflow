@@ -1,0 +1,29 @@
+{
+  "profile": "woml.rich-plan-approvals/v1",
+  "modelVersion": 20,
+  "eventVersion": 19,
+  "storeVersion": 18,
+  "httpVersion": 2,
+  "providerHostVersion": 3,
+  "inspectionVersion": 2,
+  "limits": {
+    "reviewBytes": 65536,
+    "reviewNesting": 8,
+    "approvals": 20,
+    "requiredRoles": 16,
+    "facts": 32,
+    "changes": 100,
+    "checks": 64,
+    "artifacts": 32,
+    "inspectionDecisions": 100
+  },
+  "quorum": {
+    "identity": "distinct-canonical-principal",
+    "approval": "count-and-all-required-roles",
+    "rejection": "first-eligible-rejection",
+    "duplicate": "idempotent-same-decision-conflict-on-change"
+  },
+  "canonicalization": "RFC8785",
+  "binding": ["definition-hash", "workflow-id-and-version", "run-id", "approval-id", "request-id", "review-snapshot", "ordered-artifact-digests", "authority-policy", "reviewer-directory-version"],
+  "unsupported": ["weighted-votes", "majority-rules", "workflow-owned-roles", "mutable-reviews", "raw-artifact-bodies", "arbitrary-html", "token-only-rich-quorum"]
+}

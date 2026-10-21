@@ -1,0 +1,37 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://woml.dev/schemas/reviewer-directory/v1",
+  "title": "WOML Reviewer Directory v1",
+  "description": "Operator-owned mapping from authenticated provider identities to canonical principals and reviewer roles.",
+  "x-status": "rich-plan-approvals-rpa0-frozen",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["profile", "version", "principals"],
+  "properties": {
+    "profile": { "const": "woml.reviewer-directory/v1" },
+    "version": { "type": "string", "minLength": 1, "maxLength": 128 },
+    "principals": {
+      "type": "array", "minItems": 1, "maxItems": 10000,
+      "items": {
+        "type": "object", "additionalProperties": false,
+        "required": ["id", "roles", "identities"],
+        "properties": {
+          "id": { "type": "string", "pattern": "^[a-z][a-z0-9]*(?:[-_.:][a-z0-9]+)*$", "maxLength": 128 },
+          "roles": { "type": "array", "minItems": 1, "maxItems": 64, "uniqueItems": true, "items": { "type": "string", "pattern": "^[a-z][a-z0-9]*(?:[-_.][a-z0-9]+)*$", "maxLength": 64 } },
+          "identities": {
+            "type": "array", "minItems": 1, "maxItems": 32,
+            "items": {
+              "type": "object", "additionalProperties": false,
+              "required": ["provider", "accountId", "actorId"],
+              "properties": {
+                "provider": { "enum": ["slack", "telegram", "discord", "trusted-http"] },
+                "accountId": { "type": "string", "minLength": 1, "maxLength": 256 },
+                "actorId": { "type": "string", "minLength": 1, "maxLength": 256 }
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}

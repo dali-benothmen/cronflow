@@ -1,0 +1,51 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://woml.dev/schemas/review-payload/v1",
+  "title": "WOML Review Payload v1",
+  "description": "Bounded plain structured evidence presented to human reviewers. Serialized UTF-8 JSON is additionally limited to 65536 bytes by the Rust authority.",
+  "x-status": "rich-plan-approvals-rpa0-frozen",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["title", "summary", "risk"],
+  "properties": {
+    "title": { "type": "string", "minLength": 1, "maxLength": 160, "x-maxUtf8Bytes": 640 },
+    "summary": { "type": "string", "minLength": 1, "maxLength": 2000, "x-maxUtf8Bytes": 8000 },
+    "risk": { "enum": ["low", "medium", "high", "critical"] },
+    "facts": {
+      "type": "array", "maxItems": 32,
+      "items": {
+        "type": "object", "additionalProperties": false, "required": ["label", "value"],
+        "properties": {
+          "label": { "type": "string", "minLength": 1, "maxLength": 64 },
+          "value": { "type": "string", "minLength": 1, "maxLength": 512 }
+        }
+      }
+    },
+    "changes": {
+      "type": "array", "maxItems": 100,
+      "items": {
+        "type": "object", "additionalProperties": false, "required": ["action", "target", "summary"],
+        "properties": {
+          "action": { "enum": ["create", "update", "replace", "destroy", "no-op"] },
+          "target": { "type": "string", "minLength": 1, "maxLength": 256 },
+          "summary": { "type": "string", "minLength": 1, "maxLength": 1000 }
+        }
+      }
+    },
+    "checks": {
+      "type": "array", "maxItems": 64,
+      "items": {
+        "type": "object", "additionalProperties": false, "required": ["name", "status"],
+        "properties": {
+          "name": { "type": "string", "minLength": 1, "maxLength": 128 },
+          "status": { "enum": ["passed", "failed", "warning", "skipped", "unknown"] },
+          "explanation": { "type": "string", "minLength": 1, "maxLength": 1000 }
+        }
+      }
+    },
+    "artifacts": {
+      "type": "array", "maxItems": 32,
+      "items": { "$ref": "https://woml.dev/schemas/artifact-reference/v1" }
+    }
+  }
+}

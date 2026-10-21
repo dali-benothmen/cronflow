@@ -28,6 +28,7 @@ import {
   type CompiledWorkflowDefinitionV17,
   type CompiledWorkflowDefinitionV18,
   type CompiledWorkflowDefinitionV19,
+  type CompiledWorkflowDefinitionV20,
   type CompiledWorkflowEdge,
   type CompiledWorkflowGraph,
   type CompiledWorkflowGraphV13,
@@ -35,6 +36,7 @@ import {
   type CompiledWorkflowGraphV17,
   type CompiledWorkflowGraphV18,
   type CompiledWorkflowGraphV19,
+  type CompiledWorkflowGraphV20,
   type CompiledCorrectiveActionV1,
   type CompiledCompensationV1,
   type CompiledSagaV1,
@@ -214,6 +216,9 @@ interface ValidatedApproval {
   readonly metadata?: Readonly<Record<string, JsonValue>>;
   readonly timeoutMs?: number;
   readonly onTimeout: 'reject' | 'fail';
+  readonly review?: ValidatedReference;
+  readonly requiredApprovals?: number;
+  readonly requiredRoles?: readonly string[];
   readonly notifications: readonly ValidatedNotificationDelivery[];
   readonly approvedItems: readonly ValidatedFlowItem[];
   readonly rejectedItems: readonly ValidatedFlowItem[];
@@ -678,7 +683,16 @@ const elementProfiles: Readonly<Record<string, ElementProfile>> = {
   otherwise: { attributes: new Set() },
   result: { attributes: new Set(['value']) },
   approval: {
-    attributes: new Set(['id', 'name', 'description', 'timeout', 'on-timeout']),
+    attributes: new Set([
+      'id',
+      'name',
+      'description',
+      'timeout',
+      'on-timeout',
+      'review',
+      'approvals',
+      'required-roles',
+    ]),
   },
   notify: { attributes: new Set() },
   slack: {
@@ -3011,6 +3025,107 @@ function validateApproval(
     );
   }
 
+  const reviewAttribute = approval.attributes.review;
+  const approvalsAttribute = approval.attributes.approvals;
+  const requiredRolesAttribute = approval.attributes['required-roles'];
+  if (
+    reviewAttribute === undefined &&
+    (approvalsAttribute !== undefined || requiredRolesAttribute !== undefined)
+  ) {
+    const attribute = approvalsAttribute ?? requiredRolesAttribute!;
+    failValidation(
+      document,
+      'WOML_APPROVAL_REVIEW_REQUIRED',
+      `Attribute "${attribute.name}" requires a rich approval review reference.`,
+      attribute.nameSpan,
+      'Add review="{{context.steps.buildReview.review}}" or remove the rich approval policy attributes.'
+    );
+  }
+
+  let review: ValidatedReference | undefined;
+  let requiredApprovals: number | undefined;
+  let requiredRoles: readonly string[] | undefined;
+  if (reviewAttribute !== undefined) {
+    review = parseExactReference(document, reviewAttribute, {
+      invalidCode: 'WOML_APPROVAL_REVIEW_REFERENCE_INVALID',
+      invalidMessage:
+        'Approval review must contain exactly one reference to an earlier durable step output.',
+      invalidHint: 'Example: {{context.steps.buildReview.review}}',
+    });
+    if (review.path[0] !== 'steps' || review.structuralId === undefined) {
+      failValidation(
+        document,
+        'WOML_APPROVAL_REVIEW_REFERENCE_INVALID',
+        'Approval review must reference an earlier durable context.steps output.',
+        reviewAttribute.valueSpan,
+        'Secrets, services, trigger payloads, iteration values, literals, and dynamic expressions cannot become immutable review evidence.'
+      );
+    }
+
+    const approvalsText = approvalsAttribute?.value ?? '1';
+    if (!/^[1-9][0-9]*$/.test(approvalsText)) {
+      failValidation(
+        document,
+        'WOML_APPROVAL_COUNT_INVALID',
+        'Approval count must be a positive base-10 integer.',
+        approvalsAttribute?.valueSpan ?? reviewAttribute.valueSpan,
+        'Use approvals="1" through approvals="20".'
+      );
+    }
+    requiredApprovals = Number(approvalsText);
+    if (!Number.isSafeInteger(requiredApprovals) || requiredApprovals > 20) {
+      failValidation(
+        document,
+        'WOML_APPROVAL_COUNT_INVALID',
+        `Approval count must be between 1 and 20; found "${approvalsText}".`,
+        approvalsAttribute?.valueSpan ?? reviewAttribute.valueSpan
+      );
+    }
+
+    const roles =
+      requiredRolesAttribute === undefined
+        ? []
+        : requiredRolesAttribute.value.trim().split(/\s+/).filter(Boolean);
+    if (requiredRolesAttribute !== undefined && roles.length === 0) {
+      failValidation(
+        document,
+        'WOML_APPROVAL_ROLE_INVALID',
+        'Required reviewer roles must be a non-empty space-separated list.',
+        requiredRolesAttribute.valueSpan
+      );
+    }
+    if (roles.length > 16) {
+      failValidation(
+        document,
+        'WOML_APPROVAL_ROLE_INVALID',
+        'A rich approval may require at most 16 reviewer roles.',
+        requiredRolesAttribute!.valueSpan
+      );
+    }
+    const rolePattern = /^[a-z][a-z0-9]*(?:[-_.][a-z0-9]+)*$/;
+    const invalidRole = roles.find(
+      role => role.length > 64 || !rolePattern.test(role)
+    );
+    if (invalidRole !== undefined) {
+      failValidation(
+        document,
+        'WOML_APPROVAL_ROLE_INVALID',
+        `Reviewer role "${invalidRole}" is invalid.`,
+        requiredRolesAttribute!.valueSpan,
+        'Use a lowercase role such as production-owner or security_owner (maximum 64 characters).'
+      );
+    }
+    if (new Set(roles).size !== roles.length) {
+      failValidation(
+        document,
+        'WOML_APPROVAL_ROLE_DUPLICATE',
+        'Required reviewer roles must be unique.',
+        requiredRolesAttribute!.valueSpan
+      );
+    }
+    requiredRoles = [...roles].sort();
+  }
+
   return {
     kind: 'approval',
     id,
@@ -3018,6 +3133,9 @@ function validateApproval(
     metadata: flowItemMetadata(document, approval),
     timeoutMs: approvalTimeoutMs(document, approval),
     onTimeout,
+    ...(review === undefined ? {} : { review }),
+    ...(requiredApprovals === undefined ? {} : { requiredApprovals }),
+    ...(requiredRoles === undefined ? {} : { requiredRoles }),
     notifications:
       notify.length === 0 ? [] : validateNotify(document, notify[0], id),
     approvedItems: validateApprovalArm(
@@ -3866,6 +3984,36 @@ function collectValidatedNotifications(
     }
   }
   return deliveries;
+}
+
+function collectValidatedApprovals(
+  items: readonly ValidatedFlowItem[],
+  approvals: ValidatedApproval[] = []
+): readonly ValidatedApproval[] {
+  for (const item of items) {
+    if (item.kind === 'approval') {
+      approvals.push(item);
+      collectValidatedApprovals(item.approvedItems, approvals);
+      collectValidatedApprovals(item.rejectedItems, approvals);
+    } else if (
+      item.kind === 'forEach' ||
+      item.kind === 'lock' ||
+      item.kind === 'saga'
+    ) {
+      collectValidatedApprovals(item.items, approvals);
+    } else if (
+      item.kind === 'branch' ||
+      item.kind === 'controlChoice' ||
+      item.kind === 'switch'
+    ) {
+      for (const arm of item.arms) collectValidatedApprovals(arm.items, approvals);
+    } else if (item.kind === 'fork') {
+      for (const branch of item.branches) {
+        collectValidatedApprovals(branch.items, approvals);
+      }
+    }
+  }
+  return approvals;
 }
 
 export interface WomlModuleUsageInspection {
@@ -5963,6 +6111,15 @@ function validateReferenceAvailability(
     }
 
     if (item.kind === 'approval') {
+      if (item.review !== undefined) {
+        assertReferenceAvailable(
+          document,
+          item.review,
+          allIds,
+          available,
+          invisible
+        );
+      }
       const armInput = new Set(available);
       armInput.add(item.id);
       validateReferenceAvailability(
@@ -6679,6 +6836,25 @@ function lowerApproval(approval: ValidatedApproval): LoweredFlowFragment {
           },
         }),
     onTimeout: { kind: 'literal' as const, value: approval.onTimeout },
+    ...(approval.review === undefined
+      ? {}
+      : {
+          review: {
+            kind: 'contextReference' as const,
+            path: approval.review.path,
+          },
+          requiredApprovals: {
+            kind: 'literal' as const,
+            value: approval.requiredApprovals!,
+          },
+          requiredRoles: {
+            kind: 'array' as const,
+            items: approval.requiredRoles!.map(role => ({
+              kind: 'literal' as const,
+              value: role,
+            })),
+          },
+        }),
     ...(approval.notifications.length === 0
       ? {}
       : {
@@ -8898,7 +9074,10 @@ function compileValidatedWoml(
     usesTelegramMessaging ||
     usesDiscordMessaging ||
     usesWhatsAppMessaging;
-  const usesModelV19 = flow.firstSaga !== undefined;
+  const usesModelV20 = collectValidatedApprovals(flow.items).some(
+    approval => approval.review !== undefined
+  );
+  const usesModelV19 = usesModelV20 || flow.firstSaga !== undefined;
   const usesModelV18 = usesModelV19 || flow.firstLock !== undefined;
   const usesModelV17 = usesModelV18 || flow.firstWait !== undefined;
   const usesModelV16 = usesModelV17 || flow.firstForEach !== undefined;
@@ -9010,7 +9189,7 @@ function compileValidatedWoml(
     failCompile(
       document,
       'WOML_WORKFLOW_RESULT_REQUIRED',
-      `This Model v${usesModelV19 ? '19' : usesModelV18 ? '18' : usesModelV17 ? '17' : usesModelV16 ? '16' : usesModelV15 ? '15' : usesModelV14 ? '14' : '13'} workflow has no deterministic value-producing item on its main route.`,
+      `This Model v${usesModelV20 ? '20' : usesModelV19 ? '19' : usesModelV18 ? '18' : usesModelV17 ? '17' : usesModelV16 ? '16' : usesModelV15 ? '15' : usesModelV14 ? '14' : '13'} workflow has no deterministic value-producing item on its main route.`,
       source.openTagSpan,
       'Add a main-route <step>, durable wait, result-producing <choose id="..."> or <switch id="...">, or <approval> before the terminal control structure.'
     );
@@ -9084,6 +9263,27 @@ function compileValidatedWoml(
           nodes,
           edges: lowered.edges,
         } satisfies CompiledWorkflowGraph)
+      : usesModelV20
+        ? ({
+            ...loweredV13.graph,
+            nodes: withScriptRuntimeBindings(
+              loweredV13.graph.nodes,
+              scriptAnalyses
+            ),
+            forEach: loweredV13.forEach.map(loop => ({
+              ...loop,
+              body: {
+                ...loop.body,
+                nodes: withScriptRuntimeBindings(
+                  loop.body.nodes,
+                  scriptAnalyses
+                ),
+              },
+            })),
+            waits: loweredV13.waits,
+            locks: loweredV13.locks,
+            sagas: loweredV13.sagas,
+          } satisfies CompiledWorkflowGraphV20)
       : usesModelV19
         ? ({
             ...loweredV13.graph,
@@ -9312,7 +9512,18 @@ function compileValidatedWoml(
       : { runtimePolicy: runtimePolicy.value }),
   };
   const compiled: CompiledWorkflowDefinition = usesStructuredGraph
-    ? usesModelV19
+    ? usesModelV20
+      ? ({
+          schemaVersion: 20,
+          ...definition,
+          graph: baseGraph as CompiledWorkflowGraphV20,
+          runtimePolicy: runtimePolicy?.value ?? {
+            profileVersion: 1,
+            concurrency: 1,
+          },
+          ...(communication === undefined ? {} : { communication }),
+        } satisfies CompiledWorkflowDefinitionV20)
+    : usesModelV19
       ? ({
           schemaVersion: 19,
           ...definition,
@@ -9442,7 +9653,8 @@ export function compilePreparedReusableWorkflow(
   | CompiledWorkflowDefinitionV16
   | CompiledWorkflowDefinitionV17
   | CompiledWorkflowDefinitionV18
-  | CompiledWorkflowDefinitionV19 {
+  | CompiledWorkflowDefinitionV19
+  | CompiledWorkflowDefinitionV20 {
   const compiled = compileValidatedWoml(prepared.document, moduleRuntime, true);
   if (
     compiled.schemaVersion !== 14 &&
@@ -9450,10 +9662,11 @@ export function compilePreparedReusableWorkflow(
     compiled.schemaVersion !== 16 &&
     compiled.schemaVersion !== 17 &&
     compiled.schemaVersion !== 18 &&
-    compiled.schemaVersion !== 19
+    compiled.schemaVersion !== 19 &&
+    compiled.schemaVersion !== 20
   ) {
     throw new Error(
-      'reusable-step lowering did not produce Model v14, v15, v16, v17, v18, or v19'
+      'reusable-step lowering did not produce Model v14, v15, v16, v17, v18, v19, or v20'
     );
   }
   const invocationsByNode = new Map(
@@ -9492,7 +9705,8 @@ export function compilePreparedReusableWorkflow(
     compiled.schemaVersion === 16 ||
     compiled.schemaVersion === 17 ||
     compiled.schemaVersion === 18 ||
-    compiled.schemaVersion === 19
+    compiled.schemaVersion === 19 ||
+    compiled.schemaVersion === 20
       ? compiled.graph.forEach
       : undefined;
   const forEach = compiledForEach?.map(loop => ({
@@ -9698,7 +9912,8 @@ export function compilePreparedReusableWorkflow(
     | CompiledWorkflowDefinitionV16
     | CompiledWorkflowDefinitionV17
     | CompiledWorkflowDefinitionV18
-    | CompiledWorkflowDefinitionV19;
+    | CompiledWorkflowDefinitionV19
+    | CompiledWorkflowDefinitionV20;
 }
 
 export function compileWoml(
@@ -9727,7 +9942,8 @@ export function compileWomlWithModules(
   | CompiledWorkflowDefinitionV16
   | CompiledWorkflowDefinitionV17
   | CompiledWorkflowDefinitionV18
-  | CompiledWorkflowDefinitionV19 {
+  | CompiledWorkflowDefinitionV19
+  | CompiledWorkflowDefinitionV20 {
   const compiled = compileValidatedWoml(
     document,
     moduleRuntime,
@@ -9746,10 +9962,11 @@ export function compileWomlWithModules(
     compiled.schemaVersion !== 16 &&
     compiled.schemaVersion !== 17 &&
     compiled.schemaVersion !== 18 &&
-    compiled.schemaVersion !== 19
+    compiled.schemaVersion !== 19 &&
+    compiled.schemaVersion !== 20
   ) {
     throw new Error(
-      'module compilation did not produce Model v9, v10, v11, v12, v13, v14, v15, v16, v17, v18, or v19'
+      'module compilation did not produce Model v9, v10, v11, v12, v13, v14, v15, v16, v17, v18, v19, or v20'
     );
   }
   return compiled;

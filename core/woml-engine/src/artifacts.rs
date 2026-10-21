@@ -1540,6 +1540,22 @@ impl ManagedArtifactStore {
     };
     let _ = store.cleanup_materialization(invocation_id);
   }
+
+  /// Verifies an artifact reference for an immutable rich-approval review.
+  /// This intentionally exposes metadata only; artifact bytes never enter the
+  /// review event or provider payload.
+  pub fn verify_review_reference(
+    &self,
+    run_id: &str,
+    supplied: &ArtifactReferenceV1,
+  ) -> Result<ArtifactReferenceV1, CapabilityFailure> {
+    let store = self.configured()?;
+    let artifact = store.authorize_reference(run_id, supplied)?;
+    store
+      .backend
+      .verify(&artifact.reference.sha256, artifact.reference.size)?;
+    Ok(artifact.reference)
+  }
 }
 
 struct ArtifactStore {
@@ -3538,6 +3554,10 @@ fn artifact_retention_candidates(
          ON retention.artifact_id = a.artifact_id
        WHERE retention.expires_at <= ?1
          AND a.status IN ('available','quarantined','expired','corrupt')
+         AND NOT EXISTS(
+           SELECT 1 FROM woml_approval_artifact_pins AS pins
+           WHERE pins.artifact_id = a.artifact_id AND pins.released_at IS NULL
+         )
          AND NOT EXISTS(
            SELECT 1
            FROM woml_artifact_access AS access

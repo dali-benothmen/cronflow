@@ -1,0 +1,10 @@
+{
+  "contract": "woml.approval-http",
+  "version": 2,
+  "runId": "run_review_1",
+  "approvalId": "approveDeployment",
+  "requestId": "aprreq_review_1",
+  "reviewDigest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "review": { "title": "Deploy payments-api to production", "summary": "Create 2, modify 4, and destroy 1 infrastructure resource.", "risk": "high", "artifacts": [] },
+  "authority": { "required": 2, "received": 1, "requiredRoles": ["production-owner", "security-owner"], "representedRoles": ["production-owner"] }
+}

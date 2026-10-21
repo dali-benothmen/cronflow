@@ -332,6 +332,8 @@ use `services.locks.withLease()` only for one short script-local callback.
 
 `<approval>` requires `id`; optional `name`, `description`, `timeout`, and `on-timeout="reject|fail"` (default `fail`). `on-timeout` requires `timeout`. Child order is optional `<notify>`, required `<when-approved>`, required `<when-rejected>`. Decision arms may be empty or contain supported flow items. The durable decision becomes `context.steps.<approvalId>`.
 
+For an immutable reviewed operation, add `review="{{context.steps.<priorStep>.<field>}}"`, `approvals="1..20"`, and optional `required-roles="role-a role-b"`. The review must be a prior durable Review Payload v1 object with `title`, `summary`, `risk`, and optional bounded `facts`, `changes`, `checks`, and Durable Artifact references. Never invent reviewer roles in WOML; tell the operator to pass `--reviewer-directory <file>`.
+
 `<notify>` contains one or more built-in or imported custom notification tags. Provider attributes differ between approvals and lifecycle notifications; read [providers.md](providers.md).
 
 ### `<saga>`, `<compensate>`, and `<cleanup>`

@@ -1,0 +1,63 @@
+<woml>
+  <workflow id="production-deployment" name="Review production deployment" version="1.0.0">
+    <triggers>
+      <manual id="start" />
+    </triggers>
+
+    <steps>
+      <step id="buildReview" name="Build immutable review evidence">
+        <script>
+          return {
+            review: {
+              title: "Deploy payments-api to production",
+              summary: "Create 2, modify 4, and destroy 1 infrastructure resource.",
+              risk: "high",
+              facts: [
+                { label: "Environment", value: "production" },
+                { label: "Estimated monthly change", value: "+$84" }
+              ],
+              changes: [
+                {
+                  action: "destroy",
+                  target: "aws_db_instance.legacy",
+                  summary: "Remove the retired reporting database"
+                }
+              ],
+              checks: [
+                { name: "Unit tests", status: "passed" },
+                { name: "Backup verified", status: "passed" }
+              ],
+              artifacts: []
+            }
+          };
+        </script>
+      </step>
+
+      <approval
+        id="approveDeployment"
+        name="Approve production deployment"
+        description="Two trusted reviewers must authorize the exact reviewed plan."
+        review="{{context.steps.buildReview.review}}"
+        approvals="2"
+        required-roles="security-owner production-owner"
+        timeout="30m"
+        on-timeout="reject"
+      >
+        <when-approved>
+          <step id="recordApproval">
+            <script>return { approved: true };</script>
+          </step>
+        </when-approved>
+        <when-rejected>
+          <step id="recordRejection">
+            <script>return { approved: false };</script>
+          </step>
+        </when-rejected>
+      </approval>
+
+      <step id="summary">
+        <script>return context.steps.approveDeployment;</script>
+      </step>
+    </steps>
+  </workflow>
+</woml>

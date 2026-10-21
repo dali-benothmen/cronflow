@@ -183,7 +183,9 @@ Sequential steps advance by DAG edges. Other structures remain engine-owned:
 - `<fork>` runs independent multi-step branches and releases the continuation
   according to its selected join set;
 - `<approval>` persists a wait before notifying reviewers and resumes only from
-  a committed decision or timeout; and
+  a committed decision or timeout. Rich Plan Approvals additionally bind a
+  validated review, artifact digests, Reviewer Directory version, distinct
+  principals, and required-role quorum inside the Rust authority; and
 - lifecycle actions run at versioned workflow/step event boundaries.
 
 The workflow settlement node prevents a run from reporting success while owned

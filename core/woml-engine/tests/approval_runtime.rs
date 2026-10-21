@@ -134,8 +134,12 @@ async fn approval_first_pauses_without_starting_bun_or_any_route_attempt() {
     Some("Approve the prepared article for publication")
   );
   assert_eq!(approval.on_timeout, ApprovalTimeoutPolicy::Reject);
-  assert!(approval.token.starts_with("apr_"));
-  assert_eq!(approval.expires_at, Some(approval.credential_expires_at));
+  assert!(approval
+    .token
+    .as_deref()
+    .expect("basic approval token")
+    .starts_with("apr_"));
+  assert_eq!(approval.expires_at, approval.credential_expires_at);
 
   let store = DurableEventStore::open(database.path()).unwrap();
   let events = store.events(&run_id).unwrap();
@@ -162,7 +166,10 @@ async fn approval_first_pauses_without_starting_bun_or_any_route_attempt() {
     1
   );
   store
-    .verify_approval_token(&approval.token, Utc::now())
+    .verify_approval_token(
+      approval.token.as_deref().expect("basic approval token"),
+      Utc::now(),
+    )
     .unwrap();
 
   let encoded = serde_json::to_value(WorkflowRuntimeOutcome::Waiting {
@@ -206,7 +213,7 @@ async fn terminal_approval_with_empty_arms_is_a_valid_waiting_boundary() {
 
   resolve_human_approval_durable(
     database.path().to_path_buf(),
-    &approval.token,
+    approval.token.as_deref().expect("basic approval token"),
     ApprovalDecision::Approved,
     &SystemEngineClock,
   )

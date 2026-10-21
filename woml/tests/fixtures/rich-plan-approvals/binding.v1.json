@@ -1,0 +1,24 @@
+{
+  "profile": "woml.rich-plan-approval-binding/v1",
+  "binding": {
+    "definitionHash": "sha256:2020202020202020202020202020202020202020202020202020202020202020",
+    "workflowId": "production-deployment",
+    "workflowVersion": "1.0.0",
+    "runId": "run_rich_review_1",
+    "approvalId": "approveDeployment",
+    "requestId": "aprreq_rich_review_1",
+    "review": {
+      "title": "Deploy payments-api to production",
+      "summary": "Create 2, modify 4, and destroy 1 infrastructure resource.",
+      "risk": "high",
+      "facts": [{ "label": "Environment", "value": "production" }],
+      "changes": [{ "action": "destroy", "target": "aws_db_instance.legacy", "summary": "Remove the retired reporting database" }],
+      "checks": [{ "name": "Backup verified", "status": "passed" }]
+    },
+    "artifacts": [],
+    "requiredApprovals": 2,
+    "requiredRoles": ["production-owner", "security-owner"],
+    "directoryVersion": "directory-2026-10-21"
+  },
+  "digest": "sha256:5a4e39d9f8566b83e62dfcfe0c68b1b454e0acdc8ff41c727c719b8b1d24a523"
+}

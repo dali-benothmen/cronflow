@@ -245,7 +245,8 @@ function selectedRuns(snapshot: InspectorSnapshotV1, state: InspectorRenderState
 function runLines(
   snapshot: InspectorSnapshotV1,
   state: InspectorRenderState,
-  width: number
+  width: number,
+  maximumRows = 100
 ): { lines: string[]; colors: (keyof typeof COLORS | undefined)[] } {
   const lines: string[] = [];
   const colors: (keyof typeof COLORS | undefined)[] = [];
@@ -259,8 +260,15 @@ function runLines(
     colors.push('dim');
     return { lines, colors };
   }
-  for (const [index, run] of runs.entries()) {
-    const marker = index === Math.min(state.selected, runs.length - 1) ? '›' : ' ';
+  const selectedIndex = Math.min(state.selected, runs.length - 1);
+  const firstVisible = Math.max(
+    0,
+    Math.min(selectedIndex, runs.length - maximumRows)
+  );
+  const visibleRuns = runs.slice(firstVisible, firstVisible + maximumRows);
+  for (const [offset, run] of visibleRuns.entries()) {
+    const index = firstVisible + offset;
+    const marker = index === selectedIndex ? '›' : ' ';
     const loop = run.forEach?.find(item => item.status === 'running') ?? run.forEach?.at(-1);
     const work = loop === undefined
       ? run.currentNodeId ?? '—'
@@ -268,7 +276,7 @@ function runLines(
     lines.push(
       `${marker}${pad(run.status, 10)} ${pad(run.workflowId, workflowWidth)} ${pad(run.runId, idWidth)} ${pad(work, 16)} ${duration(run.durationMs)}`
     );
-    colors.push(index === Math.min(state.selected, runs.length - 1) ? 'inverse' : statusColor(run.status));
+    colors.push(index === selectedIndex ? 'inverse' : statusColor(run.status));
   }
   if (state.expanded) {
     const run = runs[Math.min(state.selected, runs.length - 1)];
@@ -355,8 +363,13 @@ function runtimeLines(snapshot: InspectorSnapshotV1) {
   return { lines, colors };
 }
 
-function failureLines(snapshot: InspectorSnapshotV1, state: InspectorRenderState, width: number) {
-  const runs = runLines(snapshot, state, width);
+function failureLines(
+  snapshot: InspectorSnapshotV1,
+  state: InspectorRenderState,
+  width: number,
+  maximumRows: number
+) {
+  const runs = runLines(snapshot, state, width, maximumRows);
   const lines = [...runs.lines, '', 'RECENT ALERTS'];
   const colors: (keyof typeof COLORS | undefined)[] = [...runs.colors, undefined, 'cyan'];
   for (const alert of snapshot.alerts.slice(-20).reverse()) {
@@ -419,14 +432,18 @@ export function renderInspectorFrame(
   const health = snapshot.ready ? 'healthy' : snapshot.lifecycle;
   const header = ` WOML INSPECT  ${health}  uptime ${duration(snapshot.uptimeMs)}  workflows ${snapshot.workflows.length}  active ${active}  queued ${queued}  waiting ${waiting}${state.stale ? '  STALE' : ''}`;
   const tabs = VIEWS.map(view => view === state.view ? `[${view.toUpperCase()}]` : view).join('  ');
+  const bodyHeight = Math.max(1, height - 7);
   let content:
     | { lines: string[]; colors: (keyof typeof COLORS | undefined)[] };
   if (state.showHelp) content = helpLines();
   else if (state.view === 'overview') content = workflowLines(snapshot, state, width);
   else if (state.view === 'triggers') content = triggerLines(snapshot, state);
   else if (state.view === 'runtime') content = runtimeLines(snapshot);
-  else if (state.view === 'failures') content = failureLines(snapshot, state, width);
-  else content = runLines(snapshot, state, width);
+  else if (state.view === 'failures') {
+    content = failureLines(snapshot, state, width, Math.max(1, bodyHeight - 4));
+  } else {
+    content = runLines(snapshot, state, width, Math.max(1, bodyHeight - 1));
+  }
   if (state.expanded && state.view === 'overview') content = eventLines(state.recentEvents);
 
   const lines: string[] = [
@@ -435,7 +452,6 @@ export function renderInspectorFrame(
     color(truncate(tabs, width), 'cyan', colorsEnabled),
     color('─'.repeat(width), 'cyan', colorsEnabled),
   ];
-  const bodyHeight = Math.max(1, height - 7);
   for (let index = 0; index < Math.min(bodyHeight, content.lines.length); index += 1) {
     const line = truncate(content.lines[index] ?? '', width);
     const tone = content.colors[index];

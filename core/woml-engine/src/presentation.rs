@@ -1333,6 +1333,16 @@ fn parallel_failure(
 }
 
 fn approval_status(approval_id: &str, projection: &RunProjection) -> PresentationStepStatus {
+  if let Some(request) = projection.rich_approval_requests.get(approval_id) {
+    return match request.status {
+      crate::projection::RichApprovalRequestStatus::Waiting => PresentationStepStatus::Waiting,
+      crate::projection::RichApprovalRequestStatus::Approved
+      | crate::projection::RichApprovalRequestStatus::Rejected => PresentationStepStatus::Succeeded,
+      crate::projection::RichApprovalRequestStatus::Expired
+      | crate::projection::RichApprovalRequestStatus::Invalidated => PresentationStepStatus::Failed,
+      crate::projection::RichApprovalRequestStatus::Cancelled => PresentationStepStatus::Cancelled,
+    };
+  }
   match projection
     .approval_requests
     .get(approval_id)
@@ -1349,6 +1359,39 @@ fn approval_status(approval_id: &str, projection: &RunProjection) -> Presentatio
 }
 
 fn approval_detail(approval_id: &str, projection: &RunProjection) -> Option<String> {
+  if let Some(request) = projection.rich_approval_requests.get(approval_id) {
+    let received = request
+      .decisions
+      .values()
+      .filter(|decision| decision.decision == crate::ApprovalDecision::Approved)
+      .count();
+    let digest = request
+      .review_digest
+      .strip_prefix("sha256:")
+      .unwrap_or(&request.review_digest);
+    let roles = if request.required_roles.is_empty() {
+      String::new()
+    } else {
+      format!(
+        " · roles {}/{}",
+        request.represented_roles.len(),
+        request.required_roles.len()
+      )
+    };
+    let state = match request.status {
+      crate::projection::RichApprovalRequestStatus::Waiting => "Waiting for reviewed decision",
+      crate::projection::RichApprovalRequestStatus::Approved => "Review approved",
+      crate::projection::RichApprovalRequestStatus::Rejected => "Review rejected",
+      crate::projection::RichApprovalRequestStatus::Expired => "Review expired",
+      crate::projection::RichApprovalRequestStatus::Cancelled => "Review cancelled",
+      crate::projection::RichApprovalRequestStatus::Invalidated => "Review invalidated",
+    };
+    return Some(format!(
+      "{state} · quorum {received}/{}{roles} · digest {}…",
+      request.required,
+      digest.chars().take(12).collect::<String>()
+    ));
+  }
   let request = projection.approval_requests.get(approval_id)?;
   let deliveries = projection
     .notification_deliveries

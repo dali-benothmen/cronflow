@@ -42,6 +42,7 @@ export const expectedNativeExports = [
   'recoverWomlRuns',
   'resolveWomlApproval',
   'resolveWomlNotificationApproval',
+  'resolveWomlRichApproval',
   'restoreWomlArtifactBackup',
   'resumeWomlStoredRunWithProgress',
   'resumeWomlWorkflowDurableOutcome',

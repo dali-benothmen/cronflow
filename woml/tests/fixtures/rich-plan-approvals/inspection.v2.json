@@ -1,0 +1,11 @@
+{
+  "profile": "woml.approval-inspection/v2",
+  "approvalId": "approveDeployment",
+  "requestId": "aprreq_review_1",
+  "status": "pending",
+  "reviewDigest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "review": { "title": "Deploy payments-api to production", "summary": "Create 2, modify 4, and destroy 1 infrastructure resource.", "risk": "high", "artifacts": [] },
+  "authority": { "required": 2, "received": 1, "requiredRoles": ["production-owner", "security-owner"], "representedRoles": ["production-owner"], "directoryVersion": "directory-2026-10-21" },
+  "decisions": [{ "principalId": "person:alice", "decision": "approved", "provider": "slack", "decidedAt": "2026-10-21T12:01:00Z" }],
+  "truncated": false
+}

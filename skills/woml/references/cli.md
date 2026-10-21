@@ -25,6 +25,7 @@ Use this after an agent creates or edits WOML. `--json` is appropriate for tooli
 ```bash
 woml run <workflow.woml|directory>... \
   [--config <path>] [--process-policy <path>|--allow-process <aliases>] \
+  [--artifact-policy <path>] [--reviewer-directory <path>] \
   [--host <address>] [--port <port>] \
   [--state <path>] [--trigger <manualTriggerId>] [--resume <runId>] \
   [--approval-port <port>] [--json] [--verbose] \
@@ -43,6 +44,9 @@ woml run <workflow.woml|directory>... \
 - `--allow-process bun,git` is a foreground-only reviewed executable grant.
 - `--process-policy <path>` supplies canonical executable, directory,
   environment, timeout, output, concurrency, and background authority.
+- `--reviewer-directory <path>` supplies canonical reviewer principals,
+  provider identities, and roles for Rich Plan Approvals. Do not place reviewer
+  role claims in workflow source.
 - `--verbose`, color, and JSON flags affect presentation, not workflow semantics.
 
 ## One-shot integration execution

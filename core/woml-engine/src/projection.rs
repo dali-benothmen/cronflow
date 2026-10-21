@@ -279,6 +279,38 @@ pub struct ApprovalRequestProjection {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RichApprovalRequestStatus {
+  Waiting,
+  Approved,
+  Rejected,
+  Expired,
+  Cancelled,
+  Invalidated,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RichApprovalReviewerDecisionProjection {
+  pub principal_id: String,
+  pub decision: ApprovalDecision,
+  pub decided_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RichApprovalRequestProjection {
+  pub approval_id: String,
+  pub request_id: String,
+  pub review_digest: String,
+  pub directory_version: String,
+  pub required: u32,
+  pub required_roles: Vec<String>,
+  pub represented_roles: Vec<String>,
+  pub requested_at: DateTime<Utc>,
+  pub resolved_at: Option<DateTime<Utc>>,
+  pub status: RichApprovalRequestStatus,
+  pub decisions: BTreeMap<String, RichApprovalReviewerDecisionProjection>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DurableWaitStatus {
   Registered,
   Satisfied {
@@ -499,6 +531,7 @@ pub struct RunProjection {
   pub forks: BTreeMap<String, ForkProjection>,
   pub for_each: BTreeMap<String, ForEachProjection>,
   pub approval_requests: BTreeMap<String, ApprovalRequestProjection>,
+  pub rich_approval_requests: BTreeMap<String, RichApprovalRequestProjection>,
   pub durable_waits: BTreeMap<String, DurableWaitProjection>,
   pub locks: BTreeMap<String, LockProjection>,
   pub sagas: BTreeMap<String, SagaProjection>,
@@ -2573,6 +2606,93 @@ impl ProjectionFoldState {
         );
         projection.status = RunStatus::Waiting;
       }
+      RunEventPayload::ApprovalReviewRequested(data) => {
+        require_running(projection)?;
+        if projection
+          .rich_approval_requests
+          .contains_key(&data.approval_id)
+          || projection
+            .rich_approval_requests
+            .values()
+            .any(|request| request.request_id == data.request_id)
+        {
+          return Err(FoldError::InvalidHistory(
+            "A rich approval request identity appears more than once.".to_string(),
+          ));
+        }
+        projection.rich_approval_requests.insert(
+          data.approval_id.clone(),
+          RichApprovalRequestProjection {
+            approval_id: data.approval_id.clone(),
+            request_id: data.request_id.clone(),
+            review_digest: data.review_digest.clone(),
+            directory_version: data.directory_version.clone(),
+            required: data.required,
+            required_roles: data.required_roles.clone(),
+            represented_roles: Vec::new(),
+            requested_at: event.occurred_at,
+            resolved_at: None,
+            status: RichApprovalRequestStatus::Waiting,
+            decisions: BTreeMap::new(),
+          },
+        );
+        projection.status = RunStatus::Waiting;
+      }
+      RunEventPayload::ApprovalReviewerDecisionRecorded(data) => {
+        let request = projection
+          .rich_approval_requests
+          .get_mut(&data.approval_id)
+          .ok_or_else(|| {
+            FoldError::InvalidHistory(
+              "A reviewer decision references an unknown rich approval.".to_string(),
+            )
+          })?;
+        if projection.status != RunStatus::Waiting
+          || request.status != RichApprovalRequestStatus::Waiting
+          || request.request_id != data.request_id
+          || request.review_digest != data.review_digest
+          || request.decisions.contains_key(&data.principal_id)
+        {
+          return Err(FoldError::InvalidHistory(
+            "A reviewer decision does not match one pending immutable review.".to_string(),
+          ));
+        }
+        request.decisions.insert(
+          data.principal_id.clone(),
+          RichApprovalReviewerDecisionProjection {
+            principal_id: data.principal_id.clone(),
+            decision: data.decision,
+            decided_at: event.occurred_at,
+          },
+        );
+      }
+      RunEventPayload::ApprovalQuorumProgressed(data) => {
+        let request = projection
+          .rich_approval_requests
+          .get_mut(&data.approval_id)
+          .ok_or_else(|| {
+            FoldError::InvalidHistory(
+              "Quorum progress references an unknown rich approval.".to_string(),
+            )
+          })?;
+        let approved = request
+          .decisions
+          .values()
+          .filter(|decision| decision.decision == ApprovalDecision::Approved)
+          .count() as u32;
+        if request.status != RichApprovalRequestStatus::Waiting
+          || request.request_id != data.request_id
+          || request.review_digest != data.review_digest
+          || request.required != data.required
+          || request.required_roles != data.required_roles
+          || approved != data.received
+        {
+          return Err(FoldError::InvalidHistory(
+            "Quorum progress is not derived from the durable rich approval history.".to_string(),
+          ));
+        }
+        request.represented_roles = data.represented_roles.clone();
+      }
       RunEventPayload::NotificationDeliveryRequested(data) => {
         if projection.status != RunStatus::Waiting {
           return Err(FoldError::InvalidHistory(
@@ -2719,69 +2839,56 @@ impl ProjectionFoldState {
         projection.notification_decisions.push(data.clone());
       }
       RunEventPayload::ApprovalResolved(data) => {
-        if projection.status != RunStatus::Waiting {
-          return Err(FoldError::InvalidHistory(
-            "approval_resolved requires a waiting run.".to_string(),
-          ));
-        }
-        let request = projection
-          .approval_requests
-          .get_mut(&data.approval_id)
-          .ok_or_else(|| {
-            FoldError::InvalidHistory(format!(
-              "Approval {:?} resolved before it was requested.",
-              data.approval_id
-            ))
+        if data.is_rich() {
+          let request = projection
+            .rich_approval_requests
+            .get_mut(&data.approval_id)
+            .ok_or_else(|| {
+              FoldError::InvalidHistory(
+                "A rich approval resolved before its review was requested.".to_string(),
+              )
+            })?;
+          let decision = data.decision.ok_or_else(|| {
+            FoldError::InvalidHistory("A rich approval resolution has no decision.".to_string())
           })?;
-        if request.request_id != data.request_id {
-          return Err(FoldError::InvalidHistory(format!(
-            "Approval {:?} resolved with a mismatched request ID.",
-            data.approval_id
-          )));
-        }
-        if !matches!(request.status, ApprovalRequestStatus::Waiting) {
-          return Err(FoldError::InvalidHistory(format!(
-            "Approval {:?} was resolved more than once.",
-            data.approval_id
-          )));
-        }
-        match &data.resolution {
-          ApprovalResolution::Decision {
-            source: ApprovalDecisionSource::Human,
-            ..
-          } if request
-            .expires_at
-            .is_some_and(|deadline| event.occurred_at >= deadline) =>
+          let cancellation_resolution = data.reason
+            == Some(crate::RichApprovalResolutionReason::Cancellation)
+            && projection.status == RunStatus::Cancelling;
+          if (projection.status != RunStatus::Waiting && !cancellation_resolution)
+            || request.status != RichApprovalRequestStatus::Waiting
+            || request.request_id != data.request_id
+            || data.review_digest.as_deref() != Some(request.review_digest.as_str())
+            || data.required != Some(request.required)
+            || data.required_roles.as_deref() != Some(request.required_roles.as_slice())
           {
-            return Err(FoldError::InvalidHistory(format!(
-              "Human decision for approval {:?} occurred at or after its deadline.",
-              data.approval_id
-            )));
+            return Err(FoldError::InvalidHistory(
+              "A rich approval resolution does not match its pending immutable review.".to_string(),
+            ));
           }
-          ApprovalResolution::Decision {
-            decision: ApprovalDecision::Rejected,
-            source: ApprovalDecisionSource::Timeout,
-          } if request.on_timeout == ApprovalTimeoutPolicy::Reject
-            && request
-              .expires_at
-              .is_some_and(|deadline| event.occurred_at >= deadline) => {}
-          ApprovalResolution::TimeoutFailure
-            if request.on_timeout == ApprovalTimeoutPolicy::Fail
-              && request
-                .expires_at
-                .is_some_and(|deadline| event.occurred_at >= deadline) => {}
-          ApprovalResolution::Decision {
-            source: ApprovalDecisionSource::Human,
-            ..
-          } => {}
-          _ => {
-            return Err(FoldError::InvalidHistory(format!(
-              "Approval {:?} resolution does not match its deadline and timeout policy.",
-              data.approval_id
-            )));
-          }
-        }
-        if let ApprovalResolution::Decision { decision, source } = data.resolution {
+          request.represented_roles = data.represented_roles.clone().unwrap_or_default();
+          request.status = match data.reason {
+            Some(crate::RichApprovalResolutionReason::Quorum) => {
+              RichApprovalRequestStatus::Approved
+            }
+            Some(crate::RichApprovalResolutionReason::Rejection) => {
+              RichApprovalRequestStatus::Rejected
+            }
+            Some(crate::RichApprovalResolutionReason::Timeout) => {
+              RichApprovalRequestStatus::Expired
+            }
+            Some(crate::RichApprovalResolutionReason::Cancellation) => {
+              RichApprovalRequestStatus::Cancelled
+            }
+            Some(crate::RichApprovalResolutionReason::ArtifactInvalidated) => {
+              RichApprovalRequestStatus::Invalidated
+            }
+            None => {
+              return Err(FoldError::InvalidHistory(
+                "A rich approval resolution has no reason.".to_string(),
+              ))
+            }
+          };
+          request.resolved_at = Some(event.occurred_at);
           projection.context.steps.insert(
             data.approval_id.clone(),
             json!({
@@ -2789,21 +2896,135 @@ impl ProjectionFoldState {
                 ApprovalDecision::Approved => "approved",
                 ApprovalDecision::Rejected => "rejected",
               },
-              "source": match source {
-                ApprovalDecisionSource::Human => "human",
-                ApprovalDecisionSource::Timeout => "timeout",
+              "source": "human",
+              "decidedAt": event.occurred_at.to_rfc3339_opts(SecondsFormat::Millis, true),
+              "review": {
+                "digest": request.review_digest.clone(),
               },
-              "decidedAt": event
-                .occurred_at
-                .to_rfc3339_opts(SecondsFormat::Millis, true),
+              "authority": {
+                "required": request.required,
+                "received": data.received.unwrap_or_default(),
+                "requiredRoles": request.required_roles.clone(),
+              }
             }),
           );
+          projection.status = if cancellation_resolution {
+            RunStatus::Cancelling
+          } else {
+            RunStatus::Running
+          };
+        } else {
+          if projection.status != RunStatus::Waiting {
+            return Err(FoldError::InvalidHistory(
+              "approval_resolved requires a waiting run.".to_string(),
+            ));
+          }
+          let request = projection
+            .approval_requests
+            .get_mut(&data.approval_id)
+            .ok_or_else(|| {
+              FoldError::InvalidHistory(format!(
+                "Approval {:?} resolved before it was requested.",
+                data.approval_id
+              ))
+            })?;
+          if request.request_id != data.request_id {
+            return Err(FoldError::InvalidHistory(format!(
+              "Approval {:?} resolved with a mismatched request ID.",
+              data.approval_id
+            )));
+          }
+          if !matches!(request.status, ApprovalRequestStatus::Waiting) {
+            return Err(FoldError::InvalidHistory(format!(
+              "Approval {:?} was resolved more than once.",
+              data.approval_id
+            )));
+          }
+          let resolution = data.resolution.as_ref().ok_or_else(|| {
+            FoldError::InvalidHistory("A basic approval resolution is missing.".to_string())
+          })?;
+          match resolution {
+            ApprovalResolution::Decision {
+              source: ApprovalDecisionSource::Human,
+              ..
+            } if request
+              .expires_at
+              .is_some_and(|deadline| event.occurred_at >= deadline) =>
+            {
+              return Err(FoldError::InvalidHistory(format!(
+                "Human decision for approval {:?} occurred at or after its deadline.",
+                data.approval_id
+              )));
+            }
+            ApprovalResolution::Decision {
+              decision: ApprovalDecision::Rejected,
+              source: ApprovalDecisionSource::Timeout,
+            } if request.on_timeout == ApprovalTimeoutPolicy::Reject
+              && request
+                .expires_at
+                .is_some_and(|deadline| event.occurred_at >= deadline) => {}
+            ApprovalResolution::TimeoutFailure
+              if request.on_timeout == ApprovalTimeoutPolicy::Fail
+                && request
+                  .expires_at
+                  .is_some_and(|deadline| event.occurred_at >= deadline) => {}
+            ApprovalResolution::Decision {
+              source: ApprovalDecisionSource::Human,
+              ..
+            } => {}
+            _ => {
+              return Err(FoldError::InvalidHistory(format!(
+                "Approval {:?} resolution does not match its deadline and timeout policy.",
+                data.approval_id
+              )));
+            }
+          }
+          if let ApprovalResolution::Decision { decision, source } = resolution {
+            projection.context.steps.insert(
+              data.approval_id.clone(),
+              json!({
+                "decision": match *decision {
+                  ApprovalDecision::Approved => "approved",
+                  ApprovalDecision::Rejected => "rejected",
+                },
+                "source": match *source {
+                  ApprovalDecisionSource::Human => "human",
+                  ApprovalDecisionSource::Timeout => "timeout",
+                },
+                "decidedAt": event
+                  .occurred_at
+                  .to_rfc3339_opts(SecondsFormat::Millis, true),
+              }),
+            );
+          }
+          request.status = ApprovalRequestStatus::Resolved {
+            resolution: resolution.clone(),
+            resolved_at: event.occurred_at,
+          };
+          projection.status = RunStatus::Running;
         }
-        request.status = ApprovalRequestStatus::Resolved {
-          resolution: data.resolution.clone(),
-          resolved_at: event.occurred_at,
-        };
-        projection.status = RunStatus::Running;
+      }
+      RunEventPayload::ApprovalInvalidated(data) => {
+        let request = projection
+          .rich_approval_requests
+          .get_mut(&data.approval_id)
+          .ok_or_else(|| {
+            FoldError::InvalidHistory(
+              "An invalidation references an unknown rich approval.".to_string(),
+            )
+          })?;
+        if projection.status != RunStatus::Waiting
+          || request.status != RichApprovalRequestStatus::Waiting
+          || request.request_id != data.request_id
+          || request.review_digest != data.review_digest
+        {
+          return Err(FoldError::InvalidHistory(
+            "An invalidation does not match one pending immutable review.".to_string(),
+          ));
+        }
+        // The invalidation fact records why the immutable review can no longer
+        // be authorized. The following approval_resolved fact wins the shared
+        // terminal race and closes the request.
       }
       RunEventPayload::NotificationMessageUpdateRequested(data) => {
         if projection.status != RunStatus::Running {
