@@ -178,6 +178,7 @@ jobs:
           --test locks_and_leases
           --test compensation_runtime
           --test compensation_store
+          --test rich_plan_approval_model
           --test retention
           --test webhook_runtime
           -- --test-threads=1

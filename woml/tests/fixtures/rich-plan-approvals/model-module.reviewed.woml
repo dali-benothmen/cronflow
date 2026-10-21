@@ -1,0 +1,16 @@
+<woml>
+  <imports>
+    <module name="reviewBuilder" from="./review-builder.ts" />
+  </imports>
+  <workflow id="module-rich-approval">
+    <triggers><manual id="start" /></triggers>
+    <steps>
+      <step id="buildReview"><script>return { review: services.reviewBuilder.buildReview() };</script></step>
+      <approval id="approvePlan" review="{{context.steps.buildReview.review}}">
+        <when-approved><step id="accepted"><script>return true;</script></step></when-approved>
+        <when-rejected><step id="rejected"><script>return false;</script></step></when-rejected>
+      </approval>
+      <step id="done"><script>return context.steps.approvePlan;</script></step>
+    </steps>
+  </workflow>
+</woml>

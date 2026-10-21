@@ -1,0 +1,17 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://woml.dev/schemas/approval-inspection/v2",
+  "title": "WOML Rich Approval Inspection v2",
+  "x-status": "rich-plan-approvals-rpa0-frozen",
+  "x-sensitiveFields": ["principalId", "providerActorId"],
+  "type": "object", "additionalProperties": false,
+  "required": ["profile", "approvalId", "requestId", "status", "reviewDigest", "review", "authority", "decisions", "truncated"],
+  "properties": {
+    "profile": { "const": "woml.approval-inspection/v2" }, "approvalId": { "type": "string", "pattern": "^[a-z][A-Za-z0-9]*$" },
+    "requestId": { "type": "string", "pattern": "^aprreq_[A-Za-z0-9_-]+$" }, "status": { "enum": ["pending", "approved", "rejected", "expired", "cancelled", "invalidated"] },
+    "reviewDigest": { "type": "string", "pattern": "^sha256:[a-f0-9]{64}$" }, "review": { "$ref": "https://woml.dev/schemas/review-payload/v1" },
+    "authority": { "type": "object", "additionalProperties": false, "required": ["required", "received", "requiredRoles", "representedRoles", "directoryVersion"], "properties": { "required": { "type": "integer", "minimum": 1, "maximum": 20 }, "received": { "type": "integer", "minimum": 0, "maximum": 20 }, "requiredRoles": { "type": "array", "maxItems": 16, "items": { "type": "string" } }, "representedRoles": { "type": "array", "maxItems": 16, "items": { "type": "string" } }, "directoryVersion": { "type": "string", "maxLength": 128 } } },
+    "decisions": { "type": "array", "maxItems": 100, "items": { "type": "object", "additionalProperties": false, "required": ["principalId", "decision", "provider", "decidedAt"], "properties": { "principalId": { "type": "string", "maxLength": 128 }, "decision": { "enum": ["approved", "rejected"] }, "provider": { "type": "string", "maxLength": 64 }, "decidedAt": { "type": "string", "format": "date-time" } } } },
+    "truncated": { "type": "boolean" }
+  }
+}

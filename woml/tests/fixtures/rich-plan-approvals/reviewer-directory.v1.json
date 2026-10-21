@@ -1,0 +1,8 @@
+{
+  "profile": "woml.reviewer-directory/v1",
+  "version": "directory-2026-10-21",
+  "principals": [
+    { "id": "person:alice", "roles": ["production-owner"], "identities": [{ "provider": "slack", "accountId": "T0123456789", "actorId": "U0123456789" }] },
+    { "id": "person:bob", "roles": ["security-owner"], "identities": [{ "provider": "telegram", "accountId": "bot-42", "actorId": "812345678" }] }
+  ]
+}

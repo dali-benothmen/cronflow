@@ -466,6 +466,12 @@ export interface CompiledWorkflowGraphV19 extends CompiledWorkflowGraphV18 {
   readonly sagas: readonly CompiledSagaV1[];
 }
 
+/**
+ * Model v20 adds immutable rich-plan approval descriptors to approval wait
+ * nodes. The graph shape otherwise retains the complete Model v19 contract.
+ */
+export interface CompiledWorkflowGraphV20 extends CompiledWorkflowGraphV19 {}
+
 interface CompiledWorkflowDefinitionBase {
   readonly workflowId: string;
   readonly metadata?: CompiledWorkflowMetadata;
@@ -613,6 +619,14 @@ export interface CompiledWorkflowDefinitionV19 extends Omit<
   readonly graph: CompiledWorkflowGraphV19;
 }
 
+export interface CompiledWorkflowDefinitionV20 extends Omit<
+  CompiledWorkflowDefinitionV16,
+  'schemaVersion' | 'graph'
+> {
+  readonly schemaVersion: 20;
+  readonly graph: CompiledWorkflowGraphV20;
+}
+
 export type CompiledWorkflowDefinition =
   | CompiledWorkflowDefinitionV1
   | CompiledWorkflowDefinitionV2
@@ -632,7 +646,8 @@ export type CompiledWorkflowDefinition =
   | CompiledWorkflowDefinitionV16
   | CompiledWorkflowDefinitionV17
   | CompiledWorkflowDefinitionV18
-  | CompiledWorkflowDefinitionV19;
+  | CompiledWorkflowDefinitionV19
+  | CompiledWorkflowDefinitionV20;
 
 export interface CompiledGraphIssue {
   readonly code:
@@ -995,6 +1010,40 @@ function inspectApprovalGroups(
     const timeout = waitFields.timeoutMs;
     const onTimeout = waitFields.onTimeout;
     const notifications = waitFields.notifications;
+    const review = waitFields.review;
+    const requiredApprovals = waitFields.requiredApprovals;
+    const requiredRoles = waitFields.requiredRoles;
+    const richFieldCount =
+      Number(review !== undefined) +
+      Number(requiredApprovals !== undefined) +
+      Number(requiredRoles !== undefined);
+    const rolePattern = /^[a-z][a-z0-9]*(?:[-_.][a-z0-9]+)*$/;
+    const roles =
+      requiredRoles?.kind === 'array'
+        ? requiredRoles.items.flatMap(item =>
+            item.kind === 'literal' && typeof item.value === 'string'
+              ? [item.value]
+              : []
+          )
+        : [];
+    const richReviewIsValid =
+      richFieldCount === 0 ||
+      (richFieldCount === 3 &&
+        review?.kind === 'contextReference' &&
+        review.path.length >= 2 &&
+        review.path[0] === 'steps' &&
+        publicStructuralIdPattern.test(review.path[1] ?? '') &&
+        requiredApprovals?.kind === 'literal' &&
+        typeof requiredApprovals.value === 'number' &&
+        Number.isSafeInteger(requiredApprovals.value) &&
+        requiredApprovals.value >= 1 &&
+        requiredApprovals.value <= 20 &&
+        requiredRoles?.kind === 'array' &&
+        requiredRoles.items.length <= 16 &&
+        roles.length === requiredRoles.items.length &&
+        roles.every(role => role.length <= 64 && rolePattern.test(role)) &&
+        new Set(roles).size === roles.length &&
+        roles.every((role, index) => index === 0 || roles[index - 1]! < role));
     const notificationsAreValid = validApprovalNotifications(
       notifications,
       approvalId
@@ -1015,12 +1064,20 @@ function inspectApprovalGroups(
       wait.retryPolicy === undefined &&
       wait.inputs.kind === 'object' &&
       Object.keys(waitFields).every(key =>
-        ['timeoutMs', 'onTimeout', 'notifications'].includes(key)
+        [
+          'timeoutMs',
+          'onTimeout',
+          'notifications',
+          'review',
+          'requiredApprovals',
+          'requiredRoles',
+        ].includes(key)
       ) &&
       Object.keys(waitFields).length ===
         1 +
           Number(timeout !== undefined) +
-          Number(notifications !== undefined) &&
+          Number(notifications !== undefined) +
+          richFieldCount &&
       onTimeout?.kind === 'literal' &&
       (onTimeout.value === 'reject' || onTimeout.value === 'fail') &&
       (timeout === undefined ||
@@ -1029,6 +1086,7 @@ function inspectApprovalGroups(
           Number.isSafeInteger(timeout.value) &&
           timeout.value >= 1)) &&
       notificationsAreValid &&
+      richReviewIsValid &&
       validWaitMetadata;
     const validJoin =
       join?.handler === 'engine.approval-join' &&

@@ -1,0 +1,12 @@
+{
+  "schemaVersion": 18,
+  "profile": "woml.durable-store/v18",
+  "tables": {
+    "approvalReviews": ["run_id", "approval_id", "request_id", "definition_hash", "workflow_version", "review_json", "review_digest", "required_approvals", "required_roles_json", "directory_version", "status", "created_at"],
+    "approvalReviewerDecisions": ["run_id", "request_id", "principal_id", "decision", "provider", "provider_account_id", "provider_actor_id", "roles_json", "decided_at"],
+    "approvalArtifactPins": ["run_id", "request_id", "artifact_id", "artifact_sha256", "released_at"]
+  },
+  "invariants": ["events-authoritative", "snapshot-immutable", "one-decision-per-principal", "digest-bound-capabilities", "quorum-derived-not-trusted", "artifact-pins-live-through-settlement", "one-terminal-result"],
+  "migration": { "from": 17, "additive": true, "futureVersionsFailClosed": true },
+  "restore": { "preserveSnapshots": true, "preserveVotes": true, "verifyArtifactPins": true }
+}

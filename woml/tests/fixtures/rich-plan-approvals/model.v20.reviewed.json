@@ -1,0 +1,311 @@
+{
+  "schemaVersion": 20,
+  "workflowId": "production-deployment",
+  "metadata": {
+    "name": "Review production deployment",
+    "version": "1.0.0"
+  },
+  "triggers": [
+    {
+      "id": "start",
+      "handler": "trigger.manual",
+      "config": {
+        "kind": "object",
+        "fields": {}
+      }
+    }
+  ],
+  "graph": {
+    "entryNodeIds": [
+      "buildReview"
+    ],
+    "nodes": [
+      {
+        "id": "buildReview",
+        "handler": "runtime.script",
+        "metadata": {
+          "name": "Build immutable review evidence"
+        },
+        "inputs": {
+          "kind": "object",
+          "fields": {
+            "source": {
+              "kind": "literal",
+              "value": "\n          return {\n            review: {\n              title: \"Deploy payments-api to production\",\n              summary: \"Create 2, modify 4, and destroy 1 infrastructure resource.\",\n              risk: \"high\",\n              facts: [\n                { label: \"Environment\", value: \"production\" },\n                { label: \"Estimated monthly change\", value: \"+$84\" }\n              ],\n              changes: [\n                {\n                  action: \"destroy\",\n                  target: \"aws_db_instance.legacy\",\n                  summary: \"Remove the retired reporting database\"\n                }\n              ],\n              checks: [\n                { name: \"Unit tests\", status: \"passed\" },\n                { name: \"Backup verified\", status: \"passed\" }\n              ],\n              artifacts: []\n            }\n          };\n        "
+            }
+          }
+        },
+        "scriptRuntime": {
+          "bindingVersion": 1,
+          "bindings": [
+            "context",
+            "attempt",
+            "services",
+            "secrets"
+          ],
+          "requiredSecrets": []
+        }
+      },
+      {
+        "id": "approveDeployment",
+        "handler": "engine.approval-wait",
+        "inputs": {
+          "kind": "object",
+          "fields": {
+            "timeoutMs": {
+              "kind": "literal",
+              "value": 1800000
+            },
+            "onTimeout": {
+              "kind": "literal",
+              "value": "reject"
+            },
+            "review": {
+              "kind": "contextReference",
+              "path": [
+                "steps",
+                "buildReview",
+                "review"
+              ]
+            },
+            "requiredApprovals": {
+              "kind": "literal",
+              "value": 2
+            },
+            "requiredRoles": {
+              "kind": "array",
+              "items": [
+                {
+                  "kind": "literal",
+                  "value": "production-owner"
+                },
+                {
+                  "kind": "literal",
+                  "value": "security-owner"
+                }
+              ]
+            }
+          }
+        },
+        "metadata": {
+          "name": "Approve production deployment",
+          "description": "Two trusted reviewers must authorize the exact reviewed plan."
+        }
+      },
+      {
+        "id": "recordApproval",
+        "handler": "runtime.script",
+        "inputs": {
+          "kind": "object",
+          "fields": {
+            "source": {
+              "kind": "literal",
+              "value": "return { approved: true };"
+            }
+          }
+        },
+        "scriptRuntime": {
+          "bindingVersion": 1,
+          "bindings": [
+            "context",
+            "attempt",
+            "services",
+            "secrets"
+          ],
+          "requiredSecrets": []
+        }
+      },
+      {
+        "id": "recordRejection",
+        "handler": "runtime.script",
+        "inputs": {
+          "kind": "object",
+          "fields": {
+            "source": {
+              "kind": "literal",
+              "value": "return { approved: false };"
+            }
+          }
+        },
+        "scriptRuntime": {
+          "bindingVersion": 1,
+          "bindings": [
+            "context",
+            "attempt",
+            "services",
+            "secrets"
+          ],
+          "requiredSecrets": []
+        }
+      },
+      {
+        "id": "__woml_approval__approveDeployment__join",
+        "handler": "engine.approval-join",
+        "inputs": {
+          "kind": "object",
+          "fields": {}
+        }
+      },
+      {
+        "id": "summary",
+        "handler": "runtime.script",
+        "inputs": {
+          "kind": "object",
+          "fields": {
+            "source": {
+              "kind": "literal",
+              "value": "return context.steps.approveDeployment;"
+            }
+          }
+        },
+        "scriptRuntime": {
+          "bindingVersion": 1,
+          "bindings": [
+            "context",
+            "attempt",
+            "services",
+            "secrets"
+          ],
+          "requiredSecrets": []
+        }
+      },
+      {
+        "id": "__woml_workflow__settlement",
+        "handler": "engine.workflow-settlement",
+        "inputs": {
+          "kind": "object",
+          "fields": {}
+        }
+      }
+    ],
+    "edges": [
+      {
+        "id": "buildReview-to-approveDeployment",
+        "from": "buildReview",
+        "to": "approveDeployment",
+        "condition": {
+          "kind": "always"
+        }
+      },
+      {
+        "id": "approveDeployment:approved",
+        "from": "approveDeployment",
+        "to": "recordApproval",
+        "condition": {
+          "kind": "equals",
+          "left": {
+            "kind": "contextReference",
+            "path": [
+              "steps",
+              "approveDeployment",
+              "decision"
+            ]
+          },
+          "right": {
+            "kind": "literal",
+            "value": "approved"
+          }
+        },
+        "approvalId": "approveDeployment"
+      },
+      {
+        "id": "approveDeployment:rejected",
+        "from": "approveDeployment",
+        "to": "recordRejection",
+        "condition": {
+          "kind": "equals",
+          "left": {
+            "kind": "contextReference",
+            "path": [
+              "steps",
+              "approveDeployment",
+              "decision"
+            ]
+          },
+          "right": {
+            "kind": "literal",
+            "value": "rejected"
+          }
+        },
+        "approvalId": "approveDeployment"
+      },
+      {
+        "id": "approveDeployment:approved:join",
+        "from": "recordApproval",
+        "to": "__woml_approval__approveDeployment__join",
+        "condition": {
+          "kind": "always"
+        },
+        "approvalId": "approveDeployment"
+      },
+      {
+        "id": "approveDeployment:rejected:join",
+        "from": "recordRejection",
+        "to": "__woml_approval__approveDeployment__join",
+        "condition": {
+          "kind": "always"
+        },
+        "approvalId": "approveDeployment"
+      },
+      {
+        "id": "__woml_approval__approveDeployment__join-to-summary",
+        "from": "__woml_approval__approveDeployment__join",
+        "to": "summary",
+        "condition": {
+          "kind": "always"
+        }
+      },
+      {
+        "id": "__woml_workflow__:main:settlement",
+        "from": "summary",
+        "to": "__woml_workflow__settlement",
+        "condition": {
+          "kind": "always"
+        }
+      }
+    ],
+    "forks": [],
+    "choices": [],
+    "contextVisibility": [
+      {
+        "nodeId": "buildReview",
+        "stepIds": []
+      },
+      {
+        "nodeId": "recordApproval",
+        "stepIds": [
+          "buildReview",
+          "approveDeployment"
+        ]
+      },
+      {
+        "nodeId": "recordRejection",
+        "stepIds": [
+          "buildReview",
+          "approveDeployment"
+        ]
+      },
+      {
+        "nodeId": "summary",
+        "stepIds": [
+          "buildReview",
+          "approveDeployment"
+        ]
+      }
+    ],
+    "settlement": {
+      "nodeId": "__woml_workflow__settlement",
+      "mainResultNodeId": "summary",
+      "ownedBranchTerminalNodeIds": []
+    },
+    "forEach": [],
+    "waits": [],
+    "locks": [],
+    "sagas": []
+  },
+  "runtimePolicy": {
+    "profileVersion": 1,
+    "concurrency": 1
+  }
+}
+

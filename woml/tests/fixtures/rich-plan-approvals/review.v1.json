@@ -1,0 +1,9 @@
+{
+  "title": "Deploy payments-api to production",
+  "summary": "Create 2, modify 4, and destroy 1 infrastructure resource.",
+  "risk": "high",
+  "facts": [{ "label": "Environment", "value": "production" }],
+  "changes": [{ "action": "destroy", "target": "aws_db_instance.legacy", "summary": "Remove the retired reporting database" }],
+  "checks": [{ "name": "Backup verified", "status": "passed" }],
+  "artifacts": []
+}

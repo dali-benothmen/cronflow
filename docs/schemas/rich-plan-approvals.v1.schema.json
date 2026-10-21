@@ -1,0 +1,22 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://woml.dev/schemas/rich-plan-approvals/v1",
+  "title": "WOML Rich Plan Approvals Contract v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["profile", "modelVersion", "eventVersion", "storeVersion", "httpVersion", "providerHostVersion", "inspectionVersion", "limits", "quorum", "canonicalization", "binding", "unsupported"],
+  "properties": {
+    "profile": { "const": "woml.rich-plan-approvals/v1" },
+    "modelVersion": { "const": 20 },
+    "eventVersion": { "const": 19 },
+    "storeVersion": { "const": 18 },
+    "httpVersion": { "const": 2 },
+    "providerHostVersion": { "const": 3 },
+    "inspectionVersion": { "const": 2 },
+    "limits": { "type": "object", "additionalProperties": { "type": "integer", "minimum": 1 } },
+    "quorum": { "type": "object" },
+    "canonicalization": { "const": "RFC8785" },
+    "binding": { "type": "array", "minItems": 8, "uniqueItems": true, "items": { "type": "string" } },
+    "unsupported": { "type": "array", "minItems": 1, "uniqueItems": true, "items": { "type": "string" } }
+  }
+}

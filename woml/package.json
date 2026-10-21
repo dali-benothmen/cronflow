@@ -21,6 +21,7 @@
     "test:reusable-definitions": "bun test tests/reusable-definition-contracts.test.ts tests/reusable-definitions.test.ts",
     "test:locks-and-leases-authoring": "bun test tests/locks-and-leases-authoring.test.ts --max-concurrency=1 && bun run typecheck",
     "test:compensation-and-cleanup-authoring": "bun test tests/compensation-and-cleanup-authoring.test.ts --max-concurrency=1 && bun run typecheck",
+    "test:rich-plan-approvals-authoring": "bun test tests/rich-plan-approvals-authoring.test.ts --max-concurrency=1 && bun run typecheck",
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {

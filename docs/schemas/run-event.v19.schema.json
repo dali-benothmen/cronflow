@@ -1,0 +1,33 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://woml.dev/schemas/run-event/v19",
+  "title": "WOML Rich Approval Run Event v19",
+  "x-status": "rich-plan-approvals-rpa0-frozen",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schemaVersion", "type", "runId", "sequence", "at", "data"],
+  "properties": {
+    "schemaVersion": { "const": 19 },
+    "type": { "enum": ["approval_review_requested", "approval_reviewer_decision_recorded", "approval_quorum_progressed", "approval_resolved", "approval_invalidated"] },
+    "runId": { "type": "string", "minLength": 1, "maxLength": 320 },
+    "sequence": { "type": "integer", "minimum": 1 },
+    "at": { "type": "string", "format": "date-time" },
+    "data": {
+      "type": "object", "additionalProperties": false,
+      "required": ["approvalId", "requestId", "reviewDigest"],
+      "properties": {
+        "approvalId": { "type": "string", "pattern": "^[a-z][A-Za-z0-9]*$" },
+        "requestId": { "type": "string", "pattern": "^aprreq_[A-Za-z0-9_-]+$", "maxLength": 256 },
+        "reviewDigest": { "type": "string", "pattern": "^sha256:[a-f0-9]{64}$" },
+        "directoryVersion": { "type": "string", "minLength": 1, "maxLength": 128 },
+        "principalId": { "type": "string", "minLength": 1, "maxLength": 128 },
+        "decision": { "enum": ["approved", "rejected"] },
+        "required": { "type": "integer", "minimum": 1, "maximum": 20 },
+        "received": { "type": "integer", "minimum": 0, "maximum": 20 },
+        "requiredRoles": { "type": "array", "maxItems": 16, "uniqueItems": true, "items": { "type": "string", "maxLength": 64 } },
+        "representedRoles": { "type": "array", "maxItems": 16, "uniqueItems": true, "items": { "type": "string", "maxLength": 64 } },
+        "reason": { "enum": ["quorum", "rejection", "timeout", "cancellation", "artifact_invalidated"] }
+      }
+    }
+  }
+}

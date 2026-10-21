@@ -33,6 +33,7 @@ pub mod process;
 pub mod projection;
 pub mod protocol;
 pub mod retention;
+pub mod rich_approval;
 pub mod runtime;
 pub mod schedule;
 pub mod storage;
@@ -238,6 +239,13 @@ pub use retention::{
   execute_retention, last_retention_result, plan_retention, RetentionError, RetentionExecutionV1,
   RetentionPlanV1, RetentionPolicyV1, RetentionResultV1, TRIGGER_DEDUPLICATION_SAFETY_DAYS,
 };
+pub use rich_approval::{
+  ReviewChangeActionV1, ReviewChangeV1, ReviewCheckStatusV1, ReviewCheckV1, ReviewFactV1,
+  ReviewPayloadV1, ReviewRiskV1, ReviewerDirectoryV1, ReviewerIdentityV1, ReviewerPrincipalV1,
+  ReviewerProviderV1, REVIEWER_DIRECTORY_PROFILE, REVIEW_PAYLOAD_MAX_BYTES,
+  REVIEW_PAYLOAD_MAX_NESTING, REVIEW_PAYLOAD_VERSION, RICH_APPROVAL_MAX_PRINCIPALS,
+  RICH_APPROVAL_MAX_ROLES, RICH_PLAN_APPROVAL_PROFILE,
+};
 pub use runtime::{
   admit_external_signal_durable, execute_admitted_trigger_run_durable,
   execute_reusable_provider_lifecycle_durable, execute_workflow, execute_workflow_durable,
@@ -301,7 +309,8 @@ pub const COMPILED_MODEL_SCHEMA_VERSION_V16: u32 = 16;
 pub const COMPILED_MODEL_SCHEMA_VERSION_V17: u32 = 17;
 pub const COMPILED_MODEL_SCHEMA_VERSION_V18: u32 = 18;
 pub const COMPILED_MODEL_SCHEMA_VERSION_V19: u32 = 19;
-pub const COMPILED_MODEL_SCHEMA_VERSION: u32 = COMPILED_MODEL_SCHEMA_VERSION_V19;
+pub const COMPILED_MODEL_SCHEMA_VERSION_V20: u32 = 20;
+pub const COMPILED_MODEL_SCHEMA_VERSION: u32 = COMPILED_MODEL_SCHEMA_VERSION_V20;
 pub const RUN_EVENT_SCHEMA_VERSION_V1: u32 = 1;
 pub const RUN_EVENT_SCHEMA_VERSION_V2: u32 = 2;
 pub const RUN_EVENT_SCHEMA_VERSION_V3: u32 = 3;
