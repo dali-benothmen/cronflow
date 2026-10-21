@@ -839,6 +839,7 @@ pub(crate) fn validate_payload_against_definition(
           | crate::COMPILED_MODEL_SCHEMA_VERSION_V17
           | crate::COMPILED_MODEL_SCHEMA_VERSION_V18
           | crate::COMPILED_MODEL_SCHEMA_VERSION_V19
+          | crate::COMPILED_MODEL_SCHEMA_VERSION_V20
       ) || data.definition_hash != definition_hash
         || workflow.runtime_policy_hash().as_deref() != Some(data.policy_hash.as_str())
         || workflow.runtime_policy_queue_name().as_deref() != Some(data.queue.name.as_str())
@@ -873,6 +874,7 @@ pub(crate) fn validate_payload_against_definition(
           | crate::COMPILED_MODEL_SCHEMA_VERSION_V17
           | crate::COMPILED_MODEL_SCHEMA_VERSION_V18
           | crate::COMPILED_MODEL_SCHEMA_VERSION_V19
+          | crate::COMPILED_MODEL_SCHEMA_VERSION_V20
       ) {
         return Err("Event v11+ runtime-policy events require compiled Model v12+.".to_string());
       }
@@ -902,6 +904,7 @@ pub(crate) fn validate_payload_against_definition(
           | crate::COMPILED_MODEL_SCHEMA_VERSION_V17
           | crate::COMPILED_MODEL_SCHEMA_VERSION_V18
           | crate::COMPILED_MODEL_SCHEMA_VERSION_V19
+          | crate::COMPILED_MODEL_SCHEMA_VERSION_V20
       ) {
         return Err("Event v11+ runtime-policy events require compiled Model v12+.".to_string());
       }
@@ -1195,12 +1198,63 @@ pub(crate) fn validate_payload_against_definition(
         ));
       }
     }
+    RunEventPayload::ApprovalReviewRequested(data) => {
+      let approval = workflow.approval(&data.approval_id).ok_or_else(|| {
+        format!(
+          "approval_review_requested references unknown approval {:?}.",
+          data.approval_id
+        )
+      })?;
+      if workflow.schema_version != crate::COMPILED_MODEL_SCHEMA_VERSION_V20
+        || approval.review.is_none()
+        || approval.required_approvals != Some(data.required)
+        || approval.required_roles != data.required_roles
+      {
+        return Err(
+          "approval_review_requested does not match its Model v20 authority policy.".to_string(),
+        );
+      }
+    }
+    RunEventPayload::ApprovalReviewerDecisionRecorded(data) => {
+      if workflow.schema_version != crate::COMPILED_MODEL_SCHEMA_VERSION_V20
+        || workflow
+          .approval(&data.approval_id)
+          .is_none_or(|approval| approval.review.is_none())
+      {
+        return Err(
+          "approval_reviewer_decision_recorded requires a Model v20 rich approval.".to_string(),
+        );
+      }
+    }
+    RunEventPayload::ApprovalQuorumProgressed(data) => {
+      let approval = workflow
+        .approval(&data.approval_id)
+        .ok_or_else(|| "approval_quorum_progressed references an unknown approval.".to_string())?;
+      if workflow.schema_version != crate::COMPILED_MODEL_SCHEMA_VERSION_V20
+        || approval.review.is_none()
+        || approval.required_approvals != Some(data.required)
+        || approval.required_roles != data.required_roles
+      {
+        return Err(
+          "approval_quorum_progressed does not match its Model v20 authority policy.".to_string(),
+        );
+      }
+    }
     RunEventPayload::ApprovalResolved(data) => {
       if workflow.approval(&data.approval_id).is_none() {
         return Err(format!(
           "approval_resolved references unknown approval {:?}.",
           data.approval_id
         ));
+      }
+    }
+    RunEventPayload::ApprovalInvalidated(data) => {
+      if workflow.schema_version != crate::COMPILED_MODEL_SCHEMA_VERSION_V20
+        || workflow
+          .approval(&data.approval_id)
+          .is_none_or(|approval| approval.review.is_none())
+      {
+        return Err("approval_invalidated requires a Model v20 rich approval.".to_string());
       }
     }
     RunEventPayload::NotificationDeliveryRequested(data) => {
@@ -2568,6 +2622,16 @@ pub(crate) fn validate_event_history_against_definition(
           ));
         }
       }
+      RunEventPayload::ApprovalReviewRequested(data) => {
+        let prefix = crate::fold_events(&events[..index]).map_err(|error| error.to_string())?;
+        let ready = ready_node_ids_for_projection(workflow, definition_hash, &prefix)?;
+        if !ready.iter().any(|node_id| node_id == &data.approval_id) {
+          return Err(format!(
+            "Rich approval {:?} was requested before its wait node was ready.",
+            data.approval_id
+          ));
+        }
+      }
       RunEventPayload::ApprovalResolved(_) => {}
       RunEventPayload::WaitRegistered(data) => {
         let prefix = crate::fold_events(&events[..index]).map_err(|error| error.to_string())?;
@@ -2776,6 +2840,9 @@ pub(crate) fn validate_event_history_against_definition(
       | RunEventPayload::LockAcquireTimedOut(_)
       | RunEventPayload::LockAcquisitionCancelled(_)
       | RunEventPayload::LockLeaseLost(_)
+      | RunEventPayload::ApprovalReviewerDecisionRecorded(_)
+      | RunEventPayload::ApprovalQuorumProgressed(_)
+      | RunEventPayload::ApprovalInvalidated(_)
       | RunEventPayload::CompensationRegistered(_)
       | RunEventPayload::SagaForwardSucceeded(_)
       | RunEventPayload::SagaCorrectionStarted(_)

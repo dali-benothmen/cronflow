@@ -448,6 +448,24 @@ fn logical_bytes(connection: &Connection, run_ids: &[String]) -> Result<u64, Ret
               + length(tokens.approval_id) + length(tokens.secret_hash) + 64
          FROM woml_approval_tokens AS tokens JOIN woml_retention_candidates USING(run_id)
          UNION ALL
+         SELECT length(reviews.run_id) + length(reviews.request_id)
+              + length(reviews.approval_id) + length(reviews.review_digest)
+              + length(reviews.review_json) + length(reviews.required_roles_json)
+              + length(reviews.directory_version) + 96
+         FROM woml_approval_reviews AS reviews JOIN woml_retention_candidates USING(run_id)
+         UNION ALL
+         SELECT length(decisions.run_id) + length(decisions.request_id)
+              + length(decisions.principal_id) + length(decisions.decision)
+              + length(decisions.provider) + length(decisions.provider_account_id)
+              + length(decisions.provider_actor_id) + length(decisions.roles_json) + 64
+         FROM woml_approval_reviewer_decisions AS decisions
+         JOIN woml_retention_candidates USING(run_id)
+         UNION ALL
+         SELECT length(pins.run_id) + length(pins.request_id) + length(pins.artifact_id)
+              + length(pins.artifact_sha256) + 48
+         FROM woml_approval_artifact_pins AS pins
+         JOIN woml_retention_candidates USING(run_id)
+         UNION ALL
          SELECT length(capabilities.capability_id) + length(capabilities.attempt_id)
               + length(capabilities.request_id) + length(capabilities.run_id)
               + length(capabilities.delivery_id) + length(capabilities.secret_hash) + 96
@@ -614,6 +632,8 @@ const DROP_RETENTION_GUARDS: &str = r#"
 DROP TRIGGER woml_runs_no_delete;
 DROP TRIGGER woml_run_events_no_delete;
 DROP TRIGGER woml_approval_tokens_no_delete;
+DROP TRIGGER woml_approval_reviews_no_delete;
+DROP TRIGGER woml_approval_decisions_no_delete;
 DROP TRIGGER woml_notification_capabilities_no_delete;
 DROP TRIGGER woml_trigger_occurrences_no_delete;
 DROP TRIGGER woml_internal_event_publications_no_delete;
@@ -630,6 +650,12 @@ CREATE TRIGGER woml_run_events_no_delete BEFORE DELETE ON woml_run_events BEGIN
 END;
 CREATE TRIGGER woml_approval_tokens_no_delete BEFORE DELETE ON woml_approval_tokens BEGIN
   SELECT RAISE(ABORT, 'WOML approval credentials are append-only');
+END;
+CREATE TRIGGER woml_approval_reviews_no_delete BEFORE DELETE ON woml_approval_reviews BEGIN
+  SELECT RAISE(ABORT, 'WOML rich approval reviews are retention-managed');
+END;
+CREATE TRIGGER woml_approval_decisions_no_delete BEFORE DELETE ON woml_approval_reviewer_decisions BEGIN
+  SELECT RAISE(ABORT, 'WOML rich approval decisions are retention-managed');
 END;
 CREATE TRIGGER woml_notification_capabilities_no_delete BEFORE DELETE ON woml_notification_capabilities BEGIN
   SELECT RAISE(ABORT, 'WOML notification capabilities are append-only');
@@ -678,6 +704,9 @@ fn delete_batch(
     "DELETE FROM woml_runtime_policy_bindings WHERE run_id IN (SELECT run_id FROM woml_retention_candidates)",
     "DELETE FROM woml_notification_capabilities WHERE run_id IN (SELECT run_id FROM woml_retention_candidates)",
     "DELETE FROM woml_approval_tokens WHERE run_id IN (SELECT run_id FROM woml_retention_candidates)",
+    "DELETE FROM woml_approval_artifact_pins WHERE run_id IN (SELECT run_id FROM woml_retention_candidates)",
+    "DELETE FROM woml_approval_reviewer_decisions WHERE run_id IN (SELECT run_id FROM woml_retention_candidates)",
+    "DELETE FROM woml_approval_reviews WHERE run_id IN (SELECT run_id FROM woml_retention_candidates)",
     "DELETE FROM woml_lock_waiters WHERE run_id IN (SELECT run_id FROM woml_retention_candidates)",
     "DELETE FROM woml_internal_event_deliveries WHERE run_id IN (SELECT run_id FROM woml_retention_candidates) OR publication_id IN (SELECT publication_id FROM woml_internal_event_publications WHERE parent_run_id IN (SELECT run_id FROM woml_retention_candidates))",
     "DELETE FROM woml_internal_event_publications WHERE parent_run_id IN (SELECT run_id FROM woml_retention_candidates)",

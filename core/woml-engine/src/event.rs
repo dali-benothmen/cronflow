@@ -8,9 +8,10 @@ use crate::{
   RUN_EVENT_SCHEMA_VERSION_V1, RUN_EVENT_SCHEMA_VERSION_V10, RUN_EVENT_SCHEMA_VERSION_V11,
   RUN_EVENT_SCHEMA_VERSION_V12, RUN_EVENT_SCHEMA_VERSION_V13, RUN_EVENT_SCHEMA_VERSION_V14,
   RUN_EVENT_SCHEMA_VERSION_V15, RUN_EVENT_SCHEMA_VERSION_V16, RUN_EVENT_SCHEMA_VERSION_V17,
-  RUN_EVENT_SCHEMA_VERSION_V18, RUN_EVENT_SCHEMA_VERSION_V2, RUN_EVENT_SCHEMA_VERSION_V3,
-  RUN_EVENT_SCHEMA_VERSION_V4, RUN_EVENT_SCHEMA_VERSION_V5, RUN_EVENT_SCHEMA_VERSION_V6,
-  RUN_EVENT_SCHEMA_VERSION_V7, RUN_EVENT_SCHEMA_VERSION_V8, RUN_EVENT_SCHEMA_VERSION_V9,
+  RUN_EVENT_SCHEMA_VERSION_V18, RUN_EVENT_SCHEMA_VERSION_V19, RUN_EVENT_SCHEMA_VERSION_V2,
+  RUN_EVENT_SCHEMA_VERSION_V3, RUN_EVENT_SCHEMA_VERSION_V4, RUN_EVENT_SCHEMA_VERSION_V5,
+  RUN_EVENT_SCHEMA_VERSION_V6, RUN_EVENT_SCHEMA_VERSION_V7, RUN_EVENT_SCHEMA_VERSION_V8,
+  RUN_EVENT_SCHEMA_VERSION_V9,
 };
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -43,7 +44,11 @@ pub enum RunEventPayload {
   ParallelGroupStarted(ParallelGroupStartedData),
   ParallelGroupCompleted(ParallelGroupCompletedData),
   ApprovalRequested(ApprovalRequestedData),
+  ApprovalReviewRequested(ApprovalReviewRequestedData),
+  ApprovalReviewerDecisionRecorded(ApprovalReviewerDecisionRecordedData),
+  ApprovalQuorumProgressed(ApprovalQuorumProgressedData),
   ApprovalResolved(ApprovalResolvedData),
+  ApprovalInvalidated(ApprovalInvalidatedData),
   NotificationDeliveryRequested(NotificationDeliveryRequestedData),
   NotificationDeliveryAttemptStarted(NotificationDeliveryAttemptStartedData),
   NotificationDeliverySucceeded(NotificationDeliverySucceededData),
@@ -900,7 +905,95 @@ pub enum ApprovalResolution {
 pub struct ApprovalResolvedData {
   pub approval_id: String,
   pub request_id: String,
-  pub resolution: ApprovalResolution,
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub resolution: Option<ApprovalResolution>,
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub review_digest: Option<String>,
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub decision: Option<ApprovalDecision>,
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub reason: Option<RichApprovalResolutionReason>,
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub required: Option<u32>,
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub received: Option<u32>,
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub required_roles: Option<Vec<String>>,
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub represented_roles: Option<Vec<String>>,
+}
+
+impl ApprovalResolvedData {
+  pub fn basic(approval_id: String, request_id: String, resolution: ApprovalResolution) -> Self {
+    Self {
+      approval_id,
+      request_id,
+      resolution: Some(resolution),
+      review_digest: None,
+      decision: None,
+      reason: None,
+      required: None,
+      received: None,
+      required_roles: None,
+      represented_roles: None,
+    }
+  }
+
+  pub const fn is_rich(&self) -> bool {
+    self.review_digest.is_some()
+  }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RichApprovalResolutionReason {
+  Quorum,
+  Rejection,
+  Timeout,
+  Cancellation,
+  ArtifactInvalidated,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ApprovalReviewRequestedData {
+  pub approval_id: String,
+  pub request_id: String,
+  pub review_digest: String,
+  pub directory_version: String,
+  pub required: u32,
+  pub required_roles: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ApprovalReviewerDecisionRecordedData {
+  pub approval_id: String,
+  pub request_id: String,
+  pub review_digest: String,
+  pub principal_id: String,
+  pub decision: ApprovalDecision,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ApprovalQuorumProgressedData {
+  pub approval_id: String,
+  pub request_id: String,
+  pub review_digest: String,
+  pub required: u32,
+  pub received: u32,
+  pub required_roles: Vec<String>,
+  pub represented_roles: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ApprovalInvalidatedData {
+  pub approval_id: String,
+  pub request_id: String,
+  pub review_digest: String,
+  pub reason: RichApprovalResolutionReason,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -1384,6 +1477,37 @@ fn valid_sha256(value: &str) -> bool {
   })
 }
 
+fn valid_rich_approval_identity(approval_id: &str, request_id: &str, digest: &str) -> bool {
+  valid_public_structural_id(approval_id)
+    && is_approval_request_id(request_id)
+    && valid_sha256(digest)
+}
+
+fn valid_rich_approval_roles(roles: &[String]) -> bool {
+  roles.len() <= crate::RICH_APPROVAL_MAX_ROLES
+    && roles.windows(2).all(|pair| pair[0] < pair[1])
+    && roles.iter().all(|role| {
+      if role.is_empty() || role.len() > 64 {
+        return false;
+      }
+      let mut segments = role.split(['-', '_', '.']);
+      let Some(first) = segments.next() else {
+        return false;
+      };
+      !first.is_empty()
+        && first.as_bytes()[0].is_ascii_lowercase()
+        && first
+          .bytes()
+          .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit())
+        && segments.all(|segment| {
+          !segment.is_empty()
+            && segment
+              .bytes()
+              .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit())
+        })
+    })
+}
+
 fn valid_lifecycle_failure(failure: &LifecycleFailure) -> bool {
   !failure.message.is_empty()
     && failure.message.len() <= 1024
@@ -1769,6 +1893,7 @@ impl RunEvent {
         | RUN_EVENT_SCHEMA_VERSION_V16
         | RUN_EVENT_SCHEMA_VERSION_V17
         | RUN_EVENT_SCHEMA_VERSION_V18
+        | RUN_EVENT_SCHEMA_VERSION_V19
     ) {
       return Err(EventValidationError::UnsupportedSchemaVersion(
         self.event_schema_version,
@@ -1821,6 +1946,26 @@ impl RunEvent {
         | RunEventPayload::SagaCorrectionCompleted(_)
         | RunEventPayload::ManualRecoveryRequired(_)
     );
+    let rich_approval_event = matches!(
+      self.payload,
+      RunEventPayload::ApprovalReviewRequested(_)
+        | RunEventPayload::ApprovalReviewerDecisionRecorded(_)
+        | RunEventPayload::ApprovalQuorumProgressed(_)
+        | RunEventPayload::ApprovalInvalidated(_)
+    ) || matches!(
+      &self.payload,
+      RunEventPayload::ApprovalResolved(data) if data.is_rich()
+    );
+    if self.event_schema_version == RUN_EVENT_SCHEMA_VERSION_V19 && !rich_approval_event {
+      let mut inherited = self.clone();
+      inherited.event_schema_version = RUN_EVENT_SCHEMA_VERSION_V18;
+      return inherited.validate();
+    }
+    if self.event_schema_version == RUN_EVENT_SCHEMA_VERSION_V19 && self.iteration.is_some() {
+      return Err(EventValidationError::Invalid(
+        "Rich approval events cannot carry an iteration scope in Event v19.".to_string(),
+      ));
+    }
     if self.event_schema_version == RUN_EVENT_SCHEMA_VERSION_V18 && !correction_event {
       let mut inherited = self.clone();
       inherited.event_schema_version = RUN_EVENT_SCHEMA_VERSION_V17;
@@ -2258,6 +2403,62 @@ impl RunEvent {
         }
       }
       RunEventPayload::ApprovalResolved(data) => {
+        if data.is_rich() {
+          let required_roles = data.required_roles.as_deref();
+          let represented_roles = data.represented_roles.as_deref();
+          let outcome_valid = match (data.decision, data.reason, data.required, data.received) {
+            (
+              Some(ApprovalDecision::Approved),
+              Some(RichApprovalResolutionReason::Quorum),
+              Some(required),
+              Some(received),
+            ) => {
+              received >= required
+                && required_roles
+                  .zip(represented_roles)
+                  .is_some_and(|(required, represented)| {
+                    required.iter().all(|role| represented.contains(role))
+                  })
+            }
+            (
+              Some(ApprovalDecision::Rejected),
+              Some(
+                RichApprovalResolutionReason::Rejection
+                | RichApprovalResolutionReason::Timeout
+                | RichApprovalResolutionReason::Cancellation
+                | RichApprovalResolutionReason::ArtifactInvalidated,
+              ),
+              Some(_),
+              Some(_),
+            ) => true,
+            _ => false,
+          };
+          let valid = data.resolution.is_none()
+            && data.review_digest.as_deref().is_some_and(valid_sha256)
+            && data.decision.is_some()
+            && data.reason.is_some()
+            && data.required.is_some_and(|value| (1..=20).contains(&value))
+            && data.received.is_some_and(|value| value <= 20)
+            && data
+              .required_roles
+              .as_deref()
+              .is_some_and(valid_rich_approval_roles)
+            && data
+              .represented_roles
+              .as_deref()
+              .is_some_and(valid_rich_approval_roles)
+            && outcome_valid;
+          if self.event_schema_version != RUN_EVENT_SCHEMA_VERSION_V19
+            || !valid_public_structural_id(&data.approval_id)
+            || !is_approval_request_id(&data.request_id)
+            || !valid
+          {
+            return Err(EventValidationError::Invalid(
+              "approval_resolved does not match the frozen rich Event v19 contract.".to_string(),
+            ));
+          }
+          return Ok(());
+        }
         if !matches!(
           self.event_schema_version,
           RUN_EVENT_SCHEMA_VERSION_V4
@@ -2276,7 +2477,78 @@ impl RunEvent {
               .to_string(),
           ));
         }
-        data.resolution.validate()?;
+        if data.decision.is_some()
+          || data.reason.is_some()
+          || data.required.is_some()
+          || data.received.is_some()
+          || data.required_roles.is_some()
+          || data.represented_roles.is_some()
+        {
+          return Err(EventValidationError::Invalid(
+            "Basic approval resolution cannot contain rich approval fields.".to_string(),
+          ));
+        }
+        data
+          .resolution
+          .as_ref()
+          .ok_or_else(|| {
+            EventValidationError::Invalid(
+              "Basic approval resolution requires a resolution.".to_string(),
+            )
+          })?
+          .validate()?;
+      }
+      RunEventPayload::ApprovalReviewRequested(data) => {
+        if self.event_schema_version != RUN_EVENT_SCHEMA_VERSION_V19
+          || !valid_rich_approval_identity(&data.approval_id, &data.request_id, &data.review_digest)
+          || data.directory_version.is_empty()
+          || data.directory_version.len() > 128
+          || !(1..=20).contains(&data.required)
+          || !valid_rich_approval_roles(&data.required_roles)
+        {
+          return Err(EventValidationError::Invalid(
+            "approval_review_requested does not match the frozen Event v19 contract.".to_string(),
+          ));
+        }
+      }
+      RunEventPayload::ApprovalReviewerDecisionRecorded(data) => {
+        if self.event_schema_version != RUN_EVENT_SCHEMA_VERSION_V19
+          || !valid_rich_approval_identity(&data.approval_id, &data.request_id, &data.review_digest)
+          || data.principal_id.is_empty()
+          || data.principal_id.len() > 128
+        {
+          return Err(EventValidationError::Invalid(
+            "approval_reviewer_decision_recorded does not match the frozen Event v19 contract."
+              .to_string(),
+          ));
+        }
+      }
+      RunEventPayload::ApprovalQuorumProgressed(data) => {
+        if self.event_schema_version != RUN_EVENT_SCHEMA_VERSION_V19
+          || !valid_rich_approval_identity(&data.approval_id, &data.request_id, &data.review_digest)
+          || !(1..=20).contains(&data.required)
+          || data.received > data.required
+          || !valid_rich_approval_roles(&data.required_roles)
+          || !valid_rich_approval_roles(&data.represented_roles)
+          || data
+            .represented_roles
+            .iter()
+            .any(|role| !data.required_roles.contains(role))
+        {
+          return Err(EventValidationError::Invalid(
+            "approval_quorum_progressed does not match the frozen Event v19 contract.".to_string(),
+          ));
+        }
+      }
+      RunEventPayload::ApprovalInvalidated(data) => {
+        if self.event_schema_version != RUN_EVENT_SCHEMA_VERSION_V19
+          || !valid_rich_approval_identity(&data.approval_id, &data.request_id, &data.review_digest)
+          || data.reason != RichApprovalResolutionReason::ArtifactInvalidated
+        {
+          return Err(EventValidationError::Invalid(
+            "approval_invalidated does not match the frozen Event v19 contract.".to_string(),
+          ));
+        }
       }
       RunEventPayload::NotificationDeliveryRequested(data) => {
         validate_notification_identity(&data.approval_id, &data.request_id, &data.delivery_id)?;

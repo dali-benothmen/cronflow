@@ -24,19 +24,21 @@ use crate::engine::{
 };
 use crate::event::{
   is_definition_hash, ApprovalDecision, ApprovalDecisionSource, ApprovalFailure,
-  ApprovalRequestedData, ApprovalResolution, ApprovalResolvedData, ApprovalTimeoutPolicy,
-  ForEachIterationFailedData, ForEachIterationFailureKind, ForEachIterationScope,
-  ForEachIterationSkippedData, ForEachSettledData, ForEachSkipReason, LifecycleHookRequestedData,
-  LifecycleSubject, LifecycleSubjectKind, NotificationDeliveryAttemptStartedData,
-  NotificationDeliveryFailedData, NotificationDeliveryRequestedData,
-  NotificationDeliverySucceededData, NotificationMessageUpdateAttemptStartedData,
-  NotificationMessageUpdateFailedData, NotificationMessageUpdatedData, NotificationRunFailure,
-  NotificationSafeFailure, OperationFailedData, OperationSucceededData, ParallelFailure,
-  ParallelFailurePolicy, ParallelGroupCompletedData, ParallelGroupOutcome, ProviderMessageIdentity,
-  RunAdmissionQueue, RunAdmissionTrigger, RunAdmittedData, RunCancellationRequestedData,
-  RunFailedData, RunFailedDataV1, RunFailedDataV2, RunFailedDataV3, RunFailedDataV4,
-  RunFailedDataV5, RunIngress, RunStartedData, RunSucceededData, StepAttemptFailedData,
-  StepRetryScheduledData,
+  ApprovalInvalidatedData, ApprovalQuorumProgressedData, ApprovalRequestedData, ApprovalResolution,
+  ApprovalResolvedData, ApprovalReviewRequestedData, ApprovalReviewerDecisionRecordedData,
+  ApprovalTimeoutPolicy, ForEachIterationFailedData, ForEachIterationFailureKind,
+  ForEachIterationScope, ForEachIterationSkippedData, ForEachSettledData, ForEachSkipReason,
+  LifecycleHookRequestedData, LifecycleSubject, LifecycleSubjectKind,
+  NotificationDeliveryAttemptStartedData, NotificationDeliveryFailedData,
+  NotificationDeliveryRequestedData, NotificationDeliverySucceededData,
+  NotificationMessageUpdateAttemptStartedData, NotificationMessageUpdateFailedData,
+  NotificationMessageUpdatedData, NotificationRunFailure, NotificationSafeFailure,
+  OperationFailedData, OperationSucceededData, ParallelFailure, ParallelFailurePolicy,
+  ParallelGroupCompletedData, ParallelGroupOutcome, ProviderMessageIdentity,
+  RichApprovalResolutionReason, RunAdmissionQueue, RunAdmissionTrigger, RunAdmittedData,
+  RunCancellationRequestedData, RunFailedData, RunFailedDataV1, RunFailedDataV2, RunFailedDataV3,
+  RunFailedDataV4, RunFailedDataV5, RunIngress, RunStartedData, RunSucceededData,
+  StepAttemptFailedData, StepRetryScheduledData,
 };
 use crate::model::ValueExpression;
 use crate::projection::{
@@ -59,8 +61,9 @@ use crate::{
   RUN_EVENT_SCHEMA_VERSION_V5, RUN_EVENT_SCHEMA_VERSION_V6, RUN_EVENT_SCHEMA_VERSION_V7,
   RUN_EVENT_SCHEMA_VERSION_V8, RUN_EVENT_SCHEMA_VERSION_V9,
 };
+use crate::{verify_bound_rich_approval_review, BoundRichApprovalReview, ReviewPayloadV1};
 
-pub const DURABLE_STORE_SCHEMA_VERSION: u32 = 17;
+pub const DURABLE_STORE_SCHEMA_VERSION: u32 = 18;
 const STORE_SCHEMA_VERSION_V1: &str = "1";
 const STORE_SCHEMA_VERSION_V2: &str = "2";
 const STORE_SCHEMA_VERSION_V3: &str = "3";
@@ -78,6 +81,7 @@ const STORE_SCHEMA_VERSION_V14: &str = "14";
 const STORE_SCHEMA_VERSION_V15: &str = "15";
 const STORE_SCHEMA_VERSION_V16: &str = "16";
 const STORE_SCHEMA_VERSION_V17: &str = "17";
+const STORE_SCHEMA_VERSION_V18: &str = "18";
 const DEFAULT_APPROVAL_CREDENTIAL_LIFETIME_HOURS: i64 = 24;
 
 const CREATE_RUN_SUMMARY_SCHEMA_V11: &str = r#"
@@ -414,6 +418,83 @@ CREATE INDEX IF NOT EXISTS woml_correction_attempts_active
   ON woml_correction_attempts(status, run_id, saga_id, action_id);
 CREATE INDEX IF NOT EXISTS woml_correction_manual_recovery_pending
   ON woml_correction_manual_recovery(status, created_at, run_id, saga_id);
+"#;
+
+const CREATE_RICH_APPROVAL_SCHEMA_V18: &str = r#"
+CREATE TABLE IF NOT EXISTS woml_approval_reviews (
+  run_id TEXT NOT NULL,
+  approval_id TEXT NOT NULL,
+  request_id TEXT NOT NULL,
+  definition_hash TEXT NOT NULL,
+  workflow_version TEXT NOT NULL,
+  review_json TEXT NOT NULL,
+  review_digest TEXT NOT NULL,
+  required_approvals INTEGER NOT NULL CHECK(required_approvals BETWEEN 1 AND 20),
+  required_roles_json TEXT NOT NULL,
+  directory_version TEXT NOT NULL,
+  status TEXT NOT NULL CHECK(status IN ('pending','approved','rejected','expired','cancelled','invalidated')),
+  created_at TEXT NOT NULL,
+  resolved_at TEXT,
+  PRIMARY KEY(run_id, approval_id),
+  UNIQUE(run_id, request_id),
+  UNIQUE(request_id),
+  FOREIGN KEY(run_id) REFERENCES woml_runs(run_id)
+);
+
+CREATE TABLE IF NOT EXISTS woml_approval_reviewer_decisions (
+  run_id TEXT NOT NULL,
+  request_id TEXT NOT NULL,
+  principal_id TEXT NOT NULL,
+  decision TEXT NOT NULL CHECK(decision IN ('approved','rejected')),
+  provider TEXT NOT NULL,
+  provider_account_id TEXT NOT NULL,
+  provider_actor_id TEXT NOT NULL,
+  roles_json TEXT NOT NULL,
+  decided_at TEXT NOT NULL,
+  PRIMARY KEY(run_id, request_id, principal_id),
+  FOREIGN KEY(run_id, request_id) REFERENCES woml_approval_reviews(run_id, request_id)
+);
+
+CREATE TABLE IF NOT EXISTS woml_approval_artifact_pins (
+  run_id TEXT NOT NULL,
+  request_id TEXT NOT NULL,
+  artifact_id TEXT NOT NULL,
+  artifact_sha256 TEXT NOT NULL,
+  released_at TEXT,
+  PRIMARY KEY(run_id, request_id, artifact_id),
+  FOREIGN KEY(run_id, request_id) REFERENCES woml_approval_reviews(run_id, request_id)
+);
+
+CREATE INDEX IF NOT EXISTS woml_approval_reviews_pending
+  ON woml_approval_reviews(status, created_at, run_id, request_id);
+CREATE INDEX IF NOT EXISTS woml_approval_decisions_request
+  ON woml_approval_reviewer_decisions(run_id, request_id, decided_at, principal_id);
+CREATE INDEX IF NOT EXISTS woml_approval_pins_live
+  ON woml_approval_artifact_pins(artifact_id, released_at);
+
+CREATE TRIGGER IF NOT EXISTS woml_approval_reviews_no_delete
+BEFORE DELETE ON woml_approval_reviews BEGIN
+  SELECT RAISE(ABORT, 'WOML rich approval reviews are retention-managed');
+END;
+CREATE TRIGGER IF NOT EXISTS woml_approval_reviews_immutable
+BEFORE UPDATE OF run_id, approval_id, request_id, definition_hash, workflow_version,
+  review_json, review_digest, required_approvals, required_roles_json,
+  directory_version, created_at ON woml_approval_reviews BEGIN
+  SELECT RAISE(ABORT, 'WOML rich approval review bindings are immutable');
+END;
+CREATE TRIGGER IF NOT EXISTS woml_approval_decisions_no_update
+BEFORE UPDATE ON woml_approval_reviewer_decisions BEGIN
+  SELECT RAISE(ABORT, 'WOML rich approval decisions are immutable');
+END;
+CREATE TRIGGER IF NOT EXISTS woml_approval_decisions_no_delete
+BEFORE DELETE ON woml_approval_reviewer_decisions BEGIN
+  SELECT RAISE(ABORT, 'WOML rich approval decisions are retention-managed');
+END;
+CREATE TRIGGER IF NOT EXISTS woml_approval_pins_immutable
+BEFORE UPDATE OF run_id, request_id, artifact_id, artifact_sha256
+ON woml_approval_artifact_pins BEGIN
+  SELECT RAISE(ABORT, 'WOML rich approval artifact identities are immutable');
+END;
 "#;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -1909,6 +1990,12 @@ pub enum DurableStoreError {
   ApprovalExpired,
   #[error("a different human approval decision is already durable")]
   ApprovalDecisionConflict,
+  #[error("the rich approval request was not found")]
+  RichApprovalNotFound,
+  #[error("the rich approval binding digest does not match")]
+  RichApprovalBindingMismatch,
+  #[error("the canonical reviewer already recorded a conflicting decision")]
+  RichApprovalReviewerConflict,
   #[error("the lock acquisition identity is already bound to different input")]
   LockIdempotencyConflict,
   #[error("the durable lock wait queue reached its safety ceiling")]
@@ -1927,6 +2014,266 @@ pub enum DurableStoreError {
 pub struct DurableEventStore {
   connection: Connection,
   projection_cache: RefCell<HashMap<String, ProjectionFoldState>>,
+}
+
+pub const RICH_APPROVAL_INSPECTION_DECISION_LIMIT: usize = 100;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RichApprovalDecisionAdmission {
+  pub run_id: String,
+  pub request_id: String,
+  pub review_digest: String,
+  pub principal_id: String,
+  pub decision: ApprovalDecision,
+  pub provider: String,
+  pub provider_account_id: String,
+  pub provider_actor_id: String,
+  pub roles: Vec<String>,
+  pub decided_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RichApprovalDecisionStatus {
+  Pending,
+  Approved,
+  Rejected,
+  Idempotent,
+  AlreadyResolved,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RichApprovalDecisionOutcome {
+  pub status: RichApprovalDecisionStatus,
+  pub required: u32,
+  pub received: u32,
+  pub represented_roles: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RichApprovalDecisionInspection {
+  pub principal_id: String,
+  pub decision: ApprovalDecision,
+  pub provider: String,
+  pub provider_account_id: String,
+  pub roles: Vec<String>,
+  pub decided_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RichApprovalInspectionV1 {
+  pub run_id: String,
+  pub approval_id: String,
+  pub request_id: String,
+  pub review_digest: String,
+  pub review: ReviewPayloadV1,
+  pub required: u32,
+  pub required_roles: Vec<String>,
+  pub directory_version: String,
+  pub status: String,
+  pub created_at: DateTime<Utc>,
+  pub resolved_at: Option<DateTime<Utc>>,
+  pub decisions: Vec<RichApprovalDecisionInspection>,
+  pub total_decisions: u32,
+  pub decisions_truncated: bool,
+}
+
+#[derive(Debug, Clone)]
+struct RichReviewRow {
+  approval_id: String,
+  request_id: String,
+  review_digest: String,
+  required: u32,
+  required_roles: Vec<String>,
+  status: String,
+}
+
+#[derive(Debug, Clone)]
+struct RichQuorumState {
+  received: u32,
+  represented_roles: Vec<String>,
+}
+
+fn rich_review_row(
+  connection: &Connection,
+  run_id: &str,
+  request_id: &str,
+) -> Result<Option<RichReviewRow>, DurableStoreError> {
+  let row: Option<(String, String, String, i64, String, String)> = connection
+    .query_row(
+      "SELECT approval_id, request_id, review_digest, required_approvals, required_roles_json, status
+       FROM woml_approval_reviews WHERE run_id = ?1 AND request_id = ?2",
+      params![run_id, request_id],
+      |row| {
+        Ok((
+          row.get(0)?,
+          row.get(1)?,
+          row.get(2)?,
+          row.get(3)?,
+          row.get(4)?,
+          row.get(5)?,
+        ))
+      },
+    )
+    .optional()?;
+  row
+    .map(
+      |(approval_id, request_id, review_digest, required, required_roles_json, status)| {
+        Ok(RichReviewRow {
+          approval_id,
+          request_id,
+          review_digest,
+          required: u32::try_from(required).map_err(|_| {
+            DurableStoreError::Contract(
+              "Stored rich approval quorum is outside the frozen range.".to_string(),
+            )
+          })?,
+          required_roles: serde_json::from_str(&required_roles_json)?,
+          status,
+        })
+      },
+    )
+    .transpose()
+}
+
+fn rich_quorum_state(
+  connection: &Connection,
+  review: &RichReviewRow,
+) -> Result<RichQuorumState, DurableStoreError> {
+  let mut statement = connection.prepare(
+    "SELECT decision, roles_json FROM woml_approval_reviewer_decisions
+     WHERE request_id = ?1 ORDER BY principal_id",
+  )?;
+  let rows = statement
+    .query_map([&review.request_id], |row| {
+      Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+    })?
+    .collect::<Result<Vec<_>, _>>()?;
+  let mut received = 0u32;
+  let mut represented = BTreeMap::<String, ()>::new();
+  for (decision, roles_json) in rows {
+    if decision != "approved" {
+      continue;
+    }
+    received = received.saturating_add(1);
+    let roles: Vec<String> = serde_json::from_str(&roles_json)?;
+    for role in roles {
+      if review.required_roles.contains(&role) {
+        represented.insert(role, ());
+      }
+    }
+  }
+  Ok(RichQuorumState {
+    received,
+    represented_roles: represented.into_keys().collect(),
+  })
+}
+
+fn settle_rich_review_row(
+  transaction: &Transaction<'_>,
+  run_id: &str,
+  request_id: &str,
+  status: &str,
+  settled_at: DateTime<Utc>,
+) -> Result<(), DurableStoreError> {
+  let changed = transaction.execute(
+    "UPDATE woml_approval_reviews SET status = ?3, resolved_at = ?4
+     WHERE run_id = ?1 AND request_id = ?2 AND status = 'pending'",
+    params![run_id, request_id, status, settled_at.to_rfc3339()],
+  )?;
+  if changed != 1 {
+    return Err(DurableStoreError::ApprovalDecisionConflict);
+  }
+  transaction.execute(
+    "UPDATE woml_approval_artifact_pins SET released_at = ?3
+     WHERE run_id = ?1 AND request_id = ?2 AND released_at IS NULL",
+    params![run_id, request_id, settled_at.to_rfc3339()],
+  )?;
+  Ok(())
+}
+
+fn validate_rich_decision_admission(
+  admission: &RichApprovalDecisionAdmission,
+) -> Result<(), DurableStoreError> {
+  let valid_text = |value: &str, max: usize| {
+    !value.is_empty()
+      && value.len() <= max
+      && !value.chars().any(|character| character.is_control())
+  };
+  if !valid_text(&admission.run_id, 320)
+    || !admission.request_id.starts_with("aprreq_")
+    || !is_definition_hash(&admission.review_digest)
+    || !valid_text(&admission.principal_id, 128)
+    || !valid_text(&admission.provider, 64)
+    || !valid_text(&admission.provider_account_id, 256)
+    || !valid_text(&admission.provider_actor_id, 256)
+    || admission.roles.len() > crate::RICH_APPROVAL_MAX_ROLES
+    || !admission.roles.windows(2).all(|pair| pair[0] < pair[1])
+  {
+    return Err(DurableStoreError::Contract(
+      "The rich approval decision admission is invalid.".to_string(),
+    ));
+  }
+  Ok(())
+}
+
+fn approval_decision_text(decision: ApprovalDecision) -> &'static str {
+  match decision {
+    ApprovalDecision::Approved => "approved",
+    ApprovalDecision::Rejected => "rejected",
+  }
+}
+
+fn parse_approval_decision(value: &str) -> Result<ApprovalDecision, DurableStoreError> {
+  match value {
+    "approved" => Ok(ApprovalDecision::Approved),
+    "rejected" => Ok(ApprovalDecision::Rejected),
+    _ => Err(DurableStoreError::Contract(
+      "Stored rich approval decision is invalid.".to_string(),
+    )),
+  }
+}
+
+fn parse_timestamp(value: &str) -> Result<DateTime<Utc>, DurableStoreError> {
+  DateTime::parse_from_rfc3339(value)
+    .map(|value| value.with_timezone(&Utc))
+    .map_err(|_| DurableStoreError::Contract("Stored timestamp is invalid.".to_string()))
+}
+
+fn append_rich_approval_payloads(
+  transaction: &Transaction<'_>,
+  projection_cache: &RefCell<HashMap<String, ProjectionFoldState>>,
+  run_id: &str,
+  occurred_at: DateTime<Utc>,
+  payloads: Vec<RunEventPayload>,
+) -> Result<RunProjection, DurableStoreError> {
+  let mut events = load_events(transaction, run_id)?;
+  let mut projection_state = projection_state_for_events(projection_cache, run_id, &events)?;
+  let version = events
+    .first()
+    .map(|event| event.event_schema_version)
+    .ok_or_else(|| DurableStoreError::Contract("A rich approval requires a started run.".into()))?;
+  if version != crate::RUN_EVENT_SCHEMA_VERSION_V19 {
+    return Err(DurableStoreError::Contract(
+      "Rich approval persistence requires Event v19.".to_string(),
+    ));
+  }
+  for payload in payloads {
+    append_to_history_scoped_incremental(
+      transaction,
+      &mut events,
+      &mut projection_state,
+      run_id,
+      generated_event_id(),
+      occurred_at,
+      version,
+      None,
+      payload,
+      true,
+    )?;
+  }
+  Ok(projection_state.projection().clone())
 }
 
 enum RunRecovery {
@@ -2457,6 +2804,23 @@ fn migrate_store_v16_to_v17(connection: &mut Connection) -> Result<(), DurableSt
   if changed != 1 {
     return Err(DurableStoreError::Contract(
       "Store v16-to-v17 migration could not update the schema version atomically.".to_string(),
+    ));
+  }
+  transaction.commit()?;
+  Ok(())
+}
+
+fn migrate_store_v17_to_v18(connection: &mut Connection) -> Result<(), DurableStoreError> {
+  let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+  transaction.execute_batch(CREATE_RICH_APPROVAL_SCHEMA_V18)?;
+  validate_store_v18_schema(&transaction)?;
+  let changed = transaction.execute(
+    "UPDATE woml_store_metadata SET value = ?1 WHERE key = 'schema_version' AND value = ?2",
+    [STORE_SCHEMA_VERSION_V18, STORE_SCHEMA_VERSION_V17],
+  )?;
+  if changed != 1 {
+    return Err(DurableStoreError::Contract(
+      "Store v17-to-v18 migration could not update the schema version atomically.".to_string(),
     ));
   }
   transaction.commit()?;
@@ -3117,6 +3481,109 @@ fn validate_store_v17_schema(connection: &Connection) -> Result<(), DurableStore
   Ok(())
 }
 
+fn validate_store_v18_schema(connection: &Connection) -> Result<(), DurableStoreError> {
+  validate_store_v17_schema(connection)?;
+  for (name, expected_columns) in [
+    (
+      "woml_approval_reviews",
+      &[
+        "run_id",
+        "approval_id",
+        "request_id",
+        "definition_hash",
+        "workflow_version",
+        "review_json",
+        "review_digest",
+        "required_approvals",
+        "required_roles_json",
+        "directory_version",
+        "status",
+        "created_at",
+        "resolved_at",
+      ][..],
+    ),
+    (
+      "woml_approval_reviewer_decisions",
+      &[
+        "run_id",
+        "request_id",
+        "principal_id",
+        "decision",
+        "provider",
+        "provider_account_id",
+        "provider_actor_id",
+        "roles_json",
+        "decided_at",
+      ][..],
+    ),
+    (
+      "woml_approval_artifact_pins",
+      &[
+        "run_id",
+        "request_id",
+        "artifact_id",
+        "artifact_sha256",
+        "released_at",
+      ][..],
+    ),
+  ] {
+    let exists: bool = connection.query_row(
+      "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?1)",
+      [name],
+      |row| row.get(0),
+    )?;
+    if !exists {
+      return Err(DurableStoreError::Contract(format!(
+        "Store v18 is missing required table {name:?}."
+      )));
+    }
+    let mut statement = connection.prepare(&format!("PRAGMA table_info({name})"))?;
+    let columns = statement
+      .query_map([], |row| row.get::<_, String>(1))?
+      .collect::<Result<Vec<_>, _>>()?;
+    if columns != expected_columns {
+      return Err(DurableStoreError::Contract(format!(
+        "Store v18 {name} columns do not match the frozen schema: expected {expected_columns:?}, found {columns:?}."
+      )));
+    }
+  }
+  for name in [
+    "woml_approval_reviews_pending",
+    "woml_approval_decisions_request",
+    "woml_approval_pins_live",
+  ] {
+    let exists: bool = connection.query_row(
+      "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type = 'index' AND name = ?1)",
+      [name],
+      |row| row.get(0),
+    )?;
+    if !exists {
+      return Err(DurableStoreError::Contract(format!(
+        "Store v18 is missing required index {name:?}."
+      )));
+    }
+  }
+  for name in [
+    "woml_approval_reviews_no_delete",
+    "woml_approval_reviews_immutable",
+    "woml_approval_decisions_no_update",
+    "woml_approval_decisions_no_delete",
+    "woml_approval_pins_immutable",
+  ] {
+    let exists: bool = connection.query_row(
+      "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type = 'trigger' AND name = ?1)",
+      [name],
+      |row| row.get(0),
+    )?;
+    if !exists {
+      return Err(DurableStoreError::Contract(format!(
+        "Store v18 is missing required trigger {name:?}."
+      )));
+    }
+  }
+  Ok(())
+}
+
 fn runtime_policy_indexes_need_rebuild(connection: &Connection) -> Result<bool, DurableStoreError> {
   let count = |sql: &str| -> Result<i64, DurableStoreError> {
     Ok(connection.query_row(sql, [], |row| row.get(0))?)
@@ -3172,7 +3639,7 @@ impl DurableEventStore {
       [],
       |row| row.get(0),
     )?;
-    if version != STORE_SCHEMA_VERSION_V17 {
+    if version != STORE_SCHEMA_VERSION_V18 {
       return Err(DurableStoreError::UnsupportedStoreVersion(version));
     }
     if let Ok(metadata) = std::fs::metadata(path) {
@@ -3205,6 +3672,7 @@ impl DurableEventStore {
       )
       .optional()?;
     match version.as_deref() {
+      Some(STORE_SCHEMA_VERSION_V18) => validate_store_v18_schema(&connection)?,
       Some(STORE_SCHEMA_VERSION_V17) => validate_store_v17_schema(&connection)?,
       Some(STORE_SCHEMA_VERSION_V16) => validate_store_v16_schema(&connection)?,
       Some(STORE_SCHEMA_VERSION_V15) => validate_store_v15_schema(&connection)?,
@@ -3359,7 +3827,15 @@ impl DurableEventStore {
     if current_version == STORE_SCHEMA_VERSION_V16 {
       migrate_store_v16_to_v17(&mut connection)?;
     }
-    validate_store_v17_schema(&connection)?;
+    let current_version: String = connection.query_row(
+      "SELECT value FROM woml_store_metadata WHERE key = 'schema_version'",
+      [],
+      |row| row.get(0),
+    )?;
+    if current_version == STORE_SCHEMA_VERSION_V17 {
+      migrate_store_v17_to_v18(&mut connection)?;
+    }
+    validate_store_v18_schema(&connection)?;
     {
       let recovery = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
       rebuild_correction_indexes(&recovery)?;
@@ -5002,6 +5478,7 @@ impl DurableEventStore {
         | crate::RUN_EVENT_SCHEMA_VERSION_V16
         | crate::RUN_EVENT_SCHEMA_VERSION_V17
         | crate::RUN_EVENT_SCHEMA_VERSION_V18
+        | crate::RUN_EVENT_SCHEMA_VERSION_V19
     ) {
       expand_model_v11_payload(&workflow, &run_id, payload)?
     } else {
@@ -5063,7 +5540,10 @@ impl DurableEventStore {
     validate_event_history_against_definition(&workflow, &binding.definition_hash, &events)
       .map_err(DurableStoreError::Contract)?;
     let projection = projection_state.projection().clone();
-    if event_schema_version == crate::RUN_EVENT_SCHEMA_VERSION_V18 {
+    if matches!(
+      event_schema_version,
+      crate::RUN_EVENT_SCHEMA_VERSION_V18 | crate::RUN_EVENT_SCHEMA_VERSION_V19
+    ) {
       write_correction_indexes_from_projection(
         &transaction,
         &run_id,
@@ -5077,6 +5557,437 @@ impl DurableEventStore {
     span.count("events", events.len().saturating_sub(existing_event_count));
     span.succeed();
     Ok((first_event.unwrap(), projection))
+  }
+
+  /// Persists one immutable review snapshot and its artifact pins before any
+  /// decision capability may be exposed. Model v20 execution is enabled only
+  /// in RPA5; this method is the RPA2/RPA3 storage authority used by that
+  /// future execution path.
+  pub fn create_rich_approval_request(
+    &mut self,
+    binding: &BoundRichApprovalReview,
+    created_at: DateTime<Utc>,
+  ) -> Result<RunProjection, DurableStoreError> {
+    verify_bound_rich_approval_review(binding)
+      .map_err(|_| DurableStoreError::RichApprovalBindingMismatch)?;
+    let transaction = self
+      .connection
+      .transaction_with_behavior(TransactionBehavior::Immediate)?;
+    let run_binding = run_binding_in_transaction(&transaction, &binding.run_id)?;
+    let workflow = definition_for_run(&transaction, &binding.run_id)?;
+    let workflow_version = workflow
+      .metadata
+      .as_ref()
+      .and_then(|metadata| metadata.version.as_deref())
+      .unwrap_or("0.0.0");
+    let approval = workflow.approval(&binding.approval_id).ok_or_else(|| {
+      DurableStoreError::Contract("The rich approval is not in Model v20.".into())
+    })?;
+    if workflow.schema_version != crate::COMPILED_MODEL_SCHEMA_VERSION_V20
+      || approval.review.is_none()
+      || approval.required_approvals != Some(binding.required_approvals)
+      || approval.required_roles != binding.required_roles
+      || run_binding.definition_hash != binding.definition_hash
+      || workflow.workflow_id != binding.workflow_id
+      || workflow_version != binding.workflow_version
+    {
+      return Err(DurableStoreError::RichApprovalBindingMismatch);
+    }
+    let review_json = String::from_utf8(canonical_json(&binding.review)?).map_err(|_| {
+      DurableStoreError::Contract("The immutable review is not valid UTF-8 JSON.".to_string())
+    })?;
+    let required_roles_json = serde_json::to_string(&binding.required_roles)?;
+    let inserted = transaction.execute(
+      "INSERT OR IGNORE INTO woml_approval_reviews(
+         run_id, approval_id, request_id, definition_hash, workflow_version,
+         review_json, review_digest, required_approvals, required_roles_json,
+         directory_version, status, created_at, resolved_at
+       ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, 'pending', ?11, NULL)",
+      params![
+        binding.run_id,
+        binding.approval_id,
+        binding.request_id,
+        binding.definition_hash,
+        binding.workflow_version,
+        review_json,
+        binding.review_digest,
+        i64::from(binding.required_approvals),
+        required_roles_json,
+        binding.directory_version,
+        created_at.to_rfc3339(),
+      ],
+    )?;
+    if inserted == 0 {
+      let existing: Option<(String, String)> = transaction
+        .query_row(
+          "SELECT request_id, review_digest FROM woml_approval_reviews
+           WHERE run_id = ?1 AND approval_id = ?2",
+          params![binding.run_id, binding.approval_id],
+          |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .optional()?;
+      if existing.as_ref() == Some(&(binding.request_id.clone(), binding.review_digest.clone())) {
+        return Ok(fold_events(&load_events(&transaction, &binding.run_id)?)?);
+      }
+      return Err(DurableStoreError::RichApprovalBindingMismatch);
+    }
+    for artifact in &binding.artifacts {
+      transaction.execute(
+        "INSERT INTO woml_approval_artifact_pins(
+           run_id, request_id, artifact_id, artifact_sha256, released_at
+         ) VALUES (?1, ?2, ?3, ?4, NULL)",
+        params![
+          binding.run_id,
+          binding.request_id,
+          artifact.id,
+          artifact.sha256
+        ],
+      )?;
+    }
+
+    let mut events = load_events(&transaction, &binding.run_id)?;
+    let mut projection_state =
+      projection_state_for_events(&self.projection_cache, &binding.run_id, &events)?;
+    let event_schema_version = events
+      .first()
+      .map(|event| event.event_schema_version)
+      .ok_or_else(|| {
+        DurableStoreError::Contract("A rich approval requires a started run.".into())
+      })?;
+    if event_schema_version != crate::RUN_EVENT_SCHEMA_VERSION_V19 {
+      return Err(DurableStoreError::Contract(
+        "A rich approval request requires Event v19.".to_string(),
+      ));
+    }
+    append_to_history_scoped_incremental(
+      &transaction,
+      &mut events,
+      &mut projection_state,
+      &binding.run_id,
+      generated_event_id(),
+      created_at,
+      event_schema_version,
+      None,
+      RunEventPayload::ApprovalReviewRequested(ApprovalReviewRequestedData {
+        approval_id: binding.approval_id.clone(),
+        request_id: binding.request_id.clone(),
+        review_digest: binding.review_digest.clone(),
+        directory_version: binding.directory_version.clone(),
+        required: binding.required_approvals,
+        required_roles: binding.required_roles.clone(),
+      }),
+      true,
+    )?;
+    let projection = projection_state.projection().clone();
+    transaction.commit()?;
+    cache_projection_state(&self.projection_cache, &binding.run_id, projection_state);
+    Ok(projection)
+  }
+
+  pub fn record_rich_approval_decision(
+    &mut self,
+    admission: RichApprovalDecisionAdmission,
+  ) -> Result<RichApprovalDecisionOutcome, DurableStoreError> {
+    validate_rich_decision_admission(&admission)?;
+    let transaction = self
+      .connection
+      .transaction_with_behavior(TransactionBehavior::Immediate)?;
+    let review = rich_review_row(&transaction, &admission.run_id, &admission.request_id)?
+      .ok_or(DurableStoreError::RichApprovalNotFound)?;
+    if review.review_digest != admission.review_digest {
+      return Err(DurableStoreError::RichApprovalBindingMismatch);
+    }
+    let current = rich_quorum_state(&transaction, &review)?;
+    if review.status != "pending" {
+      return Ok(RichApprovalDecisionOutcome {
+        status: RichApprovalDecisionStatus::AlreadyResolved,
+        required: review.required,
+        received: current.received,
+        represented_roles: current.represented_roles,
+      });
+    }
+    let existing: Option<String> = transaction
+      .query_row(
+        "SELECT decision FROM woml_approval_reviewer_decisions
+         WHERE run_id = ?1 AND request_id = ?2 AND principal_id = ?3",
+        params![
+          admission.run_id,
+          admission.request_id,
+          admission.principal_id
+        ],
+        |row| row.get(0),
+      )
+      .optional()?;
+    if let Some(existing) = existing {
+      if existing != approval_decision_text(admission.decision) {
+        return Err(DurableStoreError::RichApprovalReviewerConflict);
+      }
+      return Ok(RichApprovalDecisionOutcome {
+        status: RichApprovalDecisionStatus::Idempotent,
+        required: review.required,
+        received: current.received,
+        represented_roles: current.represented_roles,
+      });
+    }
+    transaction.execute(
+      "INSERT INTO woml_approval_reviewer_decisions(
+         run_id, request_id, principal_id, decision, provider, provider_account_id,
+         provider_actor_id, roles_json, decided_at
+       ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+      params![
+        admission.run_id,
+        admission.request_id,
+        admission.principal_id,
+        approval_decision_text(admission.decision),
+        admission.provider,
+        admission.provider_account_id,
+        admission.provider_actor_id,
+        serde_json::to_string(&admission.roles)?,
+        admission.decided_at.to_rfc3339(),
+      ],
+    )?;
+    let quorum = rich_quorum_state(&transaction, &review)?;
+    let terminal = if admission.decision == ApprovalDecision::Rejected {
+      Some((
+        "rejected",
+        RichApprovalResolutionReason::Rejection,
+        ApprovalDecision::Rejected,
+      ))
+    } else if quorum.received >= review.required
+      && review
+        .required_roles
+        .iter()
+        .all(|role| quorum.represented_roles.contains(role))
+    {
+      Some((
+        "approved",
+        RichApprovalResolutionReason::Quorum,
+        ApprovalDecision::Approved,
+      ))
+    } else {
+      None
+    };
+    if let Some((status, _, _)) = terminal {
+      settle_rich_review_row(
+        &transaction,
+        &admission.run_id,
+        &admission.request_id,
+        status,
+        admission.decided_at,
+      )?;
+    }
+
+    let mut payloads = vec![RunEventPayload::ApprovalReviewerDecisionRecorded(
+      ApprovalReviewerDecisionRecordedData {
+        approval_id: review.approval_id.clone(),
+        request_id: admission.request_id.clone(),
+        review_digest: admission.review_digest.clone(),
+        principal_id: admission.principal_id.clone(),
+        decision: admission.decision,
+      },
+    )];
+    if admission.decision == ApprovalDecision::Approved {
+      payloads.push(RunEventPayload::ApprovalQuorumProgressed(
+        ApprovalQuorumProgressedData {
+          approval_id: review.approval_id.clone(),
+          request_id: admission.request_id.clone(),
+          review_digest: admission.review_digest.clone(),
+          required: review.required,
+          received: quorum.received,
+          required_roles: review.required_roles.clone(),
+          represented_roles: quorum.represented_roles.clone(),
+        },
+      ));
+    }
+    if let Some((_, reason, decision)) = terminal {
+      payloads.push(RunEventPayload::ApprovalResolved(ApprovalResolvedData {
+        approval_id: review.approval_id.clone(),
+        request_id: admission.request_id.clone(),
+        resolution: None,
+        review_digest: Some(admission.review_digest.clone()),
+        decision: Some(decision),
+        reason: Some(reason),
+        required: Some(review.required),
+        received: Some(quorum.received),
+        required_roles: Some(review.required_roles.clone()),
+        represented_roles: Some(quorum.represented_roles.clone()),
+      }));
+    }
+    append_rich_approval_payloads(
+      &transaction,
+      &self.projection_cache,
+      &admission.run_id,
+      admission.decided_at,
+      payloads,
+    )?;
+    transaction.commit()?;
+    self.projection_cache.borrow_mut().remove(&admission.run_id);
+    Ok(RichApprovalDecisionOutcome {
+      status: match terminal {
+        Some(("approved", _, _)) => RichApprovalDecisionStatus::Approved,
+        Some(_) => RichApprovalDecisionStatus::Rejected,
+        None => RichApprovalDecisionStatus::Pending,
+      },
+      required: review.required,
+      received: quorum.received,
+      represented_roles: quorum.represented_roles,
+    })
+  }
+
+  pub fn settle_rich_approval_without_vote(
+    &mut self,
+    run_id: &str,
+    request_id: &str,
+    review_digest: &str,
+    reason: RichApprovalResolutionReason,
+    settled_at: DateTime<Utc>,
+  ) -> Result<RichApprovalDecisionOutcome, DurableStoreError> {
+    if matches!(
+      reason,
+      RichApprovalResolutionReason::Quorum | RichApprovalResolutionReason::Rejection
+    ) {
+      return Err(DurableStoreError::Contract(
+        "Human rich approval outcomes require a reviewer decision.".to_string(),
+      ));
+    }
+    let transaction = self
+      .connection
+      .transaction_with_behavior(TransactionBehavior::Immediate)?;
+    let review = rich_review_row(&transaction, run_id, request_id)?
+      .ok_or(DurableStoreError::RichApprovalNotFound)?;
+    if review.review_digest != review_digest {
+      return Err(DurableStoreError::RichApprovalBindingMismatch);
+    }
+    let quorum = rich_quorum_state(&transaction, &review)?;
+    if review.status != "pending" {
+      return Ok(RichApprovalDecisionOutcome {
+        status: RichApprovalDecisionStatus::AlreadyResolved,
+        required: review.required,
+        received: quorum.received,
+        represented_roles: quorum.represented_roles,
+      });
+    }
+    let status = match reason {
+      RichApprovalResolutionReason::Timeout => "expired",
+      RichApprovalResolutionReason::Cancellation => "cancelled",
+      RichApprovalResolutionReason::ArtifactInvalidated => "invalidated",
+      _ => unreachable!(),
+    };
+    settle_rich_review_row(&transaction, run_id, request_id, status, settled_at)?;
+    let mut payloads = Vec::new();
+    if reason == RichApprovalResolutionReason::ArtifactInvalidated {
+      payloads.push(RunEventPayload::ApprovalInvalidated(
+        ApprovalInvalidatedData {
+          approval_id: review.approval_id.clone(),
+          request_id: request_id.to_string(),
+          review_digest: review_digest.to_string(),
+          reason,
+        },
+      ));
+    }
+    payloads.push(RunEventPayload::ApprovalResolved(ApprovalResolvedData {
+      approval_id: review.approval_id,
+      request_id: request_id.to_string(),
+      resolution: None,
+      review_digest: Some(review_digest.to_string()),
+      decision: Some(ApprovalDecision::Rejected),
+      reason: Some(reason),
+      required: Some(review.required),
+      received: Some(quorum.received),
+      required_roles: Some(review.required_roles),
+      represented_roles: Some(quorum.represented_roles.clone()),
+    }));
+    append_rich_approval_payloads(
+      &transaction,
+      &self.projection_cache,
+      run_id,
+      settled_at,
+      payloads,
+    )?;
+    transaction.commit()?;
+    self.projection_cache.borrow_mut().remove(run_id);
+    Ok(RichApprovalDecisionOutcome {
+      status: RichApprovalDecisionStatus::Rejected,
+      required: review.required,
+      received: quorum.received,
+      represented_roles: quorum.represented_roles,
+    })
+  }
+
+  pub fn inspect_rich_approval(
+    &self,
+    run_id: &str,
+    request_id: &str,
+    decision_limit: usize,
+  ) -> Result<RichApprovalInspectionV1, DurableStoreError> {
+    let limit = decision_limit.clamp(1, RICH_APPROVAL_INSPECTION_DECISION_LIMIT);
+    let row = rich_review_row(&self.connection, run_id, request_id)?
+      .ok_or(DurableStoreError::RichApprovalNotFound)?;
+    let (review_json, directory_version, created_at, resolved_at): (
+      String,
+      String,
+      String,
+      Option<String>,
+    ) = self.connection.query_row(
+      "SELECT review_json, directory_version, created_at, resolved_at
+       FROM woml_approval_reviews WHERE run_id = ?1 AND request_id = ?2",
+      params![run_id, request_id],
+      |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+    )?;
+    let total_decisions: u32 = self.connection.query_row(
+      "SELECT COUNT(*) FROM woml_approval_reviewer_decisions
+       WHERE run_id = ?1 AND request_id = ?2",
+      params![run_id, request_id],
+      |row| row.get(0),
+    )?;
+    let mut statement = self.connection.prepare(
+      "SELECT principal_id, decision, provider, provider_account_id, roles_json, decided_at
+       FROM woml_approval_reviewer_decisions
+       WHERE run_id = ?1 AND request_id = ?2
+       ORDER BY decided_at, principal_id LIMIT ?3",
+    )?;
+    let decisions = statement
+      .query_map(params![run_id, request_id, limit as u64], |row| {
+        let decision: String = row.get(1)?;
+        let roles_json: String = row.get(4)?;
+        let decided_at: String = row.get(5)?;
+        Ok((
+          row.get::<_, String>(0)?,
+          decision,
+          row.get::<_, String>(2)?,
+          row.get::<_, String>(3)?,
+          roles_json,
+          decided_at,
+        ))
+      })?
+      .map(|row| {
+        let (principal_id, decision, provider, provider_account_id, roles_json, decided_at) = row?;
+        Ok(RichApprovalDecisionInspection {
+          principal_id,
+          decision: parse_approval_decision(&decision)?,
+          provider,
+          provider_account_id,
+          roles: serde_json::from_str(&roles_json)?,
+          decided_at: parse_timestamp(&decided_at)?,
+        })
+      })
+      .collect::<Result<Vec<_>, DurableStoreError>>()?;
+    Ok(RichApprovalInspectionV1 {
+      run_id: run_id.to_string(),
+      approval_id: row.approval_id,
+      request_id: request_id.to_string(),
+      review_digest: row.review_digest,
+      review: serde_json::from_str(&review_json)?,
+      required: row.required,
+      required_roles: row.required_roles,
+      directory_version,
+      status: row.status,
+      created_at: parse_timestamp(&created_at)?,
+      resolved_at: resolved_at.as_deref().map(parse_timestamp).transpose()?,
+      decisions_truncated: total_decisions as usize > decisions.len(),
+      total_decisions,
+      decisions,
+    })
   }
 
   pub(crate) fn append_payloads_atomically(
@@ -5131,6 +6042,7 @@ impl DurableEventStore {
           | crate::RUN_EVENT_SCHEMA_VERSION_V16
           | crate::RUN_EVENT_SCHEMA_VERSION_V17
           | crate::RUN_EVENT_SCHEMA_VERSION_V18
+          | crate::RUN_EVENT_SCHEMA_VERSION_V19
       ) {
         expand_model_v11_payload(&workflow, run_id, payload)?
       } else {
@@ -5204,7 +6116,10 @@ impl DurableEventStore {
     {
       write_runtime_policy_indexes_from_projection(&transaction, run_id, admission, &projection)?;
     }
-    if event_schema_version == crate::RUN_EVENT_SCHEMA_VERSION_V18 {
+    if matches!(
+      event_schema_version,
+      crate::RUN_EVENT_SCHEMA_VERSION_V18 | crate::RUN_EVENT_SCHEMA_VERSION_V19
+    ) {
       write_correction_indexes_from_projection(
         &transaction,
         run_id,
@@ -8322,14 +9237,14 @@ impl DurableEventStore {
           decision,
         },
       ),
-      RunEventPayload::ApprovalResolved(ApprovalResolvedData {
-        approval_id: approval_id.clone(),
-        request_id: request_id.clone(),
-        resolution: ApprovalResolution::Decision {
+      RunEventPayload::ApprovalResolved(ApprovalResolvedData::basic(
+        approval_id.clone(),
+        request_id.clone(),
+        ApprovalResolution::Decision {
           decision,
           source: ApprovalDecisionSource::Human,
         },
-      }),
+      )),
     ];
     let resolution = match decision {
       ApprovalDecision::Approved => crate::event::NotificationResolution::Approved,
@@ -8986,7 +9901,9 @@ impl DurableEventStore {
       })?;
     if !matches!(
       event_schema_version,
-      crate::RUN_EVENT_SCHEMA_VERSION_V17 | crate::RUN_EVENT_SCHEMA_VERSION_V18
+      crate::RUN_EVENT_SCHEMA_VERSION_V17
+        | crate::RUN_EVENT_SCHEMA_VERSION_V18
+        | crate::RUN_EVENT_SCHEMA_VERSION_V19
     ) {
       return Err(DurableStoreError::Contract(
         "Durable locks require Event v17.".to_string(),
@@ -10557,14 +11474,16 @@ impl DurableEventStore {
       return Err(DurableStoreError::ExpiredApprovalToken);
     }
 
-    let mut payloads = vec![RunEventPayload::ApprovalResolved(ApprovalResolvedData {
-      approval_id: approval_id.clone(),
-      request_id: request_id.clone(),
-      resolution: ApprovalResolution::Decision {
-        decision,
-        source: ApprovalDecisionSource::Human,
-      },
-    })];
+    let mut payloads = vec![RunEventPayload::ApprovalResolved(
+      ApprovalResolvedData::basic(
+        approval_id.clone(),
+        request_id.clone(),
+        ApprovalResolution::Decision {
+          decision,
+          source: ApprovalDecisionSource::Human,
+        },
+      ),
+    )];
     let notification_resolution = match decision {
       ApprovalDecision::Approved => crate::event::NotificationResolution::Approved,
       ApprovalDecision::Rejected => crate::event::NotificationResolution::Rejected,
@@ -10686,11 +11605,13 @@ impl DurableEventStore {
       },
       ApprovalTimeoutPolicy::Fail => ApprovalResolution::TimeoutFailure,
     };
-    let mut payloads = vec![RunEventPayload::ApprovalResolved(ApprovalResolvedData {
-      approval_id: approval_id.to_string(),
-      request_id: request.request_id.clone(),
-      resolution: resolution.clone(),
-    })];
+    let mut payloads = vec![RunEventPayload::ApprovalResolved(
+      ApprovalResolvedData::basic(
+        approval_id.to_string(),
+        request.request_id.clone(),
+        resolution.clone(),
+      ),
+    )];
     let notification_resolution = match &resolution {
       ApprovalResolution::Decision {
         decision: ApprovalDecision::Rejected,
@@ -10997,7 +11918,10 @@ impl DurableEventStore {
     let event_schema_version = projection.event_schema_version.ok_or_else(|| {
       DurableStoreError::Contract("A stored run has no event schema version.".to_string())
     })?;
-    if event_schema_version == crate::RUN_EVENT_SCHEMA_VERSION_V18 {
+    if matches!(
+      event_schema_version,
+      crate::RUN_EVENT_SCHEMA_VERSION_V18 | crate::RUN_EVENT_SCHEMA_VERSION_V19
+    ) {
       let active_corrections = projection
         .sagas
         .values()
@@ -11164,6 +12088,7 @@ impl DurableEventStore {
         | crate::RUN_EVENT_SCHEMA_VERSION_V16
         | crate::RUN_EVENT_SCHEMA_VERSION_V17
         | crate::RUN_EVENT_SCHEMA_VERSION_V18
+        | crate::RUN_EVENT_SCHEMA_VERSION_V19
     ) {
       let ambiguous_actions = projection
         .lifecycle_hooks
@@ -11536,6 +12461,7 @@ impl DurableEventStore {
             | crate::RUN_EVENT_SCHEMA_VERSION_V16
             | crate::RUN_EVENT_SCHEMA_VERSION_V17
             | crate::RUN_EVENT_SCHEMA_VERSION_V18
+            | crate::RUN_EVENT_SCHEMA_VERSION_V19
         ) {
           expand_model_v11_payload(&workflow, run_id, payload)?
         } else {
@@ -11592,6 +12518,7 @@ impl DurableEventStore {
           | crate::RUN_EVENT_SCHEMA_VERSION_V16
           | crate::RUN_EVENT_SCHEMA_VERSION_V17
           | crate::RUN_EVENT_SCHEMA_VERSION_V18
+          | crate::RUN_EVENT_SCHEMA_VERSION_V19
       ) {
         expand_model_v11_payload(&workflow, run_id, run_failure)?
       } else {
@@ -11812,6 +12739,7 @@ impl DurableEventStore {
           | crate::RUN_EVENT_SCHEMA_VERSION_V16
           | crate::RUN_EVENT_SCHEMA_VERSION_V17
           | crate::RUN_EVENT_SCHEMA_VERSION_V18
+          | crate::RUN_EVENT_SCHEMA_VERSION_V19
       ) {
         expand_model_v11_payload(&workflow, run_id, run_failure)?
       } else {
@@ -13413,6 +14341,7 @@ fn validate_trigger_occurrence_history(
           | crate::RUN_EVENT_SCHEMA_VERSION_V16
           | crate::RUN_EVENT_SCHEMA_VERSION_V17
           | crate::RUN_EVENT_SCHEMA_VERSION_V18
+          | crate::RUN_EVENT_SCHEMA_VERSION_V19
       ) && admission.definition_hash == occurrence.definition_hash
         && admission.trigger.id == occurrence.trigger_id
         && admission.trigger.handler == occurrence.trigger_handler
@@ -14229,10 +15158,12 @@ fn rebuild_correction_indexes(connection: &Connection) -> Result<(), DurableStor
   drop(statement);
   for (run_id, definition_hash) in runs {
     let events = load_events(connection, &run_id)?;
-    if events
-      .first()
-      .is_some_and(|event| event.event_schema_version == crate::RUN_EVENT_SCHEMA_VERSION_V18)
-    {
+    if events.first().is_some_and(|event| {
+      matches!(
+        event.event_schema_version,
+        crate::RUN_EVENT_SCHEMA_VERSION_V18 | crate::RUN_EVENT_SCHEMA_VERSION_V19
+      )
+    }) {
       let projection = fold_events(&events)?;
       write_correction_indexes_from_projection(
         connection,
@@ -14323,6 +15254,7 @@ fn append_to_history_scoped_incremental(
       | crate::RUN_EVENT_SCHEMA_VERSION_V16
       | crate::RUN_EVENT_SCHEMA_VERSION_V17
       | crate::RUN_EVENT_SCHEMA_VERSION_V18
+      | crate::RUN_EVENT_SCHEMA_VERSION_V19
   ) && matches!(
     payload,
     RunEventPayload::RunSucceeded(_) | RunEventPayload::RunFailed(_)
@@ -14986,6 +15918,7 @@ fn append_to_history_scoped(
       | crate::RUN_EVENT_SCHEMA_VERSION_V16
       | crate::RUN_EVENT_SCHEMA_VERSION_V17
       | crate::RUN_EVENT_SCHEMA_VERSION_V18
+      | crate::RUN_EVENT_SCHEMA_VERSION_V19
   ) && matches!(
     payload,
     RunEventPayload::RunSucceeded(_) | RunEventPayload::RunFailed(_)
@@ -15615,7 +16548,8 @@ fn attempt_run_failed_data(
     | crate::RUN_EVENT_SCHEMA_VERSION_V15
     | crate::RUN_EVENT_SCHEMA_VERSION_V16
     | crate::RUN_EVENT_SCHEMA_VERSION_V17
-    | crate::RUN_EVENT_SCHEMA_VERSION_V18 => RunFailedData::V2(RunFailedDataV2::Attempt {
+    | crate::RUN_EVENT_SCHEMA_VERSION_V18
+    | crate::RUN_EVENT_SCHEMA_VERSION_V19 => RunFailedData::V2(RunFailedDataV2::Attempt {
       node_id,
       attempt,
       invocation_id,
@@ -15788,6 +16722,7 @@ impl DurableDagEngine {
         | crate::RUN_EVENT_SCHEMA_VERSION_V16
         | crate::RUN_EVENT_SCHEMA_VERSION_V17
         | crate::RUN_EVENT_SCHEMA_VERSION_V18
+        | crate::RUN_EVENT_SCHEMA_VERSION_V19
     ) && matches!(
       &payload,
       RunEventPayload::RunSucceeded(_) | RunEventPayload::RunFailed(_)

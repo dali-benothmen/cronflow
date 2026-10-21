@@ -179,6 +179,7 @@ jobs:
           --test compensation_runtime
           --test compensation_store
           --test rich_plan_approval_model
+          --test rich_plan_approval_authority
           --test retention
           --test webhook_runtime
           -- --test-threads=1

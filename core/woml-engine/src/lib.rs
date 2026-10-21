@@ -109,10 +109,12 @@ pub use durable::{
   NotificationProviderUpdateResult, NotificationUpdateWork, PolicyClaimWaitReason,
   PolicyExecutionClaimResult, PolicyWaitingFor, ProgrammaticLockAcquire,
   ProgrammaticLockAcquireState, ProgrammaticLockLease, PublicRunStatus, RecoveryReport,
-  RunCancellationCode, RunCancellationResult, RunCancellationStatus, RunDefinitionBinding,
-  RunInspectionCancellationV2, RunInspectionForEachCountsV6, RunInspectionForEachItemV6,
-  RunInspectionForEachV6, RunInspectionForkCountsV4, RunInspectionForkJoinV4, RunInspectionForkV4,
-  RunInspectionForksV4, RunInspectionHookV2, RunInspectionPolicyV3, RunInspectionReusableCountsV5,
+  RichApprovalDecisionAdmission, RichApprovalDecisionInspection, RichApprovalDecisionOutcome,
+  RichApprovalDecisionStatus, RichApprovalInspectionV1, RunCancellationCode, RunCancellationResult,
+  RunCancellationStatus, RunDefinitionBinding, RunInspectionCancellationV2,
+  RunInspectionForEachCountsV6, RunInspectionForEachItemV6, RunInspectionForEachV6,
+  RunInspectionForkCountsV4, RunInspectionForkJoinV4, RunInspectionForkV4, RunInspectionForksV4,
+  RunInspectionHookV2, RunInspectionPolicyV3, RunInspectionReusableCountsV5,
   RunInspectionReusableDefinitionsV5, RunInspectionReusableItemV5, RunInspectionV2,
   RunInspectionV3, RunInspectionV4, RunInspectionV5, RunInspectionV6, RunListV1, RunListV2,
   RunSummaryV1, RunSummaryV2, RunTimeoutSettlement, RuntimeObservationV1, RuntimeOwnerLease,
@@ -126,7 +128,8 @@ pub use durable::{
   EXTERNAL_SIGNAL_ADMISSION_PROFILE, EXTERNAL_SIGNAL_MAX_EARLY_PER_RUN,
   EXTERNAL_SIGNAL_MAX_PAYLOAD_BYTES, EXTERNAL_SIGNAL_MAX_PAYLOAD_DEPTH,
   EXTERNAL_SIGNAL_RESULT_PROFILE, LOCK_RECOVERY_BATCH_LIMIT, LOCK_WAITERS_PER_KEY_LIMIT,
-  LOCK_WAITERS_PER_STORE_LIMIT, RUNTIME_POLICY_QUEUE_CEILING,
+  LOCK_WAITERS_PER_STORE_LIMIT, RICH_APPROVAL_INSPECTION_DECISION_LIMIT,
+  RUNTIME_POLICY_QUEUE_CEILING,
 };
 pub use durable_state::{
   DurableStateError, DurableStateExecution, DurableStateLimits, DurableStateStore, FixedStateClock,
@@ -136,36 +139,38 @@ pub use durable_state::{
 };
 pub use engine::{step_effect_idempotency_key, EngineError, InMemoryDagEngine};
 pub use event::{
-  ApprovalDecision, ApprovalDecisionSource, ApprovalFailure, ApprovalRequestedData,
-  ApprovalResolution, ApprovalResolvedData, ApprovalTimeoutPolicy, AttemptFailure,
-  AttemptFailureKind, BranchFailure, BranchSelectedData, BusinessOutcome, ChoiceSelectedData,
-  CommunicationProviderMessageIdentity, CompensationRegisteredData, CorrectionAttemptFailedData,
-  CorrectionAttemptIdentityData, CorrectionInterruptedData, CorrectionRetryScheduledData,
-  CorrectiveActionKind, DurableWaitKind, DurableWaitTimeoutBehavior, DurableWaitWinner,
-  ExternalSignalReceivedData, FailureSizeDetails, FinalLifecycleStatus, ForkBranchOutcome,
-  ForkBranchSettledData, ForkJoinOutcome, ForkJoinSettledData, ForkOpenedData, JsonValueType,
-  LifecycleActionFailedData, LifecycleActionIdentityData, LifecycleFailure, LifecycleFailureKind,
-  LifecycleHookCompletedData, LifecycleHookCompletionStatus, LifecycleHookRequestedData,
-  LifecycleSubject, LifecycleSubjectKind, LifecycleWarning, LockAcquireTimedOutData,
-  LockAcquiredData, LockAcquisitionCancelledData, LockLeaseLostData, LockReleasedData,
-  LockWaitRegisteredData, ManualRecoveryRequiredData, NotificationDecisionAcceptedData,
-  NotificationDeliveryAttemptStartedData, NotificationDeliveryFailedData,
-  NotificationDeliveryRequestedData, NotificationDeliverySucceededData,
-  NotificationMessageUpdateAttemptStartedData, NotificationMessageUpdateFailedData,
-  NotificationMessageUpdateRequestedData, NotificationMessageUpdatedData, NotificationResolution,
-  NotificationRunFailure, NotificationSafeFailure, OperationExecutionMode, OperationFailedData,
-  OperationStartedData, OperationSucceededData, ParallelFailure, ParallelFailurePolicy,
-  ParallelGroupCompletedData, ParallelGroupOutcome, ParallelGroupStartedData,
-  ProviderMessageIdentity, ReusableLifecycleActionFailedData, ReusableLifecycleActionStartedData,
+  ApprovalDecision, ApprovalDecisionSource, ApprovalFailure, ApprovalInvalidatedData,
+  ApprovalQuorumProgressedData, ApprovalRequestedData, ApprovalResolution, ApprovalResolvedData,
+  ApprovalReviewRequestedData, ApprovalReviewerDecisionRecordedData, ApprovalTimeoutPolicy,
+  AttemptFailure, AttemptFailureKind, BranchFailure, BranchSelectedData, BusinessOutcome,
+  ChoiceSelectedData, CommunicationProviderMessageIdentity, CompensationRegisteredData,
+  CorrectionAttemptFailedData, CorrectionAttemptIdentityData, CorrectionInterruptedData,
+  CorrectionRetryScheduledData, CorrectiveActionKind, DurableWaitKind, DurableWaitTimeoutBehavior,
+  DurableWaitWinner, ExternalSignalReceivedData, FailureSizeDetails, FinalLifecycleStatus,
+  ForkBranchOutcome, ForkBranchSettledData, ForkJoinOutcome, ForkJoinSettledData, ForkOpenedData,
+  JsonValueType, LifecycleActionFailedData, LifecycleActionIdentityData, LifecycleFailure,
+  LifecycleFailureKind, LifecycleHookCompletedData, LifecycleHookCompletionStatus,
+  LifecycleHookRequestedData, LifecycleSubject, LifecycleSubjectKind, LifecycleWarning,
+  LockAcquireTimedOutData, LockAcquiredData, LockAcquisitionCancelledData, LockLeaseLostData,
+  LockReleasedData, LockWaitRegisteredData, ManualRecoveryRequiredData,
+  NotificationDecisionAcceptedData, NotificationDeliveryAttemptStartedData,
+  NotificationDeliveryFailedData, NotificationDeliveryRequestedData,
+  NotificationDeliverySucceededData, NotificationMessageUpdateAttemptStartedData,
+  NotificationMessageUpdateFailedData, NotificationMessageUpdateRequestedData,
+  NotificationMessageUpdatedData, NotificationResolution, NotificationRunFailure,
+  NotificationSafeFailure, OperationExecutionMode, OperationFailedData, OperationStartedData,
+  OperationSucceededData, ParallelFailure, ParallelFailurePolicy, ParallelGroupCompletedData,
+  ParallelGroupOutcome, ParallelGroupStartedData, ProviderMessageIdentity,
+  ReusableLifecycleActionFailedData, ReusableLifecycleActionStartedData,
   ReusableLifecycleActionSucceededData, ReusableLifecycleCompletedData, ReusableLifecycleHook,
-  ReusableLifecycleOutcome, ReusableLifecycleRequestedData, RunAdmissionQueue, RunAdmissionTrigger,
-  RunAdmittedData, RunCancellationRequestedData, RunEvent, RunEventPayload,
-  RunExecutionStartedData, RunFailedData, RunFailedDataV1, RunFailedDataV2, RunFailedDataV3,
-  RunFailedDataV4, RunFailedDataV5, RunFinalizedData, RunIngress, RunOutcomeDecidedData,
-  RunStartedData, RunSucceededData, RunTimeoutReachedData, SagaCorrectionReason,
-  SagaCorrectionStartedData, SagaIdentityData, SlackProviderMessageIdentity, StepAttemptFailedData,
-  StepAttemptStartedData, StepAttemptSucceededData, StepRetryScheduledData, WaitCancelledData,
-  WaitRegisteredData, WaitSatisfiedData, WaitTimedOutData,
+  ReusableLifecycleOutcome, ReusableLifecycleRequestedData, RichApprovalResolutionReason,
+  RunAdmissionQueue, RunAdmissionTrigger, RunAdmittedData, RunCancellationRequestedData, RunEvent,
+  RunEventPayload, RunExecutionStartedData, RunFailedData, RunFailedDataV1, RunFailedDataV2,
+  RunFailedDataV3, RunFailedDataV4, RunFailedDataV5, RunFinalizedData, RunIngress,
+  RunOutcomeDecidedData, RunStartedData, RunSucceededData, RunTimeoutReachedData,
+  SagaCorrectionReason, SagaCorrectionStartedData, SagaIdentityData, SlackProviderMessageIdentity,
+  StepAttemptFailedData, StepAttemptStartedData, StepAttemptSucceededData, StepRetryScheduledData,
+  WaitCancelledData, WaitRegisteredData, WaitSatisfiedData, WaitTimedOutData,
 };
 pub use events_service::{
   EventServiceAcceptedRun, EventServiceRunDispatcher, EventServiceSubscriber, ManagedEventsHandler,
@@ -190,6 +195,7 @@ pub use model::{
   CompiledRuntimePolicy, CompiledSaga, CompiledWait, CompiledWaitSignal,
   CompiledWorkflowDefinition, LifecycleEventName, ModelIssue, ModelIssueCode, ModelValidationError,
   NotificationDefinition, QueueDiscipline, RateLimitAlgorithm, ScriptRuntimeBindings,
+  ValueExpression,
 };
 pub use notification_host::{
   NotificationHostClient, NotificationHostClientError, NotificationHostProcessOptions,
@@ -232,18 +238,23 @@ pub use projection::{
   NotificationDeliveryStatus, NotificationMessageUpdateProjection, NotificationMessageUpdateStatus,
   OperationIdentity, OperationProjection, OperationStatus, ParallelGroupProjection,
   ParallelGroupStatus, RetryScheduleProjection, ReusableLifecycleProjection,
-  ReusableLifecycleStatus, RunFailure, RunProjection, RunStatus, SagaPhase, SagaProjection,
-  WorkflowContext,
+  ReusableLifecycleStatus, RichApprovalRequestProjection, RichApprovalRequestStatus,
+  RichApprovalReviewerDecisionProjection, RunFailure, RunProjection, RunStatus, SagaPhase,
+  SagaProjection, WorkflowContext,
 };
 pub use retention::{
   execute_retention, last_retention_result, plan_retention, RetentionError, RetentionExecutionV1,
   RetentionPlanV1, RetentionPolicyV1, RetentionResultV1, TRIGGER_DEDUPLICATION_SAFETY_DAYS,
 };
 pub use rich_approval::{
-  ReviewChangeActionV1, ReviewChangeV1, ReviewCheckStatusV1, ReviewCheckV1, ReviewFactV1,
-  ReviewPayloadV1, ReviewRiskV1, ReviewerDirectoryV1, ReviewerIdentityV1, ReviewerPrincipalV1,
-  ReviewerProviderV1, REVIEWER_DIRECTORY_PROFILE, REVIEW_PAYLOAD_MAX_BYTES,
-  REVIEW_PAYLOAD_MAX_NESTING, REVIEW_PAYLOAD_VERSION, RICH_APPROVAL_MAX_PRINCIPALS,
+  bind_rich_approval_review, resolve_rich_approval_review, verify_bound_rich_approval_review,
+  BoundRichApprovalReview, ReviewChangeActionV1, ReviewChangeV1, ReviewCheckStatusV1,
+  ReviewCheckV1, ReviewFactV1, ReviewPayloadV1, ReviewRiskV1, ReviewerDirectoryV1,
+  ReviewerIdentityV1, ReviewerPrincipalV1, ReviewerProviderV1, RichApprovalArtifactVerifier,
+  RichApprovalBindingInput, RichApprovalError, REVIEWER_DIRECTORY_PROFILE,
+  REVIEW_ARTIFACTS_MAX_ITEMS, REVIEW_CHANGES_MAX_ITEMS, REVIEW_CHECKS_MAX_ITEMS,
+  REVIEW_FACTS_MAX_ITEMS, REVIEW_PAYLOAD_MAX_BYTES, REVIEW_PAYLOAD_MAX_NESTING,
+  REVIEW_PAYLOAD_VERSION, REVIEW_SECRET_MIN_BYTES, RICH_APPROVAL_MAX_PRINCIPALS,
   RICH_APPROVAL_MAX_ROLES, RICH_PLAN_APPROVAL_PROFILE,
 };
 pub use runtime::{
@@ -329,10 +340,13 @@ pub const RUN_EVENT_SCHEMA_VERSION_V15: u32 = 15;
 pub const RUN_EVENT_SCHEMA_VERSION_V16: u32 = 16;
 pub const RUN_EVENT_SCHEMA_VERSION_V17: u32 = 17;
 pub const RUN_EVENT_SCHEMA_VERSION_V18: u32 = 18;
-pub const RUN_EVENT_SCHEMA_VERSION: u32 = RUN_EVENT_SCHEMA_VERSION_V18;
+pub const RUN_EVENT_SCHEMA_VERSION_V19: u32 = 19;
+pub const RUN_EVENT_SCHEMA_VERSION: u32 = RUN_EVENT_SCHEMA_VERSION_V19;
 
 pub const fn run_event_schema_version_for_model(model_schema_version: u32) -> u32 {
-  if model_schema_version >= COMPILED_MODEL_SCHEMA_VERSION_V19 {
+  if model_schema_version >= COMPILED_MODEL_SCHEMA_VERSION_V20 {
+    RUN_EVENT_SCHEMA_VERSION_V19
+  } else if model_schema_version >= COMPILED_MODEL_SCHEMA_VERSION_V19 {
     RUN_EVENT_SCHEMA_VERSION_V18
   } else if model_schema_version >= COMPILED_MODEL_SCHEMA_VERSION_V18 {
     RUN_EVENT_SCHEMA_VERSION_V17
