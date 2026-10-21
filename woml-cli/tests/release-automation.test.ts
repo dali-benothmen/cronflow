@@ -52,6 +52,7 @@ describe('WOML release automation', () => {
       'lock-authority',
       'package',
       'process-containment',
+      'rich-plan-approvals',
       'rust',
     ]);
     expect(document.permissions).toEqual({ contents: 'read' });

@@ -1,4 +1,6 @@
 import { describe, expect, test } from 'bun:test';
+import { readFile } from 'node:fs/promises';
+import { resolve } from 'node:path';
 
 import {
   assertRichApprovalNotificationV3,
@@ -8,31 +10,7 @@ import {
   type RichApprovalNotificationV3,
 } from '../src/rich-approval-presentation';
 
-const digest = `sha256:${'a'.repeat(64)}`;
-
-function invocation(
-  provider: RichApprovalNotificationV3['provider'] = 'slack'
-): RichApprovalNotificationV3 {
-  const presentation = createRichApprovalPresentation(
-    {
-      title: 'Deploy payments-api to production',
-      summary: 'Apply the reviewed production infrastructure plan.',
-      risk: 'high',
-      changes: [
-        { action: 'create', target: 'aws_db_instance.primary', summary: 'Create the primary database.' },
-        { action: 'update', target: 'aws_ecs_service.api', summary: 'Roll out the new task definition.' },
-        { action: 'destroy', target: 'aws_instance.legacy', summary: 'Remove the retired host.' },
-        { action: 'no-op', target: 'aws_s3_bucket.audit', summary: 'No change.' },
-      ],
-      checks: [{ name: 'Terraform validation', status: 'passed' }],
-      artifacts: [{
-        contract: 'woml.artifact-reference', contractVersion: 1,
-        id: 'art_plan', name: 'production.tfplan', size: 4096,
-        sha256: `sha256:${'b'.repeat(64)}`, contentType: 'application/octet-stream',
-      }],
-    },
-    { required: 2, received: 1, requiredRoles: ['production-owner', 'security-owner'] }
-  );
+function invocation(): RichApprovalNotificationV3 {
   return {
     protocol: 'woml.notification-provider-host',
     protocolVersion: 3,
@@ -42,23 +20,49 @@ function invocation(
     runId: 'run_review_1',
     approvalId: 'approveDeployment',
     requestId: 'aprreq_review_1',
-    deliveryId: 'approveDeployment:notify:0:channel:0',
-    provider,
-    destination: provider === 'telegram' ? '123456789' : 'C0123456789',
-    reviewDigest: digest,
-    presentation,
+    deliveryId: 'delivery_review_1',
+    provider: 'slack',
+    destination: 'C0123456789',
+    reviewDigest:
+      'sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+    presentation: {
+      title: 'Deploy payments-api',
+      summary: 'Apply the exact reviewed production plan.',
+      risk: 'high',
+      authority: {
+        required: 2,
+        received: 0,
+        requiredRoles: ['production-owner', 'security-owner'],
+      },
+    },
     decisionCapability: {
-      url: 'http://127.0.0.1:7331/api/v2/approvals/run_review_1/aprreq_review_1',
-      token: 'a'.repeat(32),
-      expiresAt: '2026-10-21T12:30:00Z',
+      url: 'http://127.0.0.1:3000/api/v2/approvals/request-1',
+      token: 'rpa_0123456789abcdef0123456789abcdef',
+      expiresAt: '2099-01-01T00:00:00.000Z',
     },
   };
 }
 
-describe('Rich Approval Provider Host v3 presentation', () => {
+describe('Rich Approval Provider Host v3 hardening', () => {
   test('renders one deterministic bounded evidence summary for every provider', () => {
+    const presentation = createRichApprovalPresentation(
+      {
+        title: 'Deploy payments-api to production',
+        summary: 'Apply the reviewed production infrastructure plan.',
+        risk: 'high',
+        changes: [
+          { action: 'create', target: 'aws_db_instance.primary', summary: 'Create the primary database.' },
+          { action: 'update', target: 'aws_ecs_service.api', summary: 'Roll out the new task definition.' },
+          { action: 'destroy', target: 'aws_instance.legacy', summary: 'Remove the retired host.' },
+          { action: 'no-op', target: 'aws_s3_bucket.audit', summary: 'No change.' },
+        ],
+        checks: [{ name: 'Terraform validation', status: 'passed' }],
+        artifacts: [{ name: 'production.tfplan', size: 4096 }],
+      },
+      { required: 2, received: 1, requiredRoles: ['production-owner', 'security-owner'] }
+    );
     for (const provider of ['slack', 'telegram', 'discord', 'custom'] as const) {
-      const message = invocation(provider);
+      const message = { ...invocation(), provider, presentation };
       expect(() => assertRichApprovalNotificationV3(message)).not.toThrow();
       const rendered = renderRichApprovalNotification(message);
       expect(rendered.text).toContain('Deploy payments-api to production');
@@ -67,52 +71,103 @@ describe('Rich Approval Provider Host v3 presentation', () => {
       expect(rendered.text).toContain('+1 more change(s)');
       expect(rendered.text).toContain('Terraform validation');
       expect(rendered.text).toContain('production.tfplan');
-      expect(rendered.text).toContain('aaaaaaaaaaaa…');
-      expect([...rendered.text].length).toBeLessThanOrEqual(provider === 'discord' ? 2_000 : 4_096);
-      if (provider === 'slack') {
-        expect(rendered.blocks).toBeDefined();
-      } else {
-        expect(rendered.blocks).toBeUndefined();
-      }
+      expect([...rendered.text].length).toBeLessThanOrEqual(
+        provider === 'discord' ? 2_000 : 4_096
+      );
+      expect(rendered.blocks === undefined).toBe(provider !== 'slack');
     }
   });
 
-  test('uses plain text blocks, removes active control characters, and never copies capabilities into presentation', () => {
-    const message = invocation();
-    const presentation = createRichApprovalPresentation(
+  test('rejects malformed and confused invocation envelopes without exposing capabilities', () => {
+    const valid = invocation();
+    const mutations: unknown[] = [
+      { ...valid, unexpected: true },
+      { ...valid, protocolVersion: 2 },
+      { ...valid, provider: 'email' },
+      { ...valid, runId: '' },
+      { ...valid, destination: 'x'.repeat(321) },
+      { ...valid, reviewDigest: `sha256:${'A'.repeat(64)}` },
+      { ...valid, presentation: { ...valid.presentation, risk: 'unknown' } },
       {
-        title: 'Deploy <script>alert(1)</script>\u202e',
-        summary: 'safe summary',
-        risk: 'critical',
+        ...valid,
+        presentation: {
+          ...valid.presentation,
+          authority: { required: 2, received: 3, requiredRoles: [] },
+        },
       },
-      message.presentation.authority
-    );
-    expect(presentation.title).toBe('Deploy <script>alert(1)</script>�');
-    expect(presentationContainsForbiddenValue(presentation, [
-      message.decisionCapability.token,
-      'super-secret-value',
-    ])).toBe(false);
-    const rendered = renderRichApprovalNotification({ ...message, presentation });
-    expect(JSON.stringify(rendered.blocks)).toContain('plain_text');
-    expect(JSON.stringify(rendered.blocks)).not.toContain(message.decisionCapability.token);
+      {
+        ...valid,
+        decisionCapability: { ...valid.decisionCapability, url: 'not a URL' },
+      },
+      {
+        ...valid,
+        decisionCapability: { ...valid.decisionCapability, token: 'short' },
+      },
+      {
+        ...valid,
+        decisionCapability: {
+          ...valid.decisionCapability,
+          expiresAt: 'not-a-time',
+        },
+      },
+    ];
+
+    for (const mutation of mutations) {
+      let message = '';
+      try {
+        assertRichApprovalNotificationV3(mutation);
+      } catch (error) {
+        message = error instanceof Error ? error.message : String(error);
+      }
+      expect(message).toContain('invalid rich approval presentation');
+      expect(message).not.toContain(valid.decisionCapability.token);
+    }
   });
 
-  test('rejects stale, unknown, and over-quorum envelopes', () => {
-    const valid = invocation();
-    expect(() => assertRichApprovalNotificationV3({
-      ...valid,
-      reviewDigest: 'sha256:stale',
-    })).toThrow('invalid rich approval presentation');
-    expect(() => assertRichApprovalNotificationV3({
-      ...valid,
-      presentation: {
-        ...valid.presentation,
-        authority: { ...valid.presentation.authority, received: 3 },
+  test('renders markup as text and neutralizes control and bidirectional characters', () => {
+    const presentation = createRichApprovalPresentation(
+      {
+        title: '<script>alert(1)</script>\u202e',
+        summary: 'Deploy\u0007 only the reviewed plan.',
+        risk: 'critical',
+        changes: [],
+        checks: [],
+        artifacts: [],
       },
-    })).toThrow('invalid rich approval presentation');
-    expect(() => assertRichApprovalNotificationV3({
-      ...valid,
-      secretValues: ['must-not-exist'],
-    })).toThrow('invalid rich approval presentation');
+      { required: 1, received: 0, requiredRoles: ['operator\u202e'] }
+    );
+    const rendered = renderRichApprovalNotification({
+      ...invocation(),
+      presentation,
+    });
+
+    expect(rendered.text).toContain('<script>alert(1)</script>�');
+    expect(rendered.text).not.toContain('\u0007');
+    expect(rendered.text).not.toContain('\u202e');
+    expect(presentationContainsForbiddenValue(presentation, [
+      invocation().decisionCapability.token,
+      'super-secret-value',
+    ])).toBe(false);
+    expect(JSON.stringify(rendered)).not.toContain(
+      invocation().decisionCapability.token
+    );
+  });
+
+  test('stays within the reviewed rendering budget', async () => {
+    const budgets = JSON.parse(
+      await readFile(
+        resolve(import.meta.dir, '../../examples/richApprovals/performance-budgets.v1.json'),
+        'utf8'
+      )
+    ) as { budgets: { renderingP95Ms: number } };
+    const samples: number[] = [];
+    for (let index = 0; index < 100; index += 1) {
+      const started = performance.now();
+      renderRichApprovalNotification(invocation());
+      samples.push(performance.now() - started);
+    }
+    samples.sort((left, right) => left - right);
+    const p95 = samples[Math.ceil(samples.length * 0.95) - 1]!;
+    expect(p95).toBeLessThan(budgets.budgets.renderingP95Ms);
   });
 });

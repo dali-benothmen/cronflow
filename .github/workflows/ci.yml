@@ -102,6 +102,11 @@ jobs:
           bun run benchmark:compensation-and-cleanup &&
           bun test tests/compensation-and-cleanup-packaged-release.test.ts --max-concurrency=1 &&
           bun scripts/verify-compensation-and-cleanup-release.ts
+      - name: Enforce Rich Plan Approvals publication contracts
+        working-directory: woml-cli
+        run: >-
+          bun run benchmark:rich-plan-approvals &&
+          bun scripts/verify-rich-plan-approvals-release.ts
       - name: Test for-each presentation and clean package
         working-directory: woml-cli
         run: >-
@@ -180,6 +185,7 @@ jobs:
           --test compensation_store
           --test rich_plan_approval_model
           --test rich_plan_approval_authority
+          --test rich_plan_approval_runtime
           --test retention
           --test webhook_runtime
           -- --test-threads=1
@@ -274,6 +280,49 @@ jobs:
       - name: Failure diagnostics
         if: failure()
         run: |
+          rustc --version
+          cargo --version
+          git status --short
+
+  rich-plan-approvals:
+    name: Rich Plan Approvals (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, macos-15, windows-2022]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v6
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: ${{ env.BUN_VERSION }}
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Install locked runtime dependencies
+        working-directory: woml-cli
+        run: bun install --frozen-lockfile
+      - name: Install compiler dependencies
+        working-directory: woml
+        run: bun install --frozen-lockfile
+      - name: Build JavaScript hosts used by approval tests
+        working-directory: woml-cli
+        run: bun run build:js
+      - name: Test authority, recovery, input, and provider boundaries serially
+        working-directory: core
+        run: >-
+          cargo test --config profile.dev.debug=0
+          --config profile.dev.incremental=false -j 1 --locked
+          -p woml-engine --test rich_plan_approval_model
+          --test rich_plan_approval_authority --test rich_plan_approval_runtime
+          -- --test-threads=1
+      - name: Test HTTP and Provider Host v3 adversarial inputs
+        working-directory: woml-cli
+        run: >-
+          bun test tests/approval-server.test.ts
+          tests/rich-approval-presentation.test.ts --max-concurrency=1
+      - name: Failure diagnostics
+        if: failure()
+        run: |
+          bun --version
           rustc --version
           cargo --version
           git status --short
@@ -394,6 +443,9 @@ jobs:
       - name: Test Locks and Leases from the clean release package
         working-directory: woml-cli
         run: bun test tests/locks-and-leases-packaged-release.test.ts --max-concurrency=1
+      - name: Test Rich Plan Approvals from the clean release package
+        working-directory: woml-cli
+        run: bun test tests/rich-plan-approvals-packaged-release.test.ts --max-concurrency=1
       - name: Pack, seal, and reverify the main artifact
         run: |
           bun woml-cli/scripts/release-artifact.ts pack --root release/main

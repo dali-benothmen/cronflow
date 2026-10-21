@@ -1987,7 +1987,8 @@ function promoteForLifecycleAuthority(
     workflow.schemaVersion === 16 ||
     workflow.schemaVersion === 17 ||
     workflow.schemaVersion === 18 ||
-    workflow.schemaVersion === 19
+    workflow.schemaVersion === 19 ||
+    workflow.schemaVersion === 20
   ) {
     return workflow;
   }

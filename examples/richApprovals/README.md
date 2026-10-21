@@ -10,6 +10,8 @@ quorum, required roles, and Reviewer Directory version into one SHA-256 digest.
   infrastructure recommendation: diagnosis, review, trusted decision, effect.
 - `reviewer-directory.example.json` maps provider identities to canonical
   people and operator-owned roles. Replace every sample account and actor ID.
+- `performance-budgets.v1.json` freezes the reviewed local-SQLite latency and
+  bounded-inspection budgets enforced by the release suite.
 
 Validate without executing infrastructure tools:
 

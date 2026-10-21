@@ -1,5 +1,6 @@
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Barrier};
+use std::time::Instant;
 
 use chrono::{Duration, TimeZone, Utc};
 use rusqlite::{params, Connection};
@@ -24,6 +25,8 @@ const BINDING_VECTOR: &str =
   include_str!("../../../woml/tests/fixtures/rich-plan-approvals/binding.v1.json");
 const DIRECTORY: &str =
   include_str!("../../../woml/tests/fixtures/rich-plan-approvals/reviewer-directory.v1.json");
+const PERFORMANCE_BUDGETS: &str =
+  include_str!("../../../examples/richApprovals/performance-budgets.v1.json");
 const DEFINITION_HASH: &str =
   "sha256:2020202020202020202020202020202020202020202020202020202020202020";
 
@@ -96,6 +99,11 @@ fn binding_input(review: Value) -> RichApprovalBindingInput {
 fn binding() -> BoundRichApprovalReview {
   bind_rich_approval_review(binding_input(review()), &ExactArtifacts::default(), &[])
     .expect("immutable review binding")
+}
+
+fn reviewed_budget_ms(name: &str) -> u128 {
+  let budgets: Value = serde_json::from_str(PERFORMANCE_BUDGETS).unwrap();
+  u128::from(budgets["budgets"][name].as_u64().unwrap())
 }
 
 fn prepare_running_store(mut store: DurableEventStore) -> DurableEventStore {
@@ -229,6 +237,44 @@ fn reviewer_directory_validation_and_reload_fail_closed_without_losing_pinned_sn
     .unwrap();
   assert_eq!(pinned.principal_id, "person:alice");
   assert_eq!(pinned.roles, ["production-owner"]);
+}
+
+#[test]
+fn reviewer_directory_reload_races_preserve_pinned_authority() {
+  let document: ReviewerDirectoryV1 = serde_json::from_str(DIRECTORY).unwrap();
+  let authority = ReviewerDirectoryAuthorityV1::from_document(document.clone()).unwrap();
+  let resolver = authority.clone();
+  let reload = authority.clone();
+  let barrier = Arc::new(Barrier::new(2));
+  let resolve_barrier = Arc::clone(&barrier);
+  let resolve = std::thread::spawn(move || {
+    resolve_barrier.wait();
+    for _ in 0..1_000 {
+      let reviewer = resolver
+        .resolve(
+          "directory-2026-10-21",
+          &ReviewerIdentityClaimV1 {
+            provider: ReviewerProviderV1::Slack,
+            account_id: "T0123456789".to_string(),
+            actor_id: "U0123456789".to_string(),
+          },
+          &["production-owner".to_string()],
+        )
+        .unwrap();
+      assert_eq!(reviewer.principal_id, "person:alice");
+    }
+  });
+  let reload_barrier = Arc::clone(&barrier);
+  let reloader = std::thread::spawn(move || {
+    reload_barrier.wait();
+    let mut next = document;
+    next.version = "directory-2026-10-22".to_string();
+    next.principals[0].roles = vec!["observer".to_string()];
+    reload.reload(next).unwrap();
+  });
+  resolve.join().unwrap();
+  reloader.join().unwrap();
+  assert_eq!(authority.active_version().unwrap(), "directory-2026-10-22");
 }
 
 #[test]
@@ -377,6 +423,36 @@ fn rust_rejects_secrets_limits_control_characters_and_artifact_substitution() {
     RichApprovalError::ReviewInvalid
   );
 
+  let mut nested = review();
+  nested["unexpected"] = json!({
+    "a": {
+      "b": {
+        "c": {
+          "d": {
+            "e": {
+              "f": {
+                "g": {
+                  "h": { "i": true }
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  });
+  assert_eq!(
+    bind_rich_approval_review(binding_input(nested), &ExactArtifacts::default(), &[]).unwrap_err(),
+    RichApprovalError::ReviewTooLarge
+  );
+
+  let mut hostile_text = review();
+  hostile_text["title"] = Value::String("<script>alert(1)</script>\u{202e}".to_string());
+  let hostile =
+    bind_rich_approval_review(binding_input(hostile_text), &ExactArtifacts::default(), &[])
+      .expect("markup and bidi remain inert reviewed data for provider escaping");
+  assert_ne!(hostile.review_digest, binding().review_digest);
+
   let artifact = json!({
     "contract": "woml.artifact-reference/v1",
     "contractVersion": 1,
@@ -411,12 +487,17 @@ fn store_v18_preserves_partial_quorum_idempotency_and_one_terminal_result() {
     ),
     Err(DurableStoreError::RichApprovalBindingMismatch)
   ));
+  let request_started = Instant::now();
   let requested = store
     .create_rich_approval_request(
       &binding(),
       Utc.with_ymd_and_hms(2026, 10, 21, 12, 1, 0).unwrap(),
     )
     .expect("persist immutable review");
+  assert!(
+    request_started.elapsed().as_millis() < reviewed_budget_ms("requestCreationP95Ms"),
+    "rich approval request creation exceeded its reviewed budget"
+  );
   assert_eq!(
     requested
       .rich_approval_requests
@@ -426,6 +507,7 @@ fn store_v18_preserves_partial_quorum_idempotency_and_one_terminal_result() {
     binding().review_digest
   );
 
+  let admission_started = Instant::now();
   let first = store
     .record_rich_approval_decision(decision(
       "person:alice",
@@ -434,8 +516,22 @@ fn store_v18_preserves_partial_quorum_idempotency_and_one_terminal_result() {
       2,
     ))
     .expect("first vote");
+  assert!(
+    admission_started.elapsed().as_millis() < reviewed_budget_ms("decisionAdmissionP95Ms"),
+    "rich approval decision admission exceeded its reviewed budget"
+  );
   assert_eq!(first.status, RichApprovalDecisionStatus::Pending);
   assert_eq!(first.received, 1);
+
+  let projection_started = Instant::now();
+  let projected = store
+    .inspect_rich_approval("run_rich_review_1", "aprreq_rich_review_1", 100)
+    .expect("project approval state");
+  assert!(
+    projection_started.elapsed().as_millis() < reviewed_budget_ms("projectionP95Ms"),
+    "rich approval projection exceeded its reviewed budget"
+  );
+  assert_eq!(projected.total_decisions, 1);
 
   let replay = store
     .record_rich_approval_decision({
@@ -561,7 +657,7 @@ fn concurrent_final_votes_have_one_atomic_terminal_winner() {
 }
 
 #[test]
-fn inspection_is_bounded_independently_of_adversarial_vote_count() {
+fn ten_thousand_decisions_project_within_reviewed_budget_and_remain_bounded() {
   let database = TemporaryDatabase::new("bounded-inspection");
   let mut store = running_store_at(database.path());
   store
@@ -596,9 +692,16 @@ fn inspection_is_bounded_independently_of_adversarial_vote_count() {
   drop(connection);
 
   let store = DurableEventStore::open(database.path()).unwrap();
+  let started = Instant::now();
   let inspection = store
     .inspect_rich_approval("run_rich_review_1", "aprreq_rich_review_1", usize::MAX)
     .unwrap();
+  let elapsed = started.elapsed();
+  let budget_ms = reviewed_budget_ms("tenThousandDecisionInspectionP95Ms");
+  assert!(
+    elapsed.as_millis() < budget_ms,
+    "10,000-decision inspection took {elapsed:?}, budget is {budget_ms} ms"
+  );
   assert_eq!(inspection.total_decisions, 10_000);
   assert_eq!(inspection.decisions.len(), 100);
   assert!(inspection.decisions_truncated);
@@ -672,6 +775,16 @@ fn partial_quorum_survives_restart_and_releases_artifact_pins_on_settlement() {
   first.review_digest = bound.review_digest.clone();
   store.record_rich_approval_decision(first).unwrap();
   drop(store);
+
+  for _ in 0..25 {
+    let reopened = DurableEventStore::open(database.path()).unwrap();
+    let pending = reopened
+      .inspect_rich_approval("run_rich_review_1", "aprreq_rich_review_1", 10)
+      .unwrap();
+    assert_eq!(pending.status, "pending");
+    assert_eq!(pending.total_decisions, 1);
+    assert_eq!(pending.review_digest, bound.review_digest);
+  }
 
   let mut reopened = DurableEventStore::open(database.path()).unwrap();
   let inspection = reopened

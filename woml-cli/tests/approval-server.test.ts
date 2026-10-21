@@ -307,6 +307,84 @@ describe('local approval HTTP v1', () => {
 });
 
 describe('trusted approval HTTP v2', () => {
+  test('rejects malformed, oversized, and digest-confused decisions before authority admission', async () => {
+    const port = await availablePort();
+    const controller = new AbortController();
+    let listening!: (url: string) => void;
+    const urlReady = new Promise<string>(resolve => {
+      listening = resolve;
+    });
+    let admissions = 0;
+    const wait = serveApprovalAndWait({
+      outcome: richWaitingOutcome(),
+      port,
+      signal: controller.signal,
+      onDecision: () => decisionResult('approved'),
+      verifyRichIdentity: () => ({
+        provider: 'slack',
+        providerAccountId: 'T0123456789',
+        providerActorId: 'U0123456789',
+      }),
+      onRichDecision: () => {
+        admissions += 1;
+        return richDecisionResult('recorded');
+      },
+      onTimeout: () => ({
+        status: 'not_due',
+        runId: 'run_rich_approval_http',
+        approvalId: 'approveDeployment',
+        requestId: 'aprreq_review_http',
+        resolution: null,
+        settledAt: null,
+      }),
+      onListening: listening,
+    });
+    const url = await urlReady;
+    const digest = richWaitingOutcome().approval.reviewDigest!;
+    const bodies = [
+      '',
+      '{',
+      'null',
+      '[]',
+      '{}',
+      JSON.stringify({
+        decision: 'maybe', reviewDigest: digest,
+        gateway: 'slack-signed-callback', assertion: 'signed-1',
+      }),
+      JSON.stringify({
+        decision: 'approved', reviewDigest: `sha256:${'A'.repeat(64)}`,
+        gateway: 'slack-signed-callback', assertion: 'signed-1',
+      }),
+      JSON.stringify({
+        decision: 'approved', reviewDigest: digest,
+        gateway: 'slack-signed-callback', assertion: 'signed-1', extra: true,
+      }),
+      JSON.stringify({
+        decision: 'approved', reviewDigest: digest,
+        gateway: '', assertion: 'signed-1',
+      }),
+      JSON.stringify({
+        decision: 'approved', reviewDigest: digest,
+        gateway: 'slack-signed-callback', assertion: 'x'.repeat(70_000),
+      }),
+    ];
+    for (const body of bodies) {
+      const response = await fetch(url, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body,
+      });
+      expect([400, 413]).toContain(response.status);
+      const responseBody = await response.text();
+      expect(responseBody).not.toContain('signed-1');
+    }
+    const wrongMethod = await fetch(url, { method: 'PUT' });
+    expect([404, 405]).toContain(wrongMethod.status);
+    expect(admissions).toBe(0);
+    controller.abort();
+    expect(await wait).toBe('refresh');
+  });
+
   test('renders the frozen review and admits only verified digest-bound identities', async () => {
     const port = await availablePort();
     let listening!: (url: string) => void;
