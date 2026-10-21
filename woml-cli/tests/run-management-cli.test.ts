@@ -63,7 +63,21 @@ describe('Direct run management', () => {
       expect(help.stdout.toString()).toContain('Usage: woml run');
       expect(help.stdout.toString()).toContain('Usage: woml list');
       expect(help.stdout.toString()).toContain('Usage: woml cancel');
+      expect(help.stdout.toString()).toContain('woml recover <runId>');
       expect(help.stderr.toString()).toBe('');
+    }
+  });
+
+  test('validates correction recovery decisions before opening native state', () => {
+    for (const args of [
+      ['recover'],
+      ['recover', 'run_1', '--retry', 'action1', '--resolve', 'action1'],
+      ['recover', 'run_1', '--resolve', 'action1'],
+      ['recover', 'run_1', '--retry', 'action1', '--note', 'not allowed'],
+    ]) {
+      const result = invoke(...args);
+      expect(result.exitCode).toBe(2);
+      expect(result.stderr.toString()).toContain('woml recover <runId>');
     }
   });
 

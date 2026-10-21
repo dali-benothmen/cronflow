@@ -785,6 +785,57 @@ export interface RustWaitInspectionV1 {
   }[];
 }
 
+export interface RustCorrectionInspectionV1 {
+  readonly profile: 'woml.correction-inspection/v1';
+  readonly runId: string;
+  readonly phase:
+    | 'forward'
+    | 'compensating'
+    | 'cleanup'
+    | 'completed'
+    | 'manual_recovery';
+  readonly originalOutcome: 'running' | 'succeeded' | 'failed' | 'cancelled';
+  readonly sagas: readonly {
+    readonly sagaId: string;
+    readonly status: string;
+    readonly registeredCompensations: number;
+    readonly completedCompensations: number;
+    readonly completedCleanup: number;
+  }[];
+  readonly unresolvedActions: readonly {
+    readonly actionId: string;
+    readonly kind: 'compensation' | 'cleanup';
+    readonly code: string;
+    readonly ambiguous: boolean;
+  }[];
+  readonly truncated: boolean;
+}
+
+export interface RustCorrectionRecoveryRequestV1 {
+  readonly profile: 'woml.correction-recovery-request/v1';
+  readonly runId: string;
+  readonly action: 'retry' | 'externally_resolve';
+  readonly actionId: string;
+  readonly note?: string;
+}
+
+export interface RustCorrectionRecoveryResultV1 {
+  readonly profile: 'woml.correction-recovery-result/v1';
+  readonly runId: string;
+  readonly actionId: string;
+  readonly status: 'retry_scheduled' | 'externally_resolved' | 'rejected';
+  readonly auditRecorded: true;
+}
+
+export interface RustCorrectionObservationV1 {
+  readonly profile: 'woml.correction-observation/v1';
+  readonly openSagas: number;
+  readonly pendingActions: number;
+  readonly activeAttempts: number;
+  readonly manualRecoveryActions: number;
+  readonly oldestManualRecoveryAgeMs?: number;
+}
+
 export interface RustLockInspectionV1 {
   readonly profile: 'woml.lock-inspection/v1';
   readonly runId: string;
@@ -1190,6 +1241,9 @@ interface NativeCore {
   ) => string;
   readonly inspectWomlRunV2: (eventStorePath: string, runId: string) => string;
   readonly inspectWomlWaitsV1: (eventStorePath: string, runId: string) => string;
+  readonly inspectWomlCorrectionV1?: (eventStorePath: string, runId: string) => string;
+  readonly recoverWomlCorrection?: (eventStorePath: string, requestJson: string) => string;
+  readonly observeWomlCorrectionsV1?: (eventStorePath: string) => string;
   readonly inspectWomlLocksV1?: (eventStorePath: string, runId: string) => string;
   readonly observeWomlLocksV1?: (eventStorePath: string) => string;
   readonly cancelWomlRun: (
@@ -4583,6 +4637,157 @@ export function inspectWaitsV1WithRust(
     throw new Error('The native core returned invalid durable-wait inspection data.');
   }
   return value as unknown as RustWaitInspectionV1;
+}
+
+export function inspectCorrectionV1WithRust(
+  eventStorePath: string,
+  runId: string,
+  options: Pick<RustExecutorOptions, 'nativeCorePath'> = {}
+): RustCorrectionInspectionV1 | undefined {
+  const nativePath = options.nativeCorePath ?? defaultNativeCorePath();
+  const native = loadNativeCore(nativePath);
+  if (typeof native.inspectWomlCorrectionV1 !== 'function') {
+    throw new Error(
+      `Native core at "${nativePath}" does not expose correction inspection; rebuild the Rust addon.`
+    );
+  }
+  const value = callRunManagementNative(() =>
+    native.inspectWomlCorrectionV1!(eventStorePath, runId)
+  );
+  if (value === null) return undefined;
+  const count = (candidate: unknown) =>
+    Number.isSafeInteger(candidate) && Number(candidate) >= 0;
+  const saga = (candidate: unknown): boolean =>
+    record(candidate) &&
+    exactKeys(candidate, [
+      'sagaId',
+      'status',
+      'registeredCompensations',
+      'completedCompensations',
+      'completedCleanup',
+    ]) &&
+    typeof candidate.sagaId === 'string' &&
+    typeof candidate.status === 'string' &&
+    count(candidate.registeredCompensations) &&
+    count(candidate.completedCompensations) &&
+    count(candidate.completedCleanup);
+  const unresolved = (candidate: unknown): boolean =>
+    record(candidate) &&
+    exactKeys(candidate, ['actionId', 'kind', 'code', 'ambiguous']) &&
+    typeof candidate.actionId === 'string' &&
+    ['compensation', 'cleanup'].includes(String(candidate.kind)) &&
+    typeof candidate.code === 'string' &&
+    /^WOML_[A-Z0-9_]+$/.test(candidate.code) &&
+    typeof candidate.ambiguous === 'boolean';
+  if (
+    !record(value) ||
+    !exactKeys(value, [
+      'profile',
+      'runId',
+      'phase',
+      'originalOutcome',
+      'sagas',
+      'unresolvedActions',
+      'truncated',
+    ]) ||
+    value.profile !== 'woml.correction-inspection/v1' ||
+    value.runId !== runId ||
+    !['forward', 'compensating', 'cleanup', 'completed', 'manual_recovery'].includes(
+      String(value.phase)
+    ) ||
+    !['running', 'succeeded', 'failed', 'cancelled'].includes(
+      String(value.originalOutcome)
+    ) ||
+    !Array.isArray(value.sagas) ||
+    value.sagas.length > 64 ||
+    !value.sagas.every(saga) ||
+    !Array.isArray(value.unresolvedActions) ||
+    value.unresolvedActions.length > 100 ||
+    !value.unresolvedActions.every(unresolved) ||
+    typeof value.truncated !== 'boolean'
+  ) {
+    throw new Error('The native core returned invalid Correction Inspection v1 data.');
+  }
+  return value as unknown as RustCorrectionInspectionV1;
+}
+
+export function recoverCorrectionWithRust(
+  eventStorePath: string,
+  request: RustCorrectionRecoveryRequestV1,
+  options: Pick<RustExecutorOptions, 'nativeCorePath'> = {}
+): RustCorrectionRecoveryResultV1 {
+  const nativePath = options.nativeCorePath ?? defaultNativeCorePath();
+  const native = loadNativeCore(nativePath);
+  if (typeof native.recoverWomlCorrection !== 'function') {
+    throw new Error(
+      `Native core at "${nativePath}" does not expose correction recovery; rebuild the Rust addon.`
+    );
+  }
+  const value = callRunManagementNative(() =>
+    native.recoverWomlCorrection!(eventStorePath, JSON.stringify(request))
+  );
+  if (
+    !record(value) ||
+    !exactKeys(value, [
+      'profile',
+      'runId',
+      'actionId',
+      'status',
+      'auditRecorded',
+    ]) ||
+    value.profile !== 'woml.correction-recovery-result/v1' ||
+    value.runId !== request.runId ||
+    value.actionId !== request.actionId ||
+    !['retry_scheduled', 'externally_resolved', 'rejected'].includes(
+      String(value.status)
+    ) ||
+    value.auditRecorded !== true
+  ) {
+    throw new Error('The native core returned invalid Correction Recovery v1 data.');
+  }
+  return value as unknown as RustCorrectionRecoveryResultV1;
+}
+
+export function observeCorrectionsV1WithRust(
+  eventStorePath: string,
+  options: Pick<RustExecutorOptions, 'nativeCorePath'> = {}
+): RustCorrectionObservationV1 {
+  const nativePath = options.nativeCorePath ?? defaultNativeCorePath();
+  const native = loadNativeCore(nativePath);
+  if (typeof native.observeWomlCorrectionsV1 !== 'function') {
+    throw new Error(
+      `Native core at "${nativePath}" does not expose correction observation; rebuild the Rust addon.`
+    );
+  }
+  const value = callRunManagementNative(() =>
+    native.observeWomlCorrectionsV1!(eventStorePath)
+  );
+  const count = (candidate: unknown) =>
+    Number.isSafeInteger(candidate) && Number(candidate) >= 0;
+  if (
+    !record(value) ||
+    !exactKeys(
+      value,
+      [
+        'profile',
+        'openSagas',
+        'pendingActions',
+        'activeAttempts',
+        'manualRecoveryActions',
+      ],
+      ['oldestManualRecoveryAgeMs']
+    ) ||
+    value.profile !== 'woml.correction-observation/v1' ||
+    !count(value.openSagas) ||
+    !count(value.pendingActions) ||
+    !count(value.activeAttempts) ||
+    !count(value.manualRecoveryActions) ||
+    (value.oldestManualRecoveryAgeMs !== undefined &&
+      !count(value.oldestManualRecoveryAgeMs))
+  ) {
+    throw new Error('The native core returned invalid Correction Observation v1 data.');
+  }
+  return value as unknown as RustCorrectionObservationV1;
 }
 
 export function inspectLocksV1WithRust(

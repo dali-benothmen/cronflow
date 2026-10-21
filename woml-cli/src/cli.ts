@@ -76,6 +76,8 @@ import {
   inspectRunV2WithRust,
   inspectWaitsV1WithRust,
   inspectLocksV1WithRust,
+  inspectCorrectionV1WithRust,
+  recoverCorrectionWithRust,
   listRunPresentationsWithRust,
   listRunsWithRust,
   observeRuntimeWithRust,
@@ -102,6 +104,7 @@ import {
   type RustRunInspectionV2,
   type RustWaitInspectionV1,
   type RustLockInspectionV1,
+  type RustCorrectionInspectionV1,
   type RustRunListV1,
   type ScheduleProgressV1,
   type TriggerProgressV1,
@@ -309,6 +312,14 @@ function cancelUsage(): string {
   return 'Usage: woml cancel <runId> [--state <path>] [--json]';
 }
 
+function recoverUsage(): string {
+  return [
+    'Usage:',
+    '  woml recover <runId> --retry <actionId> [--state <path>] [--json]',
+    '  woml recover <runId> --resolve <actionId> --note <text> [--state <path>] [--json]',
+  ].join('\n');
+}
+
 function stopUsage(): string {
   return 'Usage: woml stop [--state <path>] [--json]';
 }
@@ -339,7 +350,7 @@ function typesUsage(): string {
 }
 
 function usage(): string {
-  return `${runUsage()}\n${testUsage()}\n${logFollowUsage}\n${checkUsage()}\n${typesUsage()}\n${inspectUsage}\n${artifactsUsage()}\n${backupUsage}\n${restoreUsage}\n${pruneUsage}\n${listUsage()}\n${getUsage()}\n${cancelUsage()}\n${stopUsage()}\n${emitUsage()}\n${signalUsage()}\n${secretsUsage()}\n${providerDoctorUsage()}`;
+  return `${runUsage()}\n${testUsage()}\n${logFollowUsage}\n${checkUsage()}\n${typesUsage()}\n${inspectUsage}\n${artifactsUsage()}\n${backupUsage}\n${restoreUsage}\n${pruneUsage}\n${listUsage()}\n${getUsage()}\n${cancelUsage()}\n${recoverUsage()}\n${stopUsage()}\n${emitUsage()}\n${signalUsage()}\n${secretsUsage()}\n${providerDoctorUsage()}`;
 }
 
 interface RunArguments {
@@ -666,6 +677,15 @@ interface RunGetArguments {
   readonly json: boolean;
 }
 
+interface RecoverArguments {
+  readonly runId: string;
+  readonly action: 'retry' | 'externally_resolve';
+  readonly actionId: string;
+  readonly note?: string;
+  readonly statePath: string;
+  readonly json: boolean;
+}
+
 interface ArtifactCommandArguments {
   readonly operation: 'inspect' | 'export';
   readonly artifactId: string;
@@ -954,6 +974,73 @@ function parseRunGetArguments(
   };
 }
 
+function parseRecoverArguments(args: readonly string[]): RecoverArguments {
+  const [, runId, ...options] = args;
+  if (
+    runId === undefined ||
+    runId.length === 0 ||
+    runId.length > 320 ||
+    runId.startsWith('--')
+  ) {
+    throw new CliInputError('WOML_CLI_ARGUMENTS_INVALID', recoverUsage());
+  }
+  let statePath = resolve('.woml/state.sqlite');
+  let json = false;
+  let action: RecoverArguments['action'] | undefined;
+  let actionId: string | undefined;
+  let note: string | undefined;
+  const seen = new Set<string>();
+  for (let index = 0; index < options.length; index += 1) {
+    const option = options[index]!;
+    if (seen.has(option)) {
+      throw new CliInputError('WOML_CLI_ARGUMENTS_INVALID', recoverUsage());
+    }
+    seen.add(option);
+    if (option === '--json') {
+      json = true;
+      continue;
+    }
+    const value = options[++index];
+    if (
+      value === undefined ||
+      value.startsWith('--') ||
+      !['--state', '--retry', '--resolve', '--note'].includes(option)
+    ) {
+      throw new CliInputError('WOML_CLI_ARGUMENTS_INVALID', recoverUsage());
+    }
+    if (option === '--state') statePath = resolve(value);
+    if (option === '--retry') {
+      action = 'retry';
+      actionId = value;
+    }
+    if (option === '--resolve') {
+      action = 'externally_resolve';
+      actionId = value;
+    }
+    if (option === '--note') note = value;
+  }
+  if (
+    action === undefined ||
+    actionId === undefined ||
+    actionId.length === 0 ||
+    actionId.length > 768 ||
+    (action === 'externally_resolve' &&
+      (note === undefined || note.length === 0 || note.length > 1000)) ||
+    (action === 'retry' && note !== undefined) ||
+    (seen.has('--retry') && seen.has('--resolve'))
+  ) {
+    throw new CliInputError('WOML_CLI_ARGUMENTS_INVALID', recoverUsage());
+  }
+  return {
+    runId,
+    action,
+    actionId,
+    ...(note === undefined ? {} : { note }),
+    statePath,
+    json,
+  };
+}
+
 function parseArtifactCommandArguments(
   args: readonly string[]
 ): ArtifactCommandArguments {
@@ -1056,7 +1143,8 @@ function formatRunInspection(
   artifacts?: readonly RustArtifactInspectionV1[],
   artifactsTruncated = false,
   waitInspection?: RustWaitInspectionV1,
-  locks: readonly RustLockInspectionV1[] = []
+  locks: readonly RustLockInspectionV1[] = [],
+  correction?: RustCorrectionInspectionV1
 ): string {
   const lines = [
     `Run: ${inspection.runId}`,
@@ -1174,6 +1262,30 @@ function formatRunInspection(
     }
     if (artifactsTruncated)
       lines.push('  Additional artifacts were omitted from this bounded view.');
+  }
+  if (correction !== undefined) {
+    lines.push('Correction:');
+    lines.push(
+      `  ${correction.phase.replaceAll('_', ' ')} · original outcome ${correction.originalOutcome}`
+    );
+    for (const saga of correction.sagas) {
+      lines.push(
+        `  ${saga.sagaId}: ${saga.status.replaceAll('_', ' ')} · ${saga.completedCompensations}/${saga.registeredCompensations} compensated · ${saga.completedCleanup} cleanup completed`
+      );
+    }
+    for (const action of correction.unresolvedActions) {
+      lines.push(
+        `  ${action.actionId}: ${action.kind} · ${action.code}${action.ambiguous ? ' · ambiguous' : ''}`
+      );
+      if (action.ambiguous) {
+        lines.push(
+          `    Recover: woml recover ${inspection.runId} --retry ${JSON.stringify(action.actionId)}`
+        );
+      }
+    }
+    if (correction.truncated) {
+      lines.push('  Additional unresolved actions were omitted from this bounded view.');
+    }
   }
   return `${lines.join('\n')}\n`;
 }
@@ -6549,6 +6661,7 @@ async function runCliUnprofiled(
     'list',
     'get',
     'cancel',
+    'recover',
     'runs',
     'telegram',
     'discord',
@@ -6952,7 +7065,21 @@ async function runCliUnprofiled(
         get.runId,
         { nativeCorePath: dependencies.nativeCorePath }
       );
-      const publicResult = lockInspection.length > 0 ? {
+      const correctionInspection = inspectCorrectionV1WithRust(
+        get.statePath,
+        get.runId,
+        { nativeCorePath: dependencies.nativeCorePath }
+      );
+      const publicResult = correctionInspection !== undefined ? {
+        ...result,
+        profile: 'woml.run-inspection/v10' as const,
+        artifacts: artifactInspection,
+        ...(waitInspection.waits.length === 0
+          ? {}
+          : { durableWaits: waitInspection }),
+        ...(lockInspection.length === 0 ? {} : { locks: lockInspection }),
+        correction: correctionInspection,
+      } : lockInspection.length > 0 ? {
         ...result,
         profile: 'woml.run-inspection/v9' as const,
         artifacts: artifactInspection,
@@ -6978,7 +7105,8 @@ async function runCliUnprofiled(
               artifactInspection.artifacts,
               artifactInspection.truncated,
               waitInspection,
-              lockInspection
+              lockInspection,
+              correctionInspection
             )
       );
       return 0;
@@ -7016,6 +7144,40 @@ async function runCliUnprofiled(
     } catch (error) {
       if (error instanceof CliInputError && error.message === cancelUsage()) {
         io.stderr(`${cancelUsage()}\n`);
+        return 2;
+      }
+      io.stderr(`${formatError(error)}\n`);
+      return error instanceof CliInputError ? 2 : 1;
+    }
+  }
+
+  if (args[0] === 'recover') {
+    try {
+      const recovery = parseRecoverArguments(args);
+      const result = recoverCorrectionWithRust(
+        recovery.statePath,
+        {
+          profile: 'woml.correction-recovery-request/v1',
+          runId: recovery.runId,
+          action: recovery.action,
+          actionId: recovery.actionId,
+          ...(recovery.note === undefined ? {} : { note: recovery.note }),
+        },
+        { nativeCorePath: dependencies.nativeCorePath }
+      );
+      io.stdout(
+        recovery.json
+          ? `${JSON.stringify(result)}\n`
+          : result.status === 'retry_scheduled'
+            ? `Correction retry scheduled for ${result.actionId} in run ${result.runId}.\n`
+            : result.status === 'externally_resolved'
+              ? `External correction resolution recorded for ${result.actionId} in run ${result.runId}.\n`
+              : `Correction recovery was rejected for ${result.actionId} in run ${result.runId}.\n`
+      );
+      return result.status === 'rejected' ? 1 : 0;
+    } catch (error) {
+      if (error instanceof CliInputError && error.message === recoverUsage()) {
+        io.stderr(`${recoverUsage()}\n`);
         return 2;
       }
       io.stderr(`${formatError(error)}\n`);

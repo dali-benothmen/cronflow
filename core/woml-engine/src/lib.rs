@@ -92,7 +92,9 @@ pub use discord::ManagedDiscordHandler;
 pub use durable::{
   derive_lifecycle_hook_invocation_id, ApprovalDecisionOutcome, ApprovalDecisionOutcomeStatus,
   ApprovalTimeoutSettlement, ApprovalTimeoutSettlementStatus, ApprovalTokenBinding,
-  CorrectionInspectionV1, CorrectionSagaInspectionV1, DurableDagEngine, DurableEngineError,
+  CorrectionInspectionV1, CorrectionObservationV1, CorrectionRecoveryActionV1,
+  CorrectionRecoveryCandidateV1, CorrectionRecoveryRequestV1, CorrectionRecoveryResultV1,
+  CorrectionRecoveryStatusV1, CorrectionSagaInspectionV1, DurableDagEngine, DurableEngineError,
   DurableEventStore, DurableStoreError, DurableWaitRecordV1, ExternalSignalAdmissionOutcome,
   ExternalSignalAdmissionRequest, ExternalSignalAdmissionStatus, ExternalSignalResolution,
   ForkRecoveryBranchV1, ForkRecoveryWorkV1, InspectedBusinessOutcome, InspectedForEachStatusV6,
@@ -117,10 +119,13 @@ pub use durable::{
   SignalWaitTimeoutSettlement, StepFailureCommit, StepFailureDisposition, TimerWaitSettlement,
   TriggerAdmissionOutcome, TriggerAdmissionRequest, TriggerOccurrence, TriggerRecoveryWork,
   UnresolvedCorrectionActionV1, WaitInspectionV1, CORRECTION_INSPECTION_PROFILE,
-  DURABLE_STORE_SCHEMA_VERSION, EXTERNAL_SIGNAL_ADMISSION_PROFILE,
-  EXTERNAL_SIGNAL_MAX_EARLY_PER_RUN, EXTERNAL_SIGNAL_MAX_PAYLOAD_BYTES,
-  EXTERNAL_SIGNAL_MAX_PAYLOAD_DEPTH, EXTERNAL_SIGNAL_RESULT_PROFILE, LOCK_RECOVERY_BATCH_LIMIT,
-  LOCK_WAITERS_PER_KEY_LIMIT, LOCK_WAITERS_PER_STORE_LIMIT, RUNTIME_POLICY_QUEUE_CEILING,
+  CORRECTION_OBSERVATION_PROFILE, CORRECTION_RECOVERY_BATCH_LIMIT,
+  CORRECTION_RECOVERY_REQUEST_PROFILE, CORRECTION_RECOVERY_RESULT_PROFILE,
+  CORRECTION_UNRESOLVED_STORE_LIMIT, DURABLE_STORE_SCHEMA_VERSION,
+  EXTERNAL_SIGNAL_ADMISSION_PROFILE, EXTERNAL_SIGNAL_MAX_EARLY_PER_RUN,
+  EXTERNAL_SIGNAL_MAX_PAYLOAD_BYTES, EXTERNAL_SIGNAL_MAX_PAYLOAD_DEPTH,
+  EXTERNAL_SIGNAL_RESULT_PROFILE, LOCK_RECOVERY_BATCH_LIMIT, LOCK_WAITERS_PER_KEY_LIMIT,
+  LOCK_WAITERS_PER_STORE_LIMIT, RUNTIME_POLICY_QUEUE_CEILING,
 };
 pub use durable_state::{
   DurableStateError, DurableStateExecution, DurableStateLimits, DurableStateStore, FixedStateClock,

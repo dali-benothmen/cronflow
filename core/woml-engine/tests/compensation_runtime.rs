@@ -4,9 +4,13 @@ use rusqlite::Connection;
 use serde_json::{Map, Value};
 use uuid::Uuid;
 use woml_engine::{
-  execute_workflow_durable, CompiledCorrectionIdentity, CompiledWorkflowDefinition,
-  DurableEventStore, RunEventPayload, RuntimeExecutionError, RuntimeExecutionOptions,
-  SagaCorrectionReason, ScriptHostProcessOptions,
+  execute_admitted_trigger_run_durable, execute_workflow_durable, resume_workflow_durable,
+  AttemptFailure, AttemptFailureKind, CompiledCorrectionIdentity, CompiledWorkflowDefinition,
+  CorrectionAttemptIdentityData, CorrectionRecoveryActionV1, CorrectionRecoveryRequestV1,
+  CorrectiveActionKind, DurableDagEngine, DurableEventStore, RunEventPayload, RunStatus,
+  RuntimeExecutionError, RuntimeExecutionOptions, SagaCorrectionReason, SagaCorrectionStartedData,
+  SagaIdentityData, ScriptHostProcessOptions, StepAttemptFailedData, StepAttemptSucceededData,
+  TriggerAdmissionRequest, CORRECTION_RECOVERY_REQUEST_PROFILE,
 };
 
 const MODEL: &str =
@@ -398,6 +402,292 @@ async fn corrective_attempts_use_v11_bindings_and_durable_retry_identity() {
     RunEventPayload::CorrectionAttemptSucceeded(data)
       if data.action_id == "provision:cleanup:revokeCredentials"
   )));
+}
+
+#[tokio::test]
+async fn cancellation_compensates_completed_work_and_runs_cleanup_before_settlement() {
+  let Some(options) = runtime_options() else {
+    return;
+  };
+  let mut workflow = model();
+  let deployment = workflow
+    .graph
+    .nodes
+    .iter_mut()
+    .find(|node| node.id == "deployApplication")
+    .expect("deployment node");
+  let woml_engine::model::ValueExpression::Object { fields } = &mut deployment.inputs else {
+    panic!("deployment inputs")
+  };
+  fields.insert(
+    "source".to_string(),
+    woml_engine::model::ValueExpression::Literal {
+      value: Value::String(
+        "await new Promise(resolve => setTimeout(resolve, 5000)); return { deployed: true };"
+          .to_string(),
+      ),
+    },
+  );
+  workflow.validate_structure().unwrap();
+
+  let database = TemporaryDatabase::new("cancel-correction");
+  let mut control = DurableEventStore::open(database.path()).unwrap();
+  control.register_definition(&workflow, HASH).unwrap();
+  let run_id = control
+    .admit_trigger_occurrence(TriggerAdmissionRequest {
+      workflow_id: workflow.workflow_id.clone(),
+      definition_hash: HASH.to_string(),
+      trigger_id: "start".to_string(),
+      trigger_handler: "trigger.manual".to_string(),
+      source_identity: "manual:cancel-correction".to_string(),
+      payload: Map::new(),
+      received_at: chrono::Utc::now(),
+    })
+    .unwrap()
+    .run_id;
+
+  let runtime_database = database.path().to_path_buf();
+  let runtime_run_id = run_id.clone();
+  let runtime = tokio::spawn(async move {
+    execute_admitted_trigger_run_durable(runtime_database, &runtime_run_id, options).await
+  });
+  tokio::time::timeout(std::time::Duration::from_secs(4), async {
+    loop {
+      if control
+        .projection(&run_id)
+        .unwrap()
+        .latest_attempt("deployApplication")
+        .is_some_and(|attempt| {
+          matches!(
+            attempt.status,
+            woml_engine::projection::AttemptStatus::Started
+          )
+        })
+      {
+        break;
+      }
+      tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+  })
+  .await
+  .expect("the saga deployment starts");
+  control
+    .request_run_cancellation(&run_id, "cancel-saga", chrono::Utc::now())
+    .unwrap();
+
+  let error = tokio::time::timeout(std::time::Duration::from_secs(5), runtime)
+    .await
+    .expect("saga cancellation settles promptly")
+    .unwrap()
+    .unwrap_err();
+  assert!(
+    matches!(error, RuntimeExecutionError::RunCancelled(_)),
+    "unexpected cancellation result: {error:?}"
+  );
+  drop(control);
+  let control = DurableEventStore::open(database.path()).unwrap();
+  let projection = control.projection(&run_id).unwrap();
+  assert_eq!(projection.status, RunStatus::Cancelled);
+  let events = control.events(&run_id).unwrap();
+  assert!(events.iter().any(|event| matches!(
+    &event.payload,
+    RunEventPayload::SagaCorrectionStarted(data)
+      if data.reason == SagaCorrectionReason::Cancel
+  )));
+  assert!(events.iter().any(|event| matches!(
+    &event.payload,
+    RunEventPayload::CorrectionAttemptSucceeded(data)
+      if data.action_id == "provision:compensate:createNetwork"
+  )));
+  let cleanup = events
+    .iter()
+    .find(|event| {
+      matches!(
+        &event.payload,
+        RunEventPayload::CorrectionAttemptSucceeded(data)
+          if data.action_id == "provision:cleanup:revokeCredentials"
+      )
+    })
+    .expect("cleanup succeeds during cancellation")
+    .sequence;
+  let terminal = events
+    .iter()
+    .find(|event| {
+      matches!(
+        event.payload,
+        RunEventPayload::RunOutcomeDecided(woml_engine::RunOutcomeDecidedData::Cancelled { .. })
+      )
+    })
+    .expect("run cancellation is durable")
+    .sequence;
+  assert!(cleanup < terminal);
+}
+
+#[tokio::test]
+async fn externally_resolved_restart_continues_cleanup_without_replaying_the_effect() {
+  let Some(options) = runtime_options() else {
+    return;
+  };
+  let workflow = model();
+  let database = TemporaryDatabase::new("external-resolution-resume");
+  let now = chrono::Utc::now();
+  let mut store = DurableEventStore::open(database.path()).unwrap();
+  store.register_definition(&workflow, HASH).unwrap();
+  let run_id = store
+    .admit_trigger_occurrence(TriggerAdmissionRequest {
+      workflow_id: workflow.workflow_id.clone(),
+      definition_hash: HASH.to_string(),
+      trigger_id: "start".to_string(),
+      trigger_handler: "trigger.manual".to_string(),
+      source_identity: "manual:external-resolution-resume".to_string(),
+      payload: Map::new(),
+      received_at: now,
+    })
+    .unwrap()
+    .run_id;
+  let claim = store
+    .claim_policy_run(
+      &run_id,
+      "crashed-runtime",
+      now,
+      std::time::Duration::from_secs(30),
+    )
+    .unwrap();
+  let mut engine = DurableDagEngine::resume(store, &run_id).unwrap();
+  engine
+    .start_step_attempt(&run_id, "prepare", 1, "inv-prepare", now)
+    .unwrap();
+  engine
+    .append_payload(
+      "evt-prepare-success",
+      &run_id,
+      now,
+      RunEventPayload::StepAttemptSucceeded(StepAttemptSucceededData {
+        node_id: "prepare".to_string(),
+        attempt: 1,
+        invocation_id: "inv-prepare".to_string(),
+        output: serde_json::json!({"pullRequest": 42}),
+      }),
+    )
+    .unwrap();
+  engine
+    .append_payload(
+      "evt-saga-start",
+      &run_id,
+      now,
+      RunEventPayload::SagaStarted(SagaIdentityData {
+        saga_id: "provision".to_string(),
+      }),
+    )
+    .unwrap();
+  engine
+    .start_step_attempt(&run_id, "createNetwork", 1, "inv-network", now)
+    .unwrap();
+  engine
+    .record_step_success_with_compensation(
+      &run_id,
+      StepAttemptSucceededData {
+        node_id: "createNetwork".to_string(),
+        attempt: 1,
+        invocation_id: "inv-network".to_string(),
+        output: serde_json::json!({"networkId": "network-42"}),
+      },
+      "provision",
+      "provision:compensate:createNetwork",
+    )
+    .unwrap();
+  engine
+    .start_step_attempt(&run_id, "deployApplication", 1, "inv-deploy", now)
+    .unwrap();
+  engine
+    .record_step_attempt_failure(
+      &run_id,
+      now,
+      StepAttemptFailedData {
+        node_id: "deployApplication".to_string(),
+        attempt: 1,
+        invocation_id: "inv-deploy".to_string(),
+        failure: AttemptFailure {
+          kind: AttemptFailureKind::ScriptThrew,
+          code: "WOML_SCRIPT_THROWN".to_string(),
+          message: "deployment failed".to_string(),
+          ..AttemptFailure::legacy_defaults()
+        },
+      },
+    )
+    .unwrap();
+  engine
+    .append_payload(
+      "evt-correction-start",
+      &run_id,
+      now,
+      RunEventPayload::SagaCorrectionStarted(SagaCorrectionStartedData {
+        saga_id: "provision".to_string(),
+        reason: SagaCorrectionReason::Failure,
+      }),
+    )
+    .unwrap();
+  engine
+    .append_payload(
+      "evt-correction-attempt",
+      &run_id,
+      now,
+      RunEventPayload::CorrectionAttemptStarted(CorrectionAttemptIdentityData {
+        saga_id: "provision".to_string(),
+        action_id: "provision:compensate:createNetwork".to_string(),
+        action_kind: CorrectiveActionKind::Compensation,
+        attempt: 1,
+      }),
+    )
+    .unwrap();
+  drop(engine);
+
+  let mut store = DurableEventStore::open(database.path()).unwrap();
+  store.recover_interrupted_runs().unwrap();
+  store
+    .recover_correction_v1(
+      CorrectionRecoveryRequestV1 {
+        profile: CORRECTION_RECOVERY_REQUEST_PROFILE.to_string(),
+        run_id: run_id.clone(),
+        action: CorrectionRecoveryActionV1::ExternallyResolve,
+        action_id: "provision:compensate:createNetwork".to_string(),
+        note: Some("resource verified absent in the provider console".to_string()),
+      },
+      chrono::Utc::now(),
+    )
+    .unwrap();
+  assert!(store
+    .release_policy_claim(&run_id, "crashed-runtime", &claim.claim_id)
+    .unwrap());
+  drop(store);
+
+  let error = resume_workflow_durable(database.path().to_path_buf(), &run_id, options)
+    .await
+    .expect_err("the original deployment failure remains primary");
+  assert!(matches!(error, RuntimeExecutionError::RunFailed(_)));
+  let store = DurableEventStore::open(database.path()).unwrap();
+  let events = store.events(&run_id).unwrap();
+  assert_eq!(
+    events
+      .iter()
+      .filter(|event| matches!(
+        &event.payload,
+        RunEventPayload::CorrectionAttemptStarted(data)
+          if data.action_id == "provision:compensate:createNetwork"
+      ))
+      .count(),
+    1,
+    "the ambiguous effect must never be replayed"
+  );
+  assert!(events.iter().any(|event| matches!(
+    &event.payload,
+    RunEventPayload::CorrectionAttemptSucceeded(data)
+      if data.action_id == "provision:cleanup:revokeCredentials"
+  )));
+  assert!(events
+    .iter()
+    .any(|event| matches!(event.payload, RunEventPayload::SagaCorrectionCompleted(_))));
+  assert_eq!(store.projection(&run_id).unwrap().status, RunStatus::Failed);
 }
 
 #[tokio::test]

@@ -2215,6 +2215,48 @@ pub(crate) async fn resume_due_timer_waits_for_workflows_durable(
   Ok(outcomes)
 }
 
+pub(crate) struct CorrectionRecoveryResume {
+  pub run_id: String,
+  pub outcome: Result<WorkflowRuntimeOutcome, RuntimeExecutionError>,
+}
+
+/// Resumes only bounded correction work owned by the calling production
+/// runtime. The durable policy claim remains the single execution authority;
+/// this scan is discovery, not a second scheduler or an in-memory claim.
+pub(crate) async fn resume_corrections_for_workflows_durable(
+  database_path: PathBuf,
+  options: RuntimeExecutionOptions,
+  limit: usize,
+  workflow_ids: &HashSet<String>,
+) -> Result<Vec<CorrectionRecoveryResume>, RuntimeExecutionError> {
+  let candidates = DurableEventStore::open(database_path.clone())?
+    .correction_recovery_batch_for_workflows_v1(limit, workflow_ids)?;
+  let mut run_ids = candidates
+    .into_iter()
+    .map(|candidate| candidate.run_id)
+    .collect::<Vec<_>>();
+  run_ids.sort();
+  run_ids.dedup();
+
+  let mut resumed = Vec::with_capacity(run_ids.len());
+  for run_id in run_ids {
+    let mut store = DurableEventStore::open(database_path.clone())?;
+    if store.policy_run_has_live_claim(&run_id, chrono::Utc::now())? {
+      continue;
+    }
+    resumed.push(CorrectionRecoveryResume {
+      run_id: run_id.clone(),
+      outcome: execute_admitted_trigger_run_durable(
+        database_path.clone(),
+        &run_id,
+        options.clone(),
+      )
+      .await,
+    });
+  }
+  Ok(resumed)
+}
+
 pub struct ExternalSignalRuntimeOutcome {
   pub admission: crate::ExternalSignalAdmissionOutcome,
   pub continuation: Option<Result<WorkflowRuntimeOutcome, RuntimeExecutionError>>,
@@ -4827,6 +4869,8 @@ async fn drive_workflow_lifecycle<E: RuntimeDagEngine>(
       | crate::COMPILED_MODEL_SCHEMA_VERSION_V15
       | crate::COMPILED_MODEL_SCHEMA_VERSION_V16
       | crate::COMPILED_MODEL_SCHEMA_VERSION_V17
+      | crate::COMPILED_MODEL_SCHEMA_VERSION_V18
+      | crate::COMPILED_MODEL_SCHEMA_VERSION_V19
   ) {
     return Ok(());
   }
@@ -5337,19 +5381,18 @@ async fn continue_runtime_loop<E: RuntimeDagEngine>(
         .as_deref()
         .unwrap_or_default()
         .iter()
-        .find(|saga| {
-          current
-            .sagas
-            .get(&saga.saga_id)
-            .is_some_and(|state| state.phase == crate::SagaPhase::Forward)
-        })
-        .cloned();
-      if let Some(saga) = active_saga {
+        .find_map(|saga| {
+          current.sagas.get(&saga.saga_id).and_then(|state| {
+            (state.phase != crate::SagaPhase::CorrectionCompleted)
+              .then_some((saga.clone(), state.reason))
+          })
+        });
+      if let Some((saga, existing_reason)) = active_saga {
         let completed = execute_saga_correction(
           engine,
           run_id,
           &saga,
-          SagaCorrectionReason::Cancel,
+          existing_reason.unwrap_or(SagaCorrectionReason::Cancel),
           options,
           host,
         )
@@ -5368,10 +5411,76 @@ async fn continue_runtime_loop<E: RuntimeDagEngine>(
       }
       options.ensure_policy_execution_slot().await?;
       settle_cancelling_run(engine, run_id, options.clock.now(), options)?;
+      drive_workflow_lifecycle(engine, run_id, options, host).await?;
       return Err(cancelled_run_error(engine, run_id)?);
     }
     if current.status == RunStatus::Cancelled {
       return Err(cancelled_run_error(engine, run_id)?);
+    }
+    if let Some((saga, reason)) = engine
+      .workflow()
+      .graph
+      .sagas
+      .as_deref()
+      .unwrap_or_default()
+      .iter()
+      .find_map(|saga| {
+        current.sagas.get(&saga.saga_id).and_then(|state| {
+          matches!(
+            state.phase,
+            crate::SagaPhase::Correcting | crate::SagaPhase::ManualRecovery
+          )
+          .then_some((saga.clone(), state.reason))
+        })
+      })
+    {
+      let reason = reason.ok_or_else(|| {
+        RuntimeExecutionError::Stalled("active saga correction has no durable reason".to_string())
+      })?;
+      let completed = execute_saga_correction(engine, run_id, &saga, reason, options, host).await?;
+      if !completed
+        && engine
+          .projection(run_id)?
+          .sagas
+          .get(&saga.saga_id)
+          .is_some_and(|state| state.phase == crate::SagaPhase::ManualRecovery)
+      {
+        return Err(RuntimeExecutionError::Stalled(format!(
+          "saga {:?} requires manual recovery",
+          saga.saga_id
+        )));
+      }
+      if reason == SagaCorrectionReason::Failure {
+        let failure = engine
+          .events(run_id)?
+          .into_iter()
+          .rev()
+          .find_map(|event| match event.payload {
+            RunEventPayload::StepAttemptFailed(data)
+              if engine
+                .workflow()
+                .saga_for_body_node(&data.node_id)
+                .is_some_and(|owner| owner.saga_id == saga.saga_id) =>
+            {
+              Some(data)
+            }
+            _ => None,
+          })
+          .ok_or_else(|| {
+            RuntimeExecutionError::Stalled(
+              "failed saga correction has no durable forward failure".to_string(),
+            )
+          })?;
+        engine.append_payload(
+          run_id,
+          RunEventPayload::RunFailed(attempt_run_failed_data(
+            engine.event_schema_version(),
+            &failure,
+          )),
+        )?;
+        return Err(resumed_failure(engine, run_id, engine.projection(run_id)?)?);
+      }
+      continue;
     }
     let ready = engine.ready_node_ids(run_id)?;
     if ready.is_empty() {
@@ -10901,6 +11010,9 @@ async fn execute_corrective_action<E: RuntimeDagEngine>(
   {
     return Ok(CorrectiveActionOutcome::Succeeded);
   }
+  if engine.correction_action_externally_resolved(run_id, saga_id, runtime_action_id)? {
+    return Ok(CorrectiveActionOutcome::Succeeded);
+  }
   if projected
     .as_ref()
     .is_some_and(|state| state.status == crate::CorrectionActionStatus::ManualRecovery)
@@ -10937,11 +11049,18 @@ async fn execute_corrective_action<E: RuntimeDagEngine>(
       exports: module.exports.clone(),
     })
     .collect::<Vec<_>>();
-  let max_attempts = action
+  let configured_max_attempts = action
     .node
     .retry_policy
     .as_ref()
     .map_or(1, |policy| policy.max_attempts);
+  let max_attempts = projected.as_ref().map_or(configured_max_attempts, |state| {
+    if state.status == crate::CorrectionActionStatus::RetryScheduled {
+      configured_max_attempts.max(state.attempts.saturating_add(1).min(10))
+    } else {
+      configured_max_attempts
+    }
+  });
   let timeout_ms = action.node.timeout_ms.unwrap_or(options.script_timeout_ms);
   let compensation_binding =
     (action_kind == CorrectiveActionKind::Compensation).then(|| CompensationBindingV1 {
@@ -11162,7 +11281,10 @@ async fn execute_saga_correction<E: RuntimeDagEngine>(
     .get(&saga.saga_id)
     .map(|state| state.phase)
     .ok_or_else(|| RuntimeExecutionError::Stalled("saga correction has no open scope".into()))?;
-  if phase != crate::SagaPhase::Correcting {
+  if !matches!(
+    phase,
+    crate::SagaPhase::Correcting | crate::SagaPhase::ManualRecovery
+  ) {
     engine.append_payload(
       run_id,
       RunEventPayload::SagaCorrectionStarted(SagaCorrectionStartedData {
@@ -12157,6 +12279,14 @@ trait RuntimeDagEngine {
   fn projection(&self, run_id: &str) -> Result<RunProjection, RuntimeExecutionError>;
   fn events(&self, run_id: &str) -> Result<Vec<RunEvent>, RuntimeExecutionError>;
   fn ready_node_ids(&self, run_id: &str) -> Result<Vec<String>, RuntimeExecutionError>;
+  fn correction_action_externally_resolved(
+    &self,
+    _run_id: &str,
+    _saga_id: &str,
+    _action_id: &str,
+  ) -> Result<bool, RuntimeExecutionError> {
+    Ok(false)
+  }
   fn request_approval(
     &mut self,
     _run_id: &str,
@@ -12438,6 +12568,17 @@ impl<E: RuntimeDagEngine> RuntimeDagEngine for SharedForEachEngine<'_, E> {
     self.with_engine(|engine| engine.ready_node_ids(run_id))
   }
 
+  fn correction_action_externally_resolved(
+    &self,
+    run_id: &str,
+    saga_id: &str,
+    action_id: &str,
+  ) -> Result<bool, RuntimeExecutionError> {
+    self.with_engine(|engine| {
+      engine.correction_action_externally_resolved(run_id, saga_id, action_id)
+    })
+  }
+
   fn request_approval(
     &mut self,
     run_id: &str,
@@ -12592,6 +12733,15 @@ impl RuntimeDagEngine for InMemoryDagEngine {
 
   fn ready_node_ids(&self, run_id: &str) -> Result<Vec<String>, RuntimeExecutionError> {
     Ok(self.ready_node_ids(run_id)?)
+  }
+
+  fn correction_action_externally_resolved(
+    &self,
+    _run_id: &str,
+    _saga_id: &str,
+    _action_id: &str,
+  ) -> Result<bool, RuntimeExecutionError> {
+    Ok(false)
   }
 }
 
@@ -12766,6 +12916,17 @@ impl RuntimeDagEngine for DurableDagEngine {
 
   fn ready_node_ids(&self, run_id: &str) -> Result<Vec<String>, RuntimeExecutionError> {
     Ok(self.ready_node_ids(run_id)?)
+  }
+
+  fn correction_action_externally_resolved(
+    &self,
+    run_id: &str,
+    saga_id: &str,
+    action_id: &str,
+  ) -> Result<bool, RuntimeExecutionError> {
+    Ok(DurableDagEngine::correction_action_externally_resolved(
+      self, run_id, saga_id, action_id,
+    )?)
   }
 
   fn request_approval(

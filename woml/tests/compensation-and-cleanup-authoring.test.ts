@@ -55,6 +55,7 @@ describe('WOML Compensation and Cleanup CC0 and CC1', () => {
       'script-host-protocol.v11.schema.json',
       'correction-inspection.v1.schema.json',
       'correction-recovery.v1.schema.json',
+      'correction-observation.v1.schema.json',
       'compensation-and-cleanup.v1.schema.json',
     ]) {
       ajv.addSchema(JSON.parse(readFileSync(resolve(schemaRoot, name), 'utf8')));
@@ -95,6 +96,16 @@ describe('WOML Compensation and Cleanup CC0 and CC1', () => {
     );
     expect(validateRecovery?.(recovery.request)).toBe(true);
     expect(validateRecovery?.(recovery.result)).toBe(true);
+    expect(
+      ajv.getSchema('https://woml.dev/schemas/correction-observation/v1')?.({
+        profile: 'woml.correction-observation/v1',
+        openSagas: 1,
+        pendingActions: 1,
+        activeAttempts: 0,
+        manualRecoveryActions: 1,
+        oldestManualRecoveryAgeMs: 25,
+      })
+    ).toBe(true);
     expect(
       ajv
         .getSchema('https://woml.dev/schemas/correction-inspection/v1')?.(

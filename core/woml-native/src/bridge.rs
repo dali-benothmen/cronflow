@@ -24,18 +24,19 @@ use woml_engine::{
   run_notification_provider_journey_with_custom, run_presentation_from_store_v1,
   settle_approval_timeout_durable, verify_artifact_backup, ApprovalDecision,
   ApprovalDecisionOutcome, ArtifactPolicyV1, ArtifactRuntimeMode, BackupError,
-  CompiledReusableInvocation, CompiledWorkflowDefinition, CustomNotificationJourneyOptions,
-  CustomProviderScriptArtifact, DurableEventStore, DurableStoreError,
-  ExternalSignalAdmissionOutcome, ExternalSignalAdmissionRequest, ExternalTriggerAdmissionCommand,
-  IntervalProgress, IntervalProgressReporter, LifecycleProgress, NotificationHostClientError,
-  NotificationHostProcessOptions, NotificationJourneyDiagnostics, NotificationJourneyError,
-  ParallelFailurePolicy, ProcessPolicyV1, ProcessRuntimeMode, RetentionError, RetentionPolicyV1,
-  RunFailure, RunPresentationError, RunStatus, RuntimeExecutionError, RuntimeExecutionOptions,
-  RuntimeModuleArtifact, RuntimePolicyProgress, RuntimePolicyProgressReporter, ScheduleProgress,
-  ScheduleProgressReporter, ScriptHostProcessOptions, SystemEngineClock, TimerWaitSettlement,
-  TriggerAdmissionRequest, TriggerProgress, TriggerProgressReporter, WebhookDefinitionRegistration,
-  WebhookRuntimeError, WomlWebhookServer, WomlWebhookServerConfig, WorkflowCallProgress,
-  WorkflowCallProgressReporter, WorkflowCallRunRelations,
+  CompiledReusableInvocation, CompiledWorkflowDefinition, CorrectionRecoveryRequestV1,
+  CustomNotificationJourneyOptions, CustomProviderScriptArtifact, DurableEventStore,
+  DurableStoreError, ExternalSignalAdmissionOutcome, ExternalSignalAdmissionRequest,
+  ExternalTriggerAdmissionCommand, IntervalProgress, IntervalProgressReporter, LifecycleProgress,
+  NotificationHostClientError, NotificationHostProcessOptions, NotificationJourneyDiagnostics,
+  NotificationJourneyError, ParallelFailurePolicy, ProcessPolicyV1, ProcessRuntimeMode,
+  RetentionError, RetentionPolicyV1, RunFailure, RunPresentationError, RunStatus,
+  RuntimeExecutionError, RuntimeExecutionOptions, RuntimeModuleArtifact, RuntimePolicyProgress,
+  RuntimePolicyProgressReporter, ScheduleProgress, ScheduleProgressReporter,
+  ScriptHostProcessOptions, SystemEngineClock, TimerWaitSettlement, TriggerAdmissionRequest,
+  TriggerProgress, TriggerProgressReporter, WebhookDefinitionRegistration, WebhookRuntimeError,
+  WomlWebhookServer, WomlWebhookServerConfig, WorkflowCallProgress, WorkflowCallProgressReporter,
+  WorkflowCallRunRelations, COMPILED_MODEL_SCHEMA_VERSION_V19,
 };
 
 #[derive(Serialize)]
@@ -2635,6 +2636,68 @@ pub fn inspect_woml_waits_v1(event_store_path: String, run_id: String) -> napi::
     .map_err(|error| native_run_management_error("WOML_WAIT_INSPECTION_FAILED", error))?;
   serde_json::to_string(&inspection).map_err(|error| {
     napi::Error::from_reason(format!("Could not encode WOML wait inspection: {error}"))
+  })
+}
+
+#[napi]
+pub fn inspect_woml_correction_v1(
+  event_store_path: String,
+  run_id: String,
+) -> napi::Result<String> {
+  let store = DurableEventStore::open(PathBuf::from(event_store_path))
+    .map_err(|error| native_run_management_error("WOML_CORRECTION_INSPECTION_FAILED", error))?;
+  let binding = store
+    .run_binding(&run_id)
+    .map_err(|error| native_run_management_error("WOML_CORRECTION_INSPECTION_FAILED", error))?;
+  let workflow = store
+    .definition(&binding.definition_hash)
+    .map_err(|error| native_run_management_error("WOML_CORRECTION_INSPECTION_FAILED", error))?;
+  if workflow.schema_version != COMPILED_MODEL_SCHEMA_VERSION_V19 {
+    return Ok("null".to_string());
+  }
+  let inspection = store
+    .inspect_correction_v1(&run_id)
+    .map_err(|error| native_run_management_error("WOML_CORRECTION_INSPECTION_FAILED", error))?;
+  serde_json::to_string(&inspection).map_err(|error| {
+    napi::Error::from_reason(format!(
+      "Could not encode WOML correction inspection: {error}"
+    ))
+  })
+}
+
+#[napi]
+pub fn recover_woml_correction(
+  event_store_path: String,
+  request_json: String,
+) -> napi::Result<String> {
+  let request: CorrectionRecoveryRequestV1 = serde_json::from_str(&request_json).map_err(|_| {
+    napi::Error::from_reason(
+      "WOML_CORRECTION_NOT_RECOVERABLE: invalid Correction Recovery v1 request.".to_string(),
+    )
+  })?;
+  let mut store = DurableEventStore::open(PathBuf::from(event_store_path))
+    .map_err(|error| native_run_management_error("WOML_CORRECTION_RECOVERY_FAILED", error))?;
+  let result = store
+    .recover_correction_v1(request, Utc::now())
+    .map_err(|error| native_run_management_error("WOML_CORRECTION_RECOVERY_FAILED", error))?;
+  serde_json::to_string(&result).map_err(|error| {
+    napi::Error::from_reason(format!(
+      "Could not encode WOML correction recovery: {error}"
+    ))
+  })
+}
+
+#[napi]
+pub fn observe_woml_corrections_v1(event_store_path: String) -> napi::Result<String> {
+  let store = DurableEventStore::open(PathBuf::from(event_store_path))
+    .map_err(|error| native_run_management_error("WOML_CORRECTION_OBSERVATION_FAILED", error))?;
+  let observation = store
+    .correction_observation_v1()
+    .map_err(|error| native_run_management_error("WOML_CORRECTION_OBSERVATION_FAILED", error))?;
+  serde_json::to_string(&observation).map_err(|error| {
+    napi::Error::from_reason(format!(
+      "Could not encode WOML correction observation: {error}"
+    ))
   })
 }
 

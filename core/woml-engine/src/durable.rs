@@ -1504,7 +1504,13 @@ pub struct WaitInspectionV1 {
 }
 
 pub const CORRECTION_INSPECTION_PROFILE: &str = "woml.correction-inspection/v1";
+pub const CORRECTION_RECOVERY_REQUEST_PROFILE: &str = "woml.correction-recovery-request/v1";
+pub const CORRECTION_RECOVERY_RESULT_PROFILE: &str = "woml.correction-recovery-result/v1";
+pub const CORRECTION_OBSERVATION_PROFILE: &str = "woml.correction-observation/v1";
+pub const CORRECTION_RECOVERY_BATCH_LIMIT: usize = 100;
+pub const CORRECTION_UNRESOLVED_STORE_LIMIT: usize = 10_000;
 const MAX_CORRECTION_INSPECTION_ROWS: usize = 100;
+const MAX_CORRECTION_INSPECTION_BYTES: usize = 1024 * 1024;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -1535,6 +1541,63 @@ pub struct CorrectionInspectionV1 {
   pub sagas: Vec<CorrectionSagaInspectionV1>,
   pub unresolved_actions: Vec<UnresolvedCorrectionActionV1>,
   pub truncated: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CorrectionRecoveryActionV1 {
+  Retry,
+  ExternallyResolve,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct CorrectionRecoveryRequestV1 {
+  pub profile: String,
+  pub run_id: String,
+  pub action: CorrectionRecoveryActionV1,
+  pub action_id: String,
+  #[serde(skip_serializing_if = "Option::is_none")]
+  pub note: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CorrectionRecoveryStatusV1 {
+  RetryScheduled,
+  ExternallyResolved,
+  Rejected,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CorrectionRecoveryResultV1 {
+  pub profile: &'static str,
+  pub run_id: String,
+  pub action_id: String,
+  pub status: CorrectionRecoveryStatusV1,
+  pub audit_recorded: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CorrectionRecoveryCandidateV1 {
+  pub run_id: String,
+  pub saga_id: String,
+  pub action_id: String,
+  pub status: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CorrectionObservationV1 {
+  pub profile: &'static str,
+  pub open_sagas: u64,
+  pub pending_actions: u64,
+  pub active_attempts: u64,
+  pub manual_recovery_actions: u64,
+  #[serde(skip_serializing_if = "Option::is_none")]
+  pub oldest_manual_recovery_age_ms: Option<u64>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -6023,7 +6086,17 @@ impl DurableEventStore {
       .values()
       .any(|saga| saga.phase == crate::SagaPhase::Correcting)
     {
-      "correcting"
+      let cleanup_started = projection.sagas.values().any(|saga| {
+        saga.actions.values().any(|action| {
+          action.action_kind == crate::CorrectiveActionKind::Cleanup
+            && action.status != crate::CorrectionActionStatus::Registered
+        })
+      });
+      if cleanup_started {
+        "cleanup"
+      } else {
+        "compensating"
+      }
     } else if projection
       .sagas
       .values()
@@ -6037,13 +6110,13 @@ impl DurableEventStore {
     {
       "completed"
     } else {
-      "forward_succeeded"
+      "forward"
     };
     let original_outcome = projection
       .sagas
       .values()
       .find_map(|saga| saga.reason)
-      .map_or("pending", |reason| match reason {
+      .map_or("running", |reason| match reason {
         crate::SagaCorrectionReason::Failure => "failed",
         crate::SagaCorrectionReason::Cancel => "cancelled",
         crate::SagaCorrectionReason::Success => "succeeded",
@@ -6104,13 +6177,15 @@ impl DurableEventStore {
         .unwrap_or(u32::MAX),
       });
       unresolved.extend(saga.actions.values().filter_map(|action| {
-        matches!(
+        let externally_settled = saga.phase == crate::SagaPhase::CorrectionCompleted
+          && action.status == crate::CorrectionActionStatus::ManualRecovery;
+        let unresolved = matches!(
           action.status,
           crate::CorrectionActionStatus::Failed
             | crate::CorrectionActionStatus::Interrupted
             | crate::CorrectionActionStatus::ManualRecovery
-        )
-        .then(|| UnresolvedCorrectionActionV1 {
+        );
+        (unresolved && !externally_settled).then(|| UnresolvedCorrectionActionV1 {
           action_id: action.action_id.clone(),
           kind: action.action_kind,
           code: action
@@ -6125,7 +6200,7 @@ impl DurableEventStore {
     unresolved.sort_by(|left, right| left.action_id.cmp(&right.action_id));
     let truncated = unresolved.len() > MAX_CORRECTION_INSPECTION_ROWS;
     unresolved.truncate(MAX_CORRECTION_INSPECTION_ROWS);
-    Ok(CorrectionInspectionV1 {
+    let inspection = CorrectionInspectionV1 {
       profile: CORRECTION_INSPECTION_PROFILE,
       run_id: run_id.to_string(),
       phase: phase.to_string(),
@@ -6133,6 +6208,255 @@ impl DurableEventStore {
       sagas,
       unresolved_actions: unresolved,
       truncated,
+    };
+    if serde_json::to_vec(&inspection)?.len() > MAX_CORRECTION_INSPECTION_BYTES {
+      return Err(DurableStoreError::Contract(
+        "Correction Inspection v1 exceeded its frozen 1 MiB response limit.".to_string(),
+      ));
+    }
+    Ok(inspection)
+  }
+
+  pub fn correction_action_externally_resolved(
+    &self,
+    run_id: &str,
+    saga_id: &str,
+    action_id: &str,
+  ) -> Result<bool, DurableStoreError> {
+    let resolved: bool = self.connection.query_row(
+      "SELECT EXISTS(
+         SELECT 1 FROM woml_correction_manual_recovery
+         WHERE run_id = ?1 AND saga_id = ?2 AND action_id = ?3
+           AND status = 'externally_resolved'
+       )",
+      params![run_id, saga_id, action_id],
+      |row| row.get(0),
+    )?;
+    Ok(resolved)
+  }
+
+  pub fn recover_correction_v1(
+    &mut self,
+    request: CorrectionRecoveryRequestV1,
+    now: DateTime<Utc>,
+  ) -> Result<CorrectionRecoveryResultV1, DurableStoreError> {
+    if request.profile != CORRECTION_RECOVERY_REQUEST_PROFILE
+      || request.run_id.is_empty()
+      || request.run_id.len() > 320
+      || request.action_id.is_empty()
+      || request.action_id.len() > 768
+      || request.note.as_ref().is_some_and(|note| {
+        note.is_empty() || note.len() > 1000 || note.chars().any(|character| character.is_control())
+      })
+      || request.action == CorrectionRecoveryActionV1::ExternallyResolve && request.note.is_none()
+    {
+      return Err(DurableStoreError::Contract(
+        "Correction Recovery v1 request is invalid.".to_string(),
+      ));
+    }
+    let projection = self.projection(&request.run_id)?;
+    let mut matches = projection.sagas.values().filter_map(|saga| {
+      saga
+        .actions
+        .get(&request.action_id)
+        .map(|action| (saga.saga_id.clone(), action.clone()))
+    });
+    let Some((saga_id, action)) = matches.next() else {
+      return Err(DurableStoreError::Contract(
+        "WOML_CORRECTION_NOT_RECOVERABLE: the requested action is unknown.".to_string(),
+      ));
+    };
+    if matches.next().is_some()
+      || action.status != crate::CorrectionActionStatus::ManualRecovery
+      || !action.ambiguous
+    {
+      return Err(DurableStoreError::Contract(
+        "WOML_CORRECTION_NOT_RECOVERABLE: the requested action is not awaiting manual recovery."
+          .to_string(),
+      ));
+    }
+    let status = match request.action {
+      CorrectionRecoveryActionV1::Retry => {
+        if action.attempts >= 10 {
+          return Err(DurableStoreError::Contract(
+            "WOML_CORRECTION_LIMIT_EXCEEDED: the action reached the frozen ten-attempt limit."
+              .to_string(),
+          ));
+        }
+        self.append_payloads_atomically(
+          &request.run_id,
+          vec![(
+            generated_event_id(),
+            now,
+            RunEventPayload::CorrectionRetryScheduled(crate::CorrectionRetryScheduledData {
+              saga_id,
+              action_id: request.action_id.clone(),
+              action_kind: action.action_kind,
+              attempt: action.attempts,
+              retry_at: now,
+            }),
+          )],
+        )?;
+        CorrectionRecoveryStatusV1::RetryScheduled
+      }
+      CorrectionRecoveryActionV1::ExternallyResolve => {
+        let note = request
+          .note
+          .as_deref()
+          .expect("external resolution requires a note");
+        let note_digest = sha256_prefixed(note.as_bytes());
+        let transaction = self
+          .connection
+          .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let changed = transaction.execute(
+          "UPDATE woml_correction_manual_recovery
+           SET status = 'externally_resolved',
+               reason_code = ?1,
+               resolved_at = ?2
+           WHERE run_id = ?3 AND saga_id = ?4 AND action_id = ?5
+             AND status = 'required'",
+          params![
+            format!("WOML_CORRECTION_EXTERNALLY_RESOLVED:{note_digest}"),
+            now.to_rfc3339(),
+            request.run_id,
+            saga_id,
+            request.action_id
+          ],
+        )?;
+        if changed != 1 {
+          return Err(DurableStoreError::Contract(
+            "WOML_CORRECTION_NOT_RECOVERABLE: the recovery decision was already recorded."
+              .to_string(),
+          ));
+        }
+        transaction.commit()?;
+        CorrectionRecoveryStatusV1::ExternallyResolved
+      }
+    };
+    Ok(CorrectionRecoveryResultV1 {
+      profile: CORRECTION_RECOVERY_RESULT_PROFILE,
+      run_id: request.run_id,
+      action_id: request.action_id,
+      status,
+      audit_recorded: true,
+    })
+  }
+
+  pub fn correction_recovery_batch_v1(
+    &self,
+    limit: usize,
+  ) -> Result<Vec<CorrectionRecoveryCandidateV1>, DurableStoreError> {
+    self.query_correction_recovery_batch_v1(limit, None)
+  }
+
+  pub(crate) fn correction_recovery_batch_for_workflows_v1(
+    &self,
+    limit: usize,
+    workflow_ids: &HashSet<String>,
+  ) -> Result<Vec<CorrectionRecoveryCandidateV1>, DurableStoreError> {
+    if workflow_ids.is_empty() {
+      return Ok(Vec::new());
+    }
+    self.query_correction_recovery_batch_v1(limit, Some(workflow_ids))
+  }
+
+  fn query_correction_recovery_batch_v1(
+    &self,
+    limit: usize,
+    workflow_ids: Option<&HashSet<String>>,
+  ) -> Result<Vec<CorrectionRecoveryCandidateV1>, DurableStoreError> {
+    if limit == 0 || limit > CORRECTION_RECOVERY_BATCH_LIMIT {
+      return Err(DurableStoreError::Contract(format!(
+        "Correction recovery limit must be between 1 and {CORRECTION_RECOVERY_BATCH_LIMIT}."
+      )));
+    }
+    let mut parameters = Vec::new();
+    let workflow_filter = workflow_ids.map(|workflow_ids| {
+      let mut workflow_ids = workflow_ids.iter().cloned().collect::<Vec<_>>();
+      workflow_ids.sort();
+      let placeholders = workflow_ids
+        .iter()
+        .map(|workflow_id| {
+          parameters.push(rusqlite::types::Value::Text(workflow_id.clone()));
+          format!("?{}", parameters.len())
+        })
+        .collect::<Vec<_>>()
+        .join(", ");
+      format!(" AND runs.workflow_id IN ({placeholders})")
+    });
+    parameters.push(rusqlite::types::Value::Integer(
+      i64::try_from(limit).unwrap_or(i64::MAX),
+    ));
+    let limit_parameter = parameters.len();
+    let query = format!(
+      "SELECT actions.run_id, actions.saga_id, actions.action_id, actions.status
+       FROM woml_correction_actions AS actions
+       JOIN woml_saga_scopes AS sagas
+         ON sagas.run_id = actions.run_id AND sagas.saga_id = actions.saga_id
+       JOIN woml_runs AS runs ON runs.run_id = actions.run_id
+       LEFT JOIN woml_correction_manual_recovery AS manual
+         ON manual.run_id = actions.run_id
+        AND manual.saga_id = actions.saga_id
+        AND manual.action_id = actions.action_id
+       WHERE (
+         (sagas.phase = 'correcting' AND actions.status IN ('registered', 'retry_scheduled'))
+         OR
+         (sagas.phase = 'manual_recovery' AND actions.status = 'manual_recovery'
+           AND manual.status = 'externally_resolved')
+       ){}
+       ORDER BY actions.updated_at, actions.run_id, actions.saga_id, actions.action_id
+       LIMIT ?{limit_parameter}",
+      workflow_filter.as_deref().unwrap_or_default()
+    );
+    let mut statement = self.connection.prepare(&query)?;
+    let candidates = statement
+      .query_map(rusqlite::params_from_iter(parameters.iter()), |row| {
+        Ok(CorrectionRecoveryCandidateV1 {
+          run_id: row.get(0)?,
+          saga_id: row.get(1)?,
+          action_id: row.get(2)?,
+          status: row.get(3)?,
+        })
+      })?
+      .collect::<Result<Vec<_>, _>>()
+      .map_err(DurableStoreError::from)?;
+    Ok(candidates)
+  }
+
+  pub fn correction_observation_v1(&self) -> Result<CorrectionObservationV1, DurableStoreError> {
+    let count = |sql: &str| -> Result<u64, DurableStoreError> {
+      let value: i64 = self.connection.query_row(sql, [], |row| row.get(0))?;
+      u64::try_from(value)
+        .map_err(|_| DurableStoreError::Contract("Correction metric is invalid.".to_string()))
+    };
+    let oldest: Option<String> = self.connection.query_row(
+      "SELECT MIN(created_at) FROM woml_correction_manual_recovery WHERE status = 'required'",
+      [],
+      |row| row.get(0),
+    )?;
+    let oldest_manual_recovery_age_ms = oldest
+      .map(|value| {
+        DateTime::parse_from_rfc3339(&value)
+          .map(|time| Utc::now().signed_duration_since(time.with_timezone(&Utc)))
+          .map_err(|_| DurableStoreError::Contract("Correction timestamp is invalid.".to_string()))
+      })
+      .transpose()?
+      .and_then(|age| u64::try_from(age.num_milliseconds().max(0)).ok());
+    Ok(CorrectionObservationV1 {
+      profile: CORRECTION_OBSERVATION_PROFILE,
+      open_sagas: count(
+        "SELECT COUNT(*) FROM woml_saga_scopes WHERE phase IN ('correcting', 'manual_recovery')",
+      )?,
+      pending_actions: count(
+        "SELECT COUNT(*) FROM woml_correction_actions WHERE status IN ('registered', 'started', 'retry_scheduled', 'failed', 'interrupted', 'manual_recovery')",
+      )?,
+      active_attempts: count(
+        "SELECT COUNT(*) FROM woml_correction_attempts WHERE status = 'started'",
+      )?,
+      manual_recovery_actions: count(
+        "SELECT COUNT(*) FROM woml_correction_manual_recovery WHERE status = 'required'",
+      )?,
+      oldest_manual_recovery_age_ms,
     })
   }
 
@@ -7211,6 +7535,8 @@ impl DurableEventStore {
         | crate::COMPILED_MODEL_SCHEMA_VERSION_V15
         | crate::COMPILED_MODEL_SCHEMA_VERSION_V16
         | crate::COMPILED_MODEL_SCHEMA_VERSION_V17
+        | crate::COMPILED_MODEL_SCHEMA_VERSION_V18
+        | crate::COMPILED_MODEL_SCHEMA_VERSION_V19
     ) {
       return Err(DurableStoreError::Contract(
         "Business-outcome authority requires compiled Model v11+.".to_string(),
@@ -10671,6 +10997,90 @@ impl DurableEventStore {
     let event_schema_version = projection.event_schema_version.ok_or_else(|| {
       DurableStoreError::Contract("A stored run has no event schema version.".to_string())
     })?;
+    if event_schema_version == crate::RUN_EVENT_SCHEMA_VERSION_V18 {
+      let active_corrections = projection
+        .sagas
+        .values()
+        .flat_map(|saga| {
+          saga.actions.values().filter_map(|action| {
+            (action.status == crate::CorrectionActionStatus::Started).then_some((
+              saga.saga_id.clone(),
+              action.action_id.clone(),
+              action.action_kind,
+              action.active_attempt.unwrap_or(action.attempts),
+            ))
+          })
+        })
+        .collect::<Vec<_>>();
+      if !active_corrections.is_empty() {
+        if active_corrections.len() > CORRECTION_RECOVERY_BATCH_LIMIT {
+          return Err(DurableStoreError::Contract(
+            "WOML_CORRECTION_LIMIT_EXCEEDED: interrupted correction batch exceeds 100 actions."
+              .to_string(),
+          ));
+        }
+        let now = Utc::now();
+        for (saga_id, action_id, action_kind, attempt) in &active_corrections {
+          append_to_history(
+            &transaction,
+            &mut events,
+            run_id,
+            generated_event_id(),
+            now,
+            event_schema_version,
+            RunEventPayload::CorrectionInterrupted(crate::CorrectionInterruptedData {
+              saga_id: saga_id.clone(),
+              action_id: action_id.clone(),
+              action_kind: *action_kind,
+              attempt: *attempt,
+              ambiguous: true,
+            }),
+          )?;
+          append_to_history(
+            &transaction,
+            &mut events,
+            run_id,
+            generated_event_id(),
+            now,
+            event_schema_version,
+            RunEventPayload::ManualRecoveryRequired(crate::ManualRecoveryRequiredData {
+              saga_id: saga_id.clone(),
+              action_id: action_id.clone(),
+              action_kind: *action_kind,
+              code: "WOML_CORRECTION_INTERRUPTED".to_string(),
+            }),
+          )?;
+        }
+        validate_event_history_against_definition(&workflow, &binding.definition_hash, &events)
+          .map_err(DurableStoreError::Contract)?;
+        let recovered = fold_events(&events)?;
+        write_correction_indexes_from_projection(
+          &transaction,
+          run_id,
+          &binding.definition_hash,
+          &events,
+          &recovered,
+        )?;
+        transaction.commit()?;
+        return Ok(RunRecovery::Recovered {
+          interrupted_attempts: active_corrections.len(),
+        });
+      }
+      let correction_can_resume = projection.sagas.values().any(|saga| {
+        matches!(
+          saga.phase,
+          crate::SagaPhase::Correcting | crate::SagaPhase::CorrectionCompleted
+        )
+      });
+      if correction_can_resume
+        && matches!(
+          projection.status,
+          RunStatus::Running | RunStatus::Cancelling | RunStatus::Finalizing
+        )
+      {
+        return Ok(RunRecovery::Resumable);
+      }
+    }
     if let Some((interrupted_attempts, failure)) = recover_open_for_each_failure(
       &transaction,
       &workflow,
@@ -13564,6 +13974,25 @@ fn write_correction_indexes_from_projection(
   events: &[RunEvent],
   projection: &RunProjection,
 ) -> Result<(), DurableStoreError> {
+  let externally_resolved = {
+    let mut statement = connection.prepare(
+      "SELECT saga_id, action_id, reason_code, created_at, resolved_at
+       FROM woml_correction_manual_recovery
+       WHERE run_id = ?1 AND status = 'externally_resolved'",
+    )?;
+    let rows = statement
+      .query_map([run_id], |row| {
+        Ok((
+          row.get::<_, String>(0)?,
+          row.get::<_, String>(1)?,
+          row.get::<_, String>(2)?,
+          row.get::<_, String>(3)?,
+          row.get::<_, Option<String>>(4)?,
+        ))
+      })?
+      .collect::<Result<Vec<_>, _>>()?;
+    rows
+  };
   connection.execute(
     "DELETE FROM woml_correction_manual_recovery WHERE run_id = ?1",
     [run_id],
@@ -13713,6 +14142,17 @@ fn write_correction_indexes_from_projection(
         )?;
       }
       RunEventPayload::ManualRecoveryRequired(data) => {
+        let unresolved: i64 = connection.query_row(
+          "SELECT COUNT(*) FROM woml_correction_manual_recovery WHERE status = 'required'",
+          [],
+          |row| row.get(0),
+        )?;
+        if unresolved >= i64::try_from(CORRECTION_UNRESOLVED_STORE_LIMIT).unwrap_or(i64::MAX) {
+          return Err(DurableStoreError::Contract(
+            "WOML_CORRECTION_LIMIT_EXCEEDED: the store reached 10000 unresolved recovery records."
+              .to_string(),
+          ));
+        }
         connection.execute(
           "INSERT INTO woml_correction_manual_recovery(
              run_id, saga_id, action_id, status, reason_code, created_at, resolved_at
@@ -13726,13 +14166,55 @@ fn write_correction_indexes_from_projection(
           ],
         )?;
       }
+      RunEventPayload::CorrectionRetryScheduled(data) => {
+        connection.execute(
+          "DELETE FROM woml_correction_manual_recovery
+           WHERE run_id = ?1 AND saga_id = ?2 AND action_id = ?3",
+          params![run_id, data.saga_id, data.action_id],
+        )?;
+      }
       _ => {}
     }
+  }
+  for (saga_id, action_id, reason_code, created_at, resolved_at) in externally_resolved {
+    connection.execute(
+      "UPDATE woml_correction_manual_recovery
+       SET status = 'externally_resolved', reason_code = ?1, created_at = ?2, resolved_at = ?3
+       WHERE run_id = ?4 AND saga_id = ?5 AND action_id = ?6",
+      params![
+        reason_code,
+        created_at,
+        resolved_at,
+        run_id,
+        saga_id,
+        action_id
+      ],
+    )?;
   }
   Ok(())
 }
 
 fn rebuild_correction_indexes(connection: &Connection) -> Result<(), DurableStoreError> {
+  let externally_resolved = {
+    let mut statement = connection.prepare(
+      "SELECT run_id, saga_id, action_id, reason_code, created_at, resolved_at
+       FROM woml_correction_manual_recovery
+       WHERE status = 'externally_resolved'",
+    )?;
+    let rows = statement
+      .query_map([], |row| {
+        Ok((
+          row.get::<_, String>(0)?,
+          row.get::<_, String>(1)?,
+          row.get::<_, String>(2)?,
+          row.get::<_, String>(3)?,
+          row.get::<_, String>(4)?,
+          row.get::<_, Option<String>>(5)?,
+        ))
+      })?
+      .collect::<Result<Vec<_>, _>>()?;
+    rows
+  };
   connection.execute("DELETE FROM woml_correction_manual_recovery", [])?;
   connection.execute("DELETE FROM woml_correction_attempts", [])?;
   connection.execute("DELETE FROM woml_correction_actions", [])?;
@@ -13760,6 +14242,21 @@ fn rebuild_correction_indexes(connection: &Connection) -> Result<(), DurableStor
         &projection,
       )?;
     }
+  }
+  for (run_id, saga_id, action_id, reason_code, created_at, resolved_at) in externally_resolved {
+    connection.execute(
+      "UPDATE woml_correction_manual_recovery
+       SET status = 'externally_resolved', reason_code = ?1, created_at = ?2, resolved_at = ?3
+       WHERE run_id = ?4 AND saga_id = ?5 AND action_id = ?6",
+      params![
+        reason_code,
+        created_at,
+        resolved_at,
+        run_id,
+        saga_id,
+        action_id
+      ],
+    )?;
   }
   Ok(())
 }
@@ -15218,6 +15715,19 @@ impl DurableDagEngine {
 
   pub fn definition_hash(&self) -> &str {
     &self.definition_hash
+  }
+
+  pub fn correction_action_externally_resolved(
+    &self,
+    run_id: &str,
+    saga_id: &str,
+    action_id: &str,
+  ) -> Result<bool, DurableEngineError> {
+    Ok(
+      self
+        .store
+        .correction_action_externally_resolved(run_id, saga_id, action_id)?,
+    )
   }
 
   pub fn decide_run_outcome(

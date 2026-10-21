@@ -2337,17 +2337,25 @@ impl ProjectionFoldState {
         let action = saga.actions.get_mut(&data.action_id).ok_or_else(|| {
           FoldError::InvalidHistory("Correction retry has no failed action.".into())
         })?;
-        if !matches!(
-          saga.phase,
-          SagaPhase::Correcting | SagaPhase::ManualRecovery
-        ) || action.action_kind != data.action_kind
-          || action.status != CorrectionActionStatus::Failed
+        let automatic_retry = saga.phase == SagaPhase::Correcting
+          && action.status == CorrectionActionStatus::Failed
+          && !action.ambiguous;
+        let operator_retry = saga.phase == SagaPhase::ManualRecovery
+          && action.status == CorrectionActionStatus::ManualRecovery
+          && action.ambiguous;
+        if action.action_kind != data.action_kind
           || action.attempts != data.attempt
-          || action.ambiguous
+          || !(automatic_retry || operator_retry)
         {
           return Err(FoldError::InvalidHistory(
-            "Correction retry does not follow an unambiguous failed attempt.".to_string(),
+            "Correction retry does not follow an automatic failure or an explicit manual-recovery decision."
+              .to_string(),
           ));
+        }
+        if operator_retry {
+          saga.phase = SagaPhase::Correcting;
+          action.ambiguous = false;
+          action.failure_code = None;
         }
         action.status = CorrectionActionStatus::RetryScheduled;
         action.retry_at = Some(data.retry_at);
@@ -2398,15 +2406,16 @@ impl ProjectionFoldState {
           FoldError::InvalidHistory("Correction completion references an unknown saga.".into())
         })?;
         let success_exit = saga.reason == Some(crate::SagaCorrectionReason::Success);
-        if saga.phase != SagaPhase::Correcting
-          || saga.actions.values().any(|action| {
-            matches!(
-              action.status,
-              CorrectionActionStatus::Started | CorrectionActionStatus::RetryScheduled
-            ) || action.status == CorrectionActionStatus::Registered
-              && !(success_exit && action.action_kind == crate::CorrectiveActionKind::Compensation)
-          })
-        {
+        if !matches!(
+          saga.phase,
+          SagaPhase::Correcting | SagaPhase::ManualRecovery
+        ) || saga.actions.values().any(|action| {
+          matches!(
+            action.status,
+            CorrectionActionStatus::Started | CorrectionActionStatus::RetryScheduled
+          ) || action.status == CorrectionActionStatus::Registered
+            && !(success_exit && action.action_kind == crate::CorrectiveActionKind::Compensation)
+        }) {
           return Err(FoldError::InvalidHistory(
             "Saga correction cannot complete while corrective work remains pending.".to_string(),
           ));

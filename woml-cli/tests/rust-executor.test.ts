@@ -15,7 +15,9 @@ import {
   parseScheduleProgress,
   parseTriggerProgress,
   parseWorkflowCallProgress,
+  observeCorrectionsV1WithRust,
   recoverDurableRuns,
+  recoverCorrectionWithRust,
   resolveApprovalWithRust,
   resumeApprovalWorkflowWithRust,
   RustWorkflowExecutionError,
@@ -128,6 +130,34 @@ const resultLimitedHostPath = resolve(
   'tests/fixtures/result-limited-script-host.ts'
 );
 const nativeTest = nativeCorePath === undefined ? test.skip : test;
+
+nativeTest('exposes bounded correction observation and fail-closed recovery through N-API', async () => {
+  const directory = await mkdtemp(join(tmpdir(), 'woml-correction-native-'));
+  const database = join(directory, 'state.sqlite');
+  try {
+    expect(observeCorrectionsV1WithRust(database, { nativeCorePath })).toEqual({
+      profile: 'woml.correction-observation/v1',
+      openSagas: 0,
+      pendingActions: 0,
+      activeAttempts: 0,
+      manualRecoveryActions: 0,
+    });
+    expect(() =>
+      recoverCorrectionWithRust(
+        database,
+        {
+          profile: 'woml.correction-recovery-request/v1',
+          runId: 'run_unknown',
+          action: 'retry',
+          actionId: 'provision:compensate:network',
+        },
+        { nativeCorePath }
+      )
+    ).toThrow();
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
 
 describe('Trigger Progress v1 decoding', () => {
   test('Accepts every frozen progress fixture', async () => {
