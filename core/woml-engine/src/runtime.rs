@@ -10652,7 +10652,7 @@ async fn execute_script_node<E: RuntimeDagEngine>(
   let mut cancellation_sent = false;
   let mut timeout_sent = false;
   let mut lease_loss_sent = false;
-  let mut interruption_ack_timed_out = false;
+  let mut retire_interrupted_host = false;
   let completed = loop {
     tokio::select! {
       result = &mut execution => break result,
@@ -10664,23 +10664,26 @@ async fn execute_script_node<E: RuntimeDagEngine>(
           .is_some_and(|lock| lock.status == crate::LockStatus::LeaseLost);
         if protected_lease_lost {
           lease_loss_sent = true;
-          if let Err(error) = host_client.cancel_run(&invocation_id).await {
+          if let Err(error) = interrupt_script_invocation(host_client, &invocation_id).await {
+            retire_interrupted_host = true;
             break Err(error);
           }
         } else if current.timeout_reached_at.is_some() {
           timeout_sent = true;
-          if let Err(error) = host_client.cancel_run(&invocation_id).await {
+          if let Err(error) = interrupt_script_invocation(host_client, &invocation_id).await {
+            retire_interrupted_host = true;
             break Err(error);
           }
         } else if current.status == RunStatus::Cancelling {
           cancellation_sent = true;
-          if let Err(error) = host_client.cancel_run(&invocation_id).await {
+          if let Err(error) = interrupt_script_invocation(host_client, &invocation_id).await {
+            retire_interrupted_host = true;
             break Err(error);
           }
         }
       }
       _ = tokio::time::sleep(SCRIPT_HOST_INTERRUPT_GRACE), if cancellation_sent || timeout_sent || lease_loss_sent => {
-        interruption_ack_timed_out = true;
+        retire_interrupted_host = true;
         break Err(ScriptHostClientError::HostCrashed(
           "the script host did not acknowledge invocation interruption before its deadline"
             .to_string(),
@@ -10690,7 +10693,7 @@ async fn execute_script_node<E: RuntimeDagEngine>(
   };
   drop(execution);
   drop(artifact_cleanup);
-  if interruption_ack_timed_out {
+  if retire_interrupted_host {
     // A host that cannot settle an interrupted Worker cannot safely execute
     // correction or later workflow work. Dropping it terminates the child
     // process (`kill_on_drop`) and the next action acquires a fresh host.
@@ -11647,6 +11650,19 @@ fn final_result<E: RuntimeDagEngine>(
 
 const CANCELLATION_POLL_INTERVAL: Duration = Duration::from_millis(25);
 const SCRIPT_HOST_INTERRUPT_GRACE: Duration = Duration::from_secs(2);
+
+async fn interrupt_script_invocation(
+  host: &ScriptHostClient,
+  invocation_id: &str,
+) -> Result<(), ScriptHostClientError> {
+  tokio::time::timeout(SCRIPT_HOST_INTERRUPT_GRACE, host.cancel_run(invocation_id))
+    .await
+    .map_err(|_| {
+      ScriptHostClientError::HostCrashed(
+        "the script host did not accept invocation interruption before its deadline".to_string(),
+      )
+    })?
+}
 
 fn cancelled_run_error<E: RuntimeDagEngine>(
   engine: &E,
