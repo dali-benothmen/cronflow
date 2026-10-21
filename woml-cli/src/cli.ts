@@ -3862,7 +3862,8 @@ function workflowSecretReferences(
     workflow.schemaVersion === 16 ||
     workflow.schemaVersion === 17 ||
     workflow.schemaVersion === 18 ||
-    workflow.schemaVersion === 19
+    workflow.schemaVersion === 19 ||
+    workflow.schemaVersion === 20
   ) {
     for (const descriptor of workflow.graph.forEach) {
       for (const node of descriptor.body.nodes) {
@@ -3873,7 +3874,7 @@ function workflowSecretReferences(
       }
     }
   }
-  if (workflow.schemaVersion === 19) {
+  if (workflow.schemaVersion === 19 || workflow.schemaVersion === 20) {
     for (const saga of workflow.graph.sagas) {
       for (const action of [...saga.compensations, ...saga.cleanup]) {
         collectSecretReferences(action.node.inputs, references);
@@ -3888,7 +3889,8 @@ function workflowSecretReferences(
   workflow.schemaVersion === 16 ||
   workflow.schemaVersion === 17 ||
   workflow.schemaVersion === 18 ||
-  workflow.schemaVersion === 19
+  workflow.schemaVersion === 19 ||
+  workflow.schemaVersion === 20
     ? (workflow.reusableDefinitions ?? [])
     : []) {
     for (const prop of definition.props) {
@@ -4033,7 +4035,13 @@ async function runNotificationWorkflow(
     const waiting = outcome;
     printNotificationApproval(io, waiting, args.filePath, args.statePath);
     const hasCustomProvider =
-      (workflow.schemaVersion === 14 || workflow.schemaVersion === 15) &&
+      (workflow.schemaVersion === 14 ||
+        workflow.schemaVersion === 15 ||
+        workflow.schemaVersion === 16 ||
+        workflow.schemaVersion === 17 ||
+        workflow.schemaVersion === 18 ||
+        workflow.schemaVersion === 19 ||
+        workflow.schemaVersion === 20) &&
       (workflow.reusableDefinitions ?? []).some(
         definition => definition.kind === 'notification-provider'
       );
@@ -4374,7 +4382,8 @@ async function executeOneShot(
     workflow.schemaVersion !== 16 &&
     workflow.schemaVersion !== 17 &&
     workflow.schemaVersion !== 18 &&
-    workflow.schemaVersion !== 19
+    workflow.schemaVersion !== 19 &&
+    workflow.schemaVersion !== 20
   ) {
     throw new CliInputError(
       'WOML_RESUME_REQUIRES_DURABLE_WORKFLOW',
@@ -4408,7 +4417,8 @@ async function executeOneShot(
     workflow.schemaVersion === 16 ||
     workflow.schemaVersion === 17 ||
     workflow.schemaVersion === 18 ||
-    workflow.schemaVersion === 19
+    workflow.schemaVersion === 19 ||
+    workflow.schemaVersion === 20
   ) {
     await mkdir(dirname(args.statePath), { recursive: true });
     const onProgress = durableRetryProgress(io, args);

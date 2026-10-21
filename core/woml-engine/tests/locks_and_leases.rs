@@ -8,7 +8,7 @@ use woml_engine::{
   execute_workflow_durable_outcome, CompiledWorkflowDefinition, DurableDagEngine,
   DurableEventStore, LockStatus, RunEventPayload, RuntimeExecutionOptions,
   ScriptHostProcessOptions, StepAttemptSucceededData, TriggerAdmissionRequest,
-  WorkflowRuntimeOutcome,
+  WorkflowRuntimeOutcome, DURABLE_STORE_SCHEMA_VERSION,
 };
 
 const MODEL: &str =
@@ -860,7 +860,7 @@ fn cancellation_removes_iteration_waiters_without_releasing_iteration_owners() {
 }
 
 #[test]
-fn store_v15_migrates_through_v16_to_v17_and_future_versions_fail_closed() {
+fn store_v15_migrates_to_the_current_store_and_future_versions_fail_closed() {
   let database = TemporaryDatabase::new();
   drop(DurableEventStore::open(database.path()).unwrap());
   {
@@ -883,7 +883,7 @@ fn store_v15_migrates_through_v16_to_v17_and_future_versions_fail_closed() {
         |row| row.get(0),
       )
       .unwrap();
-    assert_eq!(version, "17");
+    assert_eq!(version, DURABLE_STORE_SCHEMA_VERSION.to_string());
     let tables: i64 = connection.query_row(
       "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name IN ('woml_lock_resources', 'woml_lock_waiters')",
       [], |row| row.get(0),

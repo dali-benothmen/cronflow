@@ -114,7 +114,7 @@ fn typescript_and_rust_share_the_exact_reviewed_model_v20_json() {
     .env("WOML_FIXTURE", fixture)
     .args([
       "-e",
-      "import {readFileSync} from 'node:fs'; import {parseWoml,compileWoml} from './woml/src/index.ts'; process.stdout.write(JSON.stringify(compileWoml(parseWoml(readFileSync(process.env.WOML_FIXTURE,'utf8')))));",
+      "import {readFileSync} from 'node:fs'; import {parseWoml,compileWoml} from './woml/src/index.ts'; const source=readFileSync(process.env.WOML_FIXTURE,'utf8').replace(/\\r\\n/g,'\\n'); process.stdout.write(JSON.stringify(compileWoml(parseWoml(source))));",
     ])
     .output()
     .expect("run TypeScript compiler");
