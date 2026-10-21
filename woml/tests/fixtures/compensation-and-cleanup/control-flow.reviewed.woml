@@ -1,0 +1,73 @@
+<woml>
+  <workflow id="correction-control-flow" name="Correction control flow" version="1.0.0">
+    <triggers><manual id="start" /></triggers>
+    <steps>
+      <step id="prepare">
+        <script>return { route: "selected", enabled: true };</script>
+      </step>
+      <saga id="delivery">
+        <choose id="decision">
+          <when test="{{context.steps.prepare.enabled}}">
+            <step id="chosenEffect">
+              <script>return { selected: true };</script>
+              <compensate><script>return context.compensation;</script></compensate>
+            </step>
+            <result value="{{context.steps.chosenEffect}}" />
+          </when>
+          <otherwise>
+            <step id="unselectedEffect">
+              <script>return { selected: false };</script>
+              <compensate><script>return context.compensation;</script></compensate>
+            </step>
+            <result value="{{context.steps.unselectedEffect}}" />
+          </otherwise>
+        </choose>
+        <switch id="route" value="{{context.steps.prepare.route}}">
+          <case value="selected">
+            <step id="switchedEffect">
+              <script>return { route: "selected" };</script>
+              <compensate><script>return context.compensation;</script></compensate>
+            </step>
+            <result value="{{context.steps.switchedEffect}}" />
+          </case>
+          <default>
+            <step id="defaultEffect">
+              <script>return { route: "default" };</script>
+              <compensate><script>return context.compensation;</script></compensate>
+            </step>
+            <result value="{{context.steps.defaultEffect}}" />
+          </default>
+        </switch>
+        <parallel id="effects" concurrency="2" on-error="wait-all">
+          <step id="slowEffect">
+            <script>await new Promise(resolve => setTimeout(resolve, 20)); return { order: "slow" };</script>
+            <compensate><script>return context.compensation;</script></compensate>
+          </step>
+          <step id="fastEffect">
+            <script>return { order: "fast" };</script>
+            <compensate><script>return context.compensation;</script></compensate>
+          </step>
+        </parallel>
+        <fork id="destinations" join="all">
+          <branch id="first">
+            <step id="firstDestination">
+              <script>return { destination: "first" };</script>
+              <compensate><script>return context.compensation;</script></compensate>
+            </step>
+          </branch>
+          <branch id="second">
+            <step id="secondDestination">
+              <script>return { destination: "second" };</script>
+              <compensate><script>return context.compensation;</script></compensate>
+            </step>
+          </branch>
+        </fork>
+        <step id="failDelivery"><script>throw new Error("delivery failed");</script></step>
+        <cleanup>
+          <step id="cleanupDelivery"><script>return context.cleanup;</script></step>
+        </cleanup>
+      </saga>
+      <step id="done"><script>return { ok: true };</script></step>
+    </steps>
+  </workflow>
+</woml>

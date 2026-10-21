@@ -184,6 +184,25 @@ describe('WOML Compensation and Cleanup CC0 and CC1', () => {
     });
   });
 
+  test('collects compensation descriptors from selected and concurrent saga flow', () => {
+    const compiled = compileWoml(
+      parseWoml(fixture('control-flow.reviewed.woml'))
+    );
+    if (compiled.schemaVersion !== 19) throw new Error('Expected Model v19.');
+    expect(
+      compiled.graph.sagas[0].compensations.map(action => action.forStepId)
+    ).toEqual([
+      'chosenEffect',
+      'unselectedEffect',
+      'switchedEffect',
+      'defaultEffect',
+      'slowEffect',
+      'fastEffect',
+      'firstDestination',
+      'secondDestination',
+    ]);
+  });
+
   test('rejects invalid correction shapes with source-located diagnostics', () => {
     const step = '<step id="work"><script>return true;</script></step>';
     const cases = [

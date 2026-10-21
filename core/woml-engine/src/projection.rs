@@ -1331,14 +1331,15 @@ impl ProjectionFoldState {
       ));
     }
 
-    let scoped_loop_event = matches!(
+    let top_level_scoped_event = matches!(
       event.payload,
       RunEventPayload::ForEachIterationStarted(_)
         | RunEventPayload::ForEachIterationSucceeded(_)
         | RunEventPayload::ForEachIterationFailed(_)
         | RunEventPayload::ForEachIterationSkipped(_)
+        | RunEventPayload::CompensationRegistered(_)
     );
-    if event.iteration.is_some() && !scoped_loop_event {
+    if event.iteration.is_some() && !top_level_scoped_event {
       apply_iteration_scoped_event(projection, event, previous_event.as_ref())?;
       projection.last_sequence = event.sequence;
       *previous_event = Some(event.clone());
@@ -2239,11 +2240,13 @@ impl ProjectionFoldState {
         let saga = projection.sagas.get_mut(&data.saga_id).ok_or_else(|| {
           FoldError::InvalidHistory("Correction attempt references an unknown saga.".into())
         })?;
-        if saga.phase != SagaPhase::Correcting
-          || saga
-            .actions
-            .values()
-            .any(|action| action.status == CorrectionActionStatus::Started)
+        if !matches!(
+          saga.phase,
+          SagaPhase::Correcting | SagaPhase::ManualRecovery
+        ) || saga
+          .actions
+          .values()
+          .any(|action| action.status == CorrectionActionStatus::Started)
         {
           return Err(FoldError::InvalidHistory(
             "A saga may have only one active corrective attempt.".to_string(),
@@ -2290,8 +2293,10 @@ impl ProjectionFoldState {
         let action = saga.actions.get_mut(&data.action_id).ok_or_else(|| {
           FoldError::InvalidHistory("Correction success has no started action.".into())
         })?;
-        if saga.phase != SagaPhase::Correcting
-          || action.action_kind != data.action_kind
+        if !matches!(
+          saga.phase,
+          SagaPhase::Correcting | SagaPhase::ManualRecovery
+        ) || action.action_kind != data.action_kind
           || action.status != CorrectionActionStatus::Started
           || action.active_attempt != Some(data.attempt)
         {
@@ -2309,8 +2314,10 @@ impl ProjectionFoldState {
         let action = saga.actions.get_mut(&data.action_id).ok_or_else(|| {
           FoldError::InvalidHistory("Correction failure has no started action.".into())
         })?;
-        if saga.phase != SagaPhase::Correcting
-          || action.action_kind != data.action_kind
+        if !matches!(
+          saga.phase,
+          SagaPhase::Correcting | SagaPhase::ManualRecovery
+        ) || action.action_kind != data.action_kind
           || action.status != CorrectionActionStatus::Started
           || action.active_attempt != Some(data.attempt)
         {
@@ -2330,8 +2337,10 @@ impl ProjectionFoldState {
         let action = saga.actions.get_mut(&data.action_id).ok_or_else(|| {
           FoldError::InvalidHistory("Correction retry has no failed action.".into())
         })?;
-        if saga.phase != SagaPhase::Correcting
-          || action.action_kind != data.action_kind
+        if !matches!(
+          saga.phase,
+          SagaPhase::Correcting | SagaPhase::ManualRecovery
+        ) || action.action_kind != data.action_kind
           || action.status != CorrectionActionStatus::Failed
           || action.attempts != data.attempt
           || action.ambiguous

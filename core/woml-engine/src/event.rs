@@ -1826,10 +1826,12 @@ impl RunEvent {
       inherited.event_schema_version = RUN_EVENT_SCHEMA_VERSION_V17;
       return inherited.validate();
     }
-    if self.event_schema_version == RUN_EVENT_SCHEMA_VERSION_V18 && self.iteration.is_some() {
+    if self.event_schema_version == RUN_EVENT_SCHEMA_VERSION_V18
+      && self.iteration.is_some()
+      && !matches!(self.payload, RunEventPayload::CompensationRegistered(_))
+    {
       return Err(EventValidationError::Invalid(
-        "Event v18 correction records cannot be iteration-scoped in the sequential profile."
-          .to_string(),
+        "Only compensation_registered may carry an iteration scope in Event v18.".to_string(),
       ));
     }
     if self.event_schema_version == RUN_EVENT_SCHEMA_VERSION_V17 && !lock_event {
@@ -1900,11 +1902,14 @@ impl RunEvent {
     }
     if !matches!(
       self.event_schema_version,
-      RUN_EVENT_SCHEMA_VERSION_V15 | RUN_EVENT_SCHEMA_VERSION_V16 | RUN_EVENT_SCHEMA_VERSION_V17
+      RUN_EVENT_SCHEMA_VERSION_V15
+        | RUN_EVENT_SCHEMA_VERSION_V16
+        | RUN_EVENT_SCHEMA_VERSION_V17
+        | RUN_EVENT_SCHEMA_VERSION_V18
     ) && self.iteration.is_some()
     {
       return Err(EventValidationError::Invalid(
-        "Iteration scope is available only in Event v15.".to_string(),
+        "Iteration scope is available only in Event v15 or a compatible later schema.".to_string(),
       ));
     }
     if self.event_schema_version == RUN_EVENT_SCHEMA_VERSION_V14 {

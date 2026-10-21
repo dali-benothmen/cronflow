@@ -5021,6 +5021,15 @@ impl DurableEventStore {
     run_id: &str,
     payloads: Vec<(String, DateTime<Utc>, RunEventPayload)>,
   ) -> Result<RunProjection, DurableStoreError> {
+    self.append_payloads_scoped_atomically(run_id, None, payloads)
+  }
+
+  pub(crate) fn append_payloads_scoped_atomically(
+    &mut self,
+    run_id: &str,
+    iteration: Option<crate::event::ForEachIterationScope>,
+    payloads: Vec<(String, DateTime<Utc>, RunEventPayload)>,
+  ) -> Result<RunProjection, DurableStoreError> {
     let mut span = crate::performance::PerformanceSpan::new("sqlite", "sqlite.append_event_batch");
     span.run_id(run_id.to_string());
     span.count("events", payloads.len());
@@ -5064,9 +5073,34 @@ impl DurableEventStore {
       } else {
         vec![payload]
       };
-      for (index, payload) in translated.into_iter().enumerate() {
-        validate_payload_against_definition(&workflow, &binding.definition_hash, &payload)
+      for (index, mut payload) in translated.into_iter().enumerate() {
+        if let RunEventPayload::CompensationRegistered(registration) = &mut payload {
+          if let Some(previous) = events.last() {
+            if matches!(
+              &previous.payload,
+              RunEventPayload::StepAttemptSucceeded(succeeded)
+                if succeeded.node_id == registration.for_step_id
+            ) {
+              // The store owns global sequencing. Concurrent loop iterations
+              // cannot safely predict their success sequence before this
+              // immediate transaction acquires the writer lock.
+              registration.completion_sequence = previous.sequence;
+            }
+          }
+        }
+        if let Some(scope) = iteration.as_ref() {
+          validate_scoped_payload_against_definition(
+            &workflow,
+            &binding.definition_hash,
+            run_id,
+            scope,
+            &payload,
+          )
           .map_err(DurableStoreError::Contract)?;
+        } else {
+          validate_payload_against_definition(&workflow, &binding.definition_hash, &payload)
+            .map_err(DurableStoreError::Contract)?;
+        }
         append_to_history_scoped_incremental(
           &transaction,
           &mut events,
@@ -5079,7 +5113,7 @@ impl DurableEventStore {
           },
           occurred_at,
           event_schema_version,
-          None,
+          iteration.clone(),
           payload,
           false,
         )?;
@@ -15867,6 +15901,24 @@ impl DurableDagEngine {
     Ok(
       self.store.append_payloads_atomically(
         run_id,
+        payloads
+          .into_iter()
+          .map(|payload| (generated_event_id(), Utc::now(), payload))
+          .collect(),
+      )?,
+    )
+  }
+
+  pub(crate) fn append_scoped_payloads_atomically(
+    &mut self,
+    run_id: &str,
+    iteration: crate::event::ForEachIterationScope,
+    payloads: Vec<RunEventPayload>,
+  ) -> Result<RunProjection, DurableEngineError> {
+    Ok(
+      self.store.append_payloads_scoped_atomically(
+        run_id,
+        Some(iteration),
         payloads
           .into_iter()
           .map(|payload| (generated_event_id(), Utc::now(), payload))

@@ -1804,7 +1804,24 @@ fn validate_correction_action(
     crate::CorrectiveActionKind::Compensation => saga.compensations.iter(),
     crate::CorrectiveActionKind::Cleanup => saga.cleanup.iter(),
   }
-  .any(|action| action.action_id == action_id);
+  .any(|action| match &action.identity {
+    crate::model::CompiledCorrectionIdentity::Static {
+      action_id: compiled_action_id,
+    } => compiled_action_id == action_id,
+    crate::model::CompiledCorrectionIdentity::ForEachIteration {
+      action_id_template, ..
+    } => {
+      let Some((prefix, suffix)) = action_id_template.split_once("{iterationKey}") else {
+        return false;
+      };
+      action_id
+        .strip_prefix(prefix)
+        .and_then(|value| value.strip_suffix(suffix))
+        .is_some_and(|key| {
+          !key.is_empty() && key.chars().all(|character| character.is_ascii_digit())
+        })
+    }
+  });
   if workflow.schema_version != crate::COMPILED_MODEL_SCHEMA_VERSION_V19 || !exists {
     return Err(format!(
       "Correction action {action_id:?} does not match saga {saga_id:?}."
@@ -1848,6 +1865,25 @@ pub(crate) fn validate_scoped_payload_against_definition(
         ));
       }
       Ok(())
+    }
+    RunEventPayload::CompensationRegistered(data) => {
+      let valid = workflow.saga(&data.saga_id).is_some_and(|saga| {
+        saga.compensations.iter().any(|action| {
+          action.for_step_id.as_deref() == Some(data.for_step_id.as_str())
+            && matches!(
+              &action.identity,
+              crate::model::CompiledCorrectionIdentity::ForEachIteration {
+                for_each_id,
+                action_id_template,
+              } if for_each_id == &scope.for_each_id
+                && action_id_template.replace("{iterationKey}", &scope.index.to_string())
+                  == data.action_id
+            )
+        })
+      });
+      valid
+        .then_some(())
+        .ok_or_else(|| "Iteration compensation registration does not match Model v19.".to_string())
     }
     RunEventPayload::StepAttemptSucceeded(data) => {
       body_node(&data.node_id).map(|_| ()).ok_or_else(|| {
@@ -2214,7 +2250,11 @@ pub(crate) fn validate_event_history_against_definition(
               .values()
               .filter(|action| {
                 action.action_kind == crate::CorrectiveActionKind::Compensation
-                  && action.status == crate::CorrectionActionStatus::Registered
+                  && matches!(
+                    action.status,
+                    crate::CorrectionActionStatus::Registered
+                      | crate::CorrectionActionStatus::RetryScheduled
+                  )
               })
               .max_by_key(|action| action.completion_sequence)
               .map(|action| action.action_id.as_str());
@@ -2253,6 +2293,7 @@ pub(crate) fn validate_event_history_against_definition(
                     projected.status,
                     crate::CorrectionActionStatus::Succeeded
                       | crate::CorrectionActionStatus::Failed
+                      | crate::CorrectionActionStatus::ManualRecovery
                   )
                 })
             }) {

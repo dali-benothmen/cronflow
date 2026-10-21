@@ -20,6 +20,7 @@ import type {
   ExecuteMessageV8,
   ExecuteMessageV9,
   ExecuteMessageV10,
+  ExecuteMessageV11,
   FetchObservationMessage,
   JsonValue,
   ScriptAttempt,
@@ -3372,6 +3373,93 @@ describe('Durable Lock Script Host v10', () => {
         context: {
           ...message.context,
           lock: { ...message.context.lock, fencingToken: '0' },
+        },
+      })
+    ).toBe(false);
+  });
+});
+
+describe('Correction Script Host v11', () => {
+  test('exposes exactly one deeply read-only correction binding', async () => {
+    const compensation: ExecuteMessageV11 = {
+      ...executeStepV7(
+        'inv_compensation_binding',
+        `
+          let mutationBlocked = false;
+          try { context.compensation.reason = 'cancel'; } catch { mutationBlocked = true; }
+          return {
+            binding: context.compensation,
+            cleanupAbsent: context.cleanup === undefined,
+            frozen: Object.isFrozen(context.compensation),
+            mutationBlocked,
+          };
+        `
+      ),
+      protocolVersion: 11,
+      context: {
+        trigger: {},
+        steps: {},
+        compensation: {
+          sagaId: 'provision',
+          forStepId: 'createNetwork',
+          reason: 'failure',
+        },
+      },
+    };
+    const cleanup: ExecuteMessageV11 = {
+      ...executeStepV7(
+        'inv_cleanup_binding',
+        `return {
+          binding: context.cleanup,
+          compensationAbsent: context.compensation === undefined,
+          frozen: Object.isFrozen(context.cleanup),
+        };`
+      ),
+      protocolVersion: 11,
+      context: {
+        trigger: {},
+        steps: {},
+        cleanup: {
+          sagaId: 'provision',
+          reason: 'failure',
+          compensationStatus: 'completed',
+        },
+      },
+    };
+    const result = await runHost([compensation, cleanup], {
+      WOML_SCRIPT_HOST_PROTOCOL_VERSION: '11',
+    });
+    expect(byInvocation(result.messages).get(compensation.invocationId)?.outcome).toEqual({
+      kind: 'success',
+      value: {
+        binding: {
+          sagaId: 'provision',
+          forStepId: 'createNetwork',
+          reason: 'failure',
+        },
+        cleanupAbsent: true,
+        frozen: true,
+        mutationBlocked: true,
+      },
+    });
+    expect(byInvocation(result.messages).get(cleanup.invocationId)?.outcome).toEqual({
+      kind: 'success',
+      value: {
+        binding: {
+          sagaId: 'provision',
+          reason: 'failure',
+          compensationStatus: 'completed',
+        },
+        compensationAbsent: true,
+        frozen: true,
+      },
+    });
+    expect(
+      isScriptHostMessage({
+        ...compensation,
+        context: {
+          ...compensation.context,
+          cleanup: cleanup.context.cleanup,
         },
       })
     ).toBe(false);

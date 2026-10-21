@@ -18,6 +18,7 @@ import scriptHostProtocolV7Schema from '../../../docs/schemas/script-host-protoc
 import scriptHostProtocolV8Schema from '../../../docs/schemas/script-host-protocol.v8.schema.json';
 import scriptHostProtocolV9Schema from '../../../docs/schemas/script-host-protocol.v9.schema.json';
 import scriptHostProtocolV10Schema from '../../../docs/schemas/script-host-protocol.v10.schema.json';
+import scriptHostProtocolV11Schema from '../../../docs/schemas/script-host-protocol.v11.schema.json';
 import lifecycleBindingV1Schema from '../../../docs/schemas/lifecycle-binding.v1.schema.json';
 import type {
   CancelMessage,
@@ -42,6 +43,7 @@ const validateV7 = ajv.compile(scriptHostProtocolV7Schema) as ValidateFunction;
 const validateV8Schema = ajv.compile(scriptHostProtocolV8Schema) as ValidateFunction;
 const validateV9Schema = ajv.compile(scriptHostProtocolV9Schema) as ValidateFunction;
 const validateV10Schema = ajv.compile(scriptHostProtocolV10Schema) as ValidateFunction;
+const validateV11Schema = ajv.compile(scriptHostProtocolV11Schema) as ValidateFunction;
 
 function exactKeys(
   value: Record<string, unknown>,
@@ -123,7 +125,7 @@ function validReusableLifecycle(value: unknown): boolean {
 
 function validExecuteBase(
   record: Record<string, unknown>,
-  protocolVersion: 8 | 9 | 10
+  protocolVersion: 8 | 9 | 10 | 11
 ): boolean {
   const attempt = record.attempt as Record<string, unknown> | undefined;
   const context = record.context as Record<string, unknown> | undefined;
@@ -159,15 +161,18 @@ function validExecuteBase(
     exactKeys(
       context,
       ['trigger', 'steps'],
-      protocolVersion === 10
-        ? ['item', 'iteration', 'lock']
+      protocolVersion >= 10
+        ? protocolVersion === 11
+          ? ['item', 'iteration', 'lock', 'compensation', 'cleanup']
+          : ['item', 'iteration', 'lock']
         : protocolVersion === 9
           ? ['item', 'iteration']
           : []
     ) &&
     typeof context.trigger === 'object' && context.trigger !== null &&
     typeof context.steps === 'object' && context.steps !== null &&
-    (protocolVersion !== 10 || validLockContext(context.lock)) &&
+    (protocolVersion < 10 || validLockContext(context.lock)) &&
+    (protocolVersion !== 11 || validCorrectionContext(context)) &&
     typeof bindings === 'object' && bindings !== null && !Array.isArray(bindings) &&
     exactKeys(bindings, ['bindingVersion', 'servicesVersion', 'secrets']) &&
     bindings.bindingVersion === 1 && bindings.servicesVersion === 1 &&
@@ -183,6 +188,42 @@ function validExecuteBase(
         value.exports.every(item => typeof item === 'string');
     })
   );
+}
+
+function validCorrectionContext(context: Record<string, unknown>): boolean {
+  const compensation = context.compensation;
+  const cleanup = context.cleanup;
+  if (compensation !== undefined && cleanup !== undefined) return false;
+  if (compensation !== undefined) {
+    if (
+      typeof compensation !== 'object' ||
+      compensation === null ||
+      Array.isArray(compensation)
+    ) return false;
+    const binding = compensation as Record<string, unknown>;
+    return (
+      exactKeys(binding, ['sagaId', 'forStepId', 'reason']) &&
+      typeof binding.sagaId === 'string' && binding.sagaId.length > 0 &&
+      typeof binding.forStepId === 'string' && binding.forStepId.length > 0 &&
+      (binding.reason === 'failure' || binding.reason === 'cancel')
+    );
+  }
+  if (cleanup !== undefined) {
+    if (typeof cleanup !== 'object' || cleanup === null || Array.isArray(cleanup)) {
+      return false;
+    }
+    const binding = cleanup as Record<string, unknown>;
+    return (
+      exactKeys(binding, ['sagaId', 'reason', 'compensationStatus']) &&
+      typeof binding.sagaId === 'string' && binding.sagaId.length > 0 &&
+      (binding.reason === 'success' || binding.reason === 'failure' || binding.reason === 'cancel') &&
+      (binding.compensationStatus === 'not_required' ||
+        binding.compensationStatus === 'completed' ||
+        binding.compensationStatus === 'incomplete' ||
+        binding.compensationStatus === 'manual_recovery')
+    );
+  }
+  return true;
 }
 
 function validLockContext(value: unknown): boolean {
@@ -289,6 +330,25 @@ function validateV10(message: unknown): boolean {
   return validateV9(normalized);
 }
 
+function validateV11(message: unknown): boolean {
+  if (typeof message !== 'object' || message === null || Array.isArray(message)) {
+    return false;
+  }
+  const record = message as Record<string, unknown>;
+  if (record.protocolVersion !== 11 || !validateV11Schema(message)) return false;
+  if (record.messageType === 'execute') {
+    if (!validExecuteBase(record, 11) || !validIterationContext(record)) return false;
+    if (record.reusable === undefined) {
+      return record.reusableLifecycle === undefined;
+    }
+    if (!validReusableBinding(record.reusable)) return false;
+    if (record.reusableLifecycle === undefined) return record.mode === 'step';
+    return record.mode === 'lifecycle' && validReusableLifecycle(record.reusableLifecycle);
+  }
+  const normalized: Record<string, unknown> = { ...record, protocolVersion: 10 };
+  return validateV10(normalized);
+}
+
 export class MessageProtocolError extends Error {
   constructor(message: string) {
     super(message);
@@ -307,13 +367,15 @@ export function isScriptHostMessage(message: unknown): boolean {
     validateV7(message) ||
     validateV8(message) ||
     validateV9(message) ||
-    validateV10(message)
+    validateV10(message) ||
+    validateV11(message)
   );
 }
 
 function validatorFor(message: unknown): ValidateFunction {
   if (typeof message !== 'object' || message === null) return validateV1;
   if (!('protocolVersion' in message)) return validateV1;
+  if (message.protocolVersion === 11) return validateV7;
   if (message.protocolVersion === 10) return validateV7;
   if (message.protocolVersion === 9) return validateV7;
   if (message.protocolVersion === 8) return validateV7;
@@ -335,7 +397,8 @@ function validateAttemptSemantics(message: ExecuteMessage): void {
       message.protocolVersion === 7 ||
       message.protocolVersion === 8 ||
       message.protocolVersion === 9 ||
-      message.protocolVersion === 10) &&
+      message.protocolVersion === 10 ||
+      message.protocolVersion === 11) &&
     message.attempt.number > message.attempt.maxAttempts
   ) {
     throw new MessageProtocolError(
@@ -366,18 +429,21 @@ export function assertExecuteMessage(
     'protocolVersion' in message &&
     (message.protocolVersion === 8 ||
       message.protocolVersion === 9 ||
-      message.protocolVersion === 10);
+      message.protocolVersion === 10 ||
+      message.protocolVersion === 11);
   const modernValid =
     typeof message === 'object' && message !== null && 'protocolVersion' in message
-      ? message.protocolVersion === 10
-        ? validateV10(message)
+      ? message.protocolVersion === 11
+        ? validateV11(message)
+        : message.protocolVersion === 10
+          ? validateV10(message)
         : message.protocolVersion === 9
           ? validateV9(message)
           : validateV8(message)
       : false;
   if (!(modernVersion ? modernValid : validator(message))) {
     throw new MessageProtocolError(
-      `Message does not match a supported script-host protocol: ${describeErrors(modernVersion ? (typeof message === 'object' && message !== null && 'protocolVersion' in message && message.protocolVersion === 10 ? validateV10Schema.errors : typeof message === 'object' && message !== null && 'protocolVersion' in message && message.protocolVersion === 9 ? validateV9Schema.errors : validateV8Schema.errors) : validator.errors)}.`
+      `Message does not match a supported script-host protocol: ${describeErrors(modernVersion ? (typeof message === 'object' && message !== null && 'protocolVersion' in message && message.protocolVersion === 11 ? validateV11Schema.errors : typeof message === 'object' && message !== null && 'protocolVersion' in message && message.protocolVersion === 10 ? validateV10Schema.errors : typeof message === 'object' && message !== null && 'protocolVersion' in message && message.protocolVersion === 9 ? validateV9Schema.errors : validateV8Schema.errors) : validator.errors)}.`
     );
   }
   if (
@@ -403,7 +469,9 @@ export function assertInboundMessage(
   | import('./types').CapabilityResultMessage
   | import('./types').FetchObservationAckMessage {
   const validator =
-    protocolVersion === 10
+    protocolVersion === 11
+      ? validateV7
+      : protocolVersion === 10
       ? validateV7
       : protocolVersion === 9
       ? validateV7
@@ -422,14 +490,16 @@ export function assertInboundMessage(
               : protocolVersion === 2
                 ? validateV2
                 : validateV1;
-  const modernValid = protocolVersion === 10
-    ? validateV10(message)
+  const modernValid = protocolVersion === 11
+    ? validateV11(message)
+    : protocolVersion === 10
+      ? validateV10(message)
     : protocolVersion === 9
       ? validateV9(message)
       : validateV8(message);
   if (!(protocolVersion >= 8 ? modernValid : validator(message))) {
     throw new MessageProtocolError(
-      `Message does not match script-host protocol v${protocolVersion}: ${describeErrors(protocolVersion >= 8 ? (protocolVersion === 10 ? validateV10Schema.errors : protocolVersion === 9 ? validateV9Schema.errors : validateV8Schema.errors) : validator.errors)}.`
+      `Message does not match script-host protocol v${protocolVersion}: ${describeErrors(protocolVersion >= 8 ? (protocolVersion === 11 ? validateV11Schema.errors : protocolVersion === 10 ? validateV10Schema.errors : protocolVersion === 9 ? validateV9Schema.errors : validateV8Schema.errors) : validator.errors)}.`
     );
   }
   if (

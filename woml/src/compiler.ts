@@ -6916,11 +6916,7 @@ function lowerParallelV13(
 ): LoweredV13FlowFragment {
   const childFragments = parallel.children.map(child => {
     if (child.kind === 'step') {
-      state.contextVisibility.push({
-        nodeId: child.id,
-        stepIds: [...visibleBefore],
-      });
-      return lowerStep(child);
+      return lowerStepV13(child, visibleBefore, state);
     }
     return lowerWaitV17(child, visibleBefore, state);
   });

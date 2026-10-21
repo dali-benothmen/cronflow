@@ -22,26 +22,26 @@ use crate::engine::{
 use crate::event::{
   ApprovalFailure, ApprovalRequestedData, ApprovalTimeoutPolicy, BranchSelectedData,
   ChoiceSelectedData, CompensationRegisteredData, CorrectionAttemptFailedData,
-  CorrectionAttemptIdentityData, CorrectionInterruptedData, CorrectiveActionKind,
-  FinalLifecycleStatus, ForEachIterationFailedData, ForEachIterationFailureKind,
-  ForEachIterationIdentityData, ForEachIterationScope, ForEachIterationSkippedData,
-  ForEachIterationSucceededData, ForEachOpenedData, ForEachSettledData, ForEachSkipReason,
-  ForkBranchOutcome, ForkBranchSettledData, ForkJoinOutcome, ForkJoinSettledData, ForkOpenedData,
-  LifecycleActionFailedData, LifecycleActionIdentityData, LifecycleFailure, LifecycleFailureKind,
-  LifecycleHookCompletedData, LifecycleHookCompletionStatus, LifecycleHookRequestedData,
-  LifecycleSubject, LifecycleSubjectKind, ManualRecoveryRequiredData, OperationExecutionMode,
-  OperationFailedData, OperationStartedData, OperationSucceededData, ParallelFailure,
-  ParallelFailurePolicy, ParallelGroupCompletedData, ParallelGroupOutcome,
-  ParallelGroupStartedData, RunFailedData, RunFailedDataV1, RunFailedDataV2, RunFailedDataV3,
-  RunFinalizedData, RunOutcomeDecidedData, RunSucceededData, SagaCorrectionReason,
-  SagaCorrectionStartedData, SagaIdentityData, StepAttemptFailedData, StepAttemptStartedData,
-  StepAttemptSucceededData, StepRetryScheduledData,
+  CorrectionAttemptIdentityData, CorrectionInterruptedData, CorrectionRetryScheduledData,
+  CorrectiveActionKind, FinalLifecycleStatus, ForEachIterationFailedData,
+  ForEachIterationFailureKind, ForEachIterationIdentityData, ForEachIterationScope,
+  ForEachIterationSkippedData, ForEachIterationSucceededData, ForEachOpenedData,
+  ForEachSettledData, ForEachSkipReason, ForkBranchOutcome, ForkBranchSettledData, ForkJoinOutcome,
+  ForkJoinSettledData, ForkOpenedData, LifecycleActionFailedData, LifecycleActionIdentityData,
+  LifecycleFailure, LifecycleFailureKind, LifecycleHookCompletedData,
+  LifecycleHookCompletionStatus, LifecycleHookRequestedData, LifecycleSubject,
+  LifecycleSubjectKind, ManualRecoveryRequiredData, OperationExecutionMode, OperationFailedData,
+  OperationStartedData, OperationSucceededData, ParallelFailure, ParallelFailurePolicy,
+  ParallelGroupCompletedData, ParallelGroupOutcome, ParallelGroupStartedData, RunFailedData,
+  RunFailedDataV1, RunFailedDataV2, RunFailedDataV3, RunFinalizedData, RunOutcomeDecidedData,
+  RunSucceededData, SagaCorrectionReason, SagaCorrectionStartedData, SagaIdentityData,
+  StepAttemptFailedData, StepAttemptStartedData, StepAttemptSucceededData, StepRetryScheduledData,
 };
 use crate::interval::{IntervalProgress, IntervalProgressReporter};
 use crate::model::{
-  ApprovalDefinition, CompiledCorrectiveAction, CompiledLifecycleAction,
-  CompiledReusableInvocation, CompiledSaga, LifecycleEventName, ParallelGroupDefinition,
-  TemplatePart, ValueExpression,
+  ApprovalDefinition, CompiledCorrectionIdentity, CompiledCorrectiveAction,
+  CompiledLifecycleAction, CompiledReusableInvocation, CompiledSaga, LifecycleEventName,
+  ParallelGroupDefinition, TemplatePart, ValueExpression,
 };
 use crate::projection::{
   ApprovalRequestStatus, AttemptStatus, ForEachIterationStatus, ForEachStatus,
@@ -49,11 +49,13 @@ use crate::projection::{
   ReusableLifecycleStatus,
 };
 use crate::protocol::{
-  ExecuteMessage, HostOutcome, LifecycleBindingV1, LifecycleFailureBindingV1,
-  LifecycleStepBindingV1, LifecycleWorkflowBindingV1, ReusableDefinitionBindingV3,
-  ReusableDefinitionKind, ReusableInvocationOutcome, ReusableLifecycleBindingV1,
-  ReusableLifecycleErrorV1, ReusableLifecycleHook as ProtocolReusableLifecycleHook,
-  ReusableScriptBindingV3, RuntimeModuleBinding, ScriptAttempt,
+  CleanupBindingV1, CleanupReasonV1, CompensationBindingV1, CompensationStatusV1,
+  CorrectionBindingRef, CorrectionReasonV1, ExecuteMessage, HostOutcome, LifecycleBindingV1,
+  LifecycleFailureBindingV1, LifecycleStepBindingV1, LifecycleWorkflowBindingV1,
+  ReusableDefinitionBindingV3, ReusableDefinitionKind, ReusableInvocationOutcome,
+  ReusableLifecycleBindingV1, ReusableLifecycleErrorV1,
+  ReusableLifecycleHook as ProtocolReusableLifecycleHook, ReusableScriptBindingV3,
+  RuntimeModuleBinding, ScriptAttempt,
 };
 use crate::schedule::{
   ScheduleClock, ScheduleProgress, ScheduleProgressReporter, SystemScheduleClock,
@@ -6616,6 +6618,7 @@ async fn execute_fork<E: RuntimeDagEngine>(
   options: &RuntimeExecutionOptions,
   host: &ScriptHostClient,
 ) -> Result<ForkRuntimeProgress, RuntimeExecutionError> {
+  let host_client = host;
   let routes = fork_branch_routes(engine.workflow(), &fork);
   let mut active: Vec<ActiveParallelInvocation<'_>> = Vec::new();
   let mut completion_order = Vec::new();
@@ -6631,7 +6634,7 @@ async fn execute_fork<E: RuntimeDagEngine>(
         .map(|invocation| invocation.invocation_id.clone())
         .collect::<Vec<_>>();
       for invocation_id in invocation_ids {
-        let _ = host.cancel_run(&invocation_id).await;
+        let _ = host_client.cancel_run(&invocation_id).await;
       }
       return Err(resumed_failure(engine, run_id, projection)?);
     }
@@ -6646,7 +6649,7 @@ async fn execute_fork<E: RuntimeDagEngine>(
         .map(|invocation| invocation.invocation_id.clone())
         .collect::<Vec<_>>();
       for invocation_id in invocation_ids {
-        let _ = host.cancel_run(&invocation_id).await;
+        let _ = host_client.cancel_run(&invocation_id).await;
       }
     }
     let ready = engine.ready_node_ids(run_id)?;
@@ -6780,6 +6783,7 @@ async fn execute_fork<E: RuntimeDagEngine>(
                 .contains_key(&settlement.main_result_node_id)
             });
         if join_failed || main_result_recorded {
+          correct_saga_failure_for_node(engine, run_id, &failure.node_id, options).await?;
           engine.append_payload(
             run_id,
             RunEventPayload::RunFailed(attempt_run_failed_data(
@@ -7207,7 +7211,7 @@ async fn execute_fork<E: RuntimeDagEngine>(
         node_id: node_id.clone(),
         invocation_id: invocation_id.clone(),
         future: Box::pin(invoke_parallel_child(
-          host,
+          host_client,
           ParallelInvocationRequest {
             run_id: run_id.to_string(),
             node_id: node_id.clone(),
@@ -7293,7 +7297,7 @@ async fn execute_fork<E: RuntimeDagEngine>(
               .map(|invocation| invocation.invocation_id.clone())
               .collect::<Vec<_>>();
             for invocation_id in invocation_ids {
-              let _ = host.cancel_run(&invocation_id).await;
+              let _ = host_client.cancel_run(&invocation_id).await;
             }
             return Err(resumed_failure(engine, run_id, current)?);
           }
@@ -7304,7 +7308,7 @@ async fn execute_fork<E: RuntimeDagEngine>(
               .map(|invocation| invocation.invocation_id.clone())
               .collect::<Vec<_>>();
             for invocation_id in invocation_ids {
-              let _ = host.cancel_run(&invocation_id).await;
+              let _ = host_client.cancel_run(&invocation_id).await;
             }
           }
         }
@@ -7329,14 +7333,15 @@ async fn execute_fork<E: RuntimeDagEngine>(
       Ok(output) => {
         completion_order.push(completion.node_id.clone());
         let completed_node_id = completion.node_id.clone();
-        engine.append_payload(
+        append_step_attempt_success(
+          engine,
           run_id,
-          RunEventPayload::StepAttemptSucceeded(StepAttemptSucceededData {
+          StepAttemptSucceededData {
             node_id: completion.node_id,
             attempt: completion.attempt_number,
             invocation_id: completion.invocation_id,
             output: output.clone(),
-          }),
+          },
         )?;
         drive_reusable_step_lifecycle(
           engine,
@@ -7346,7 +7351,7 @@ async fn execute_fork<E: RuntimeDagEngine>(
           Some(output),
           None,
           options,
-          host,
+          host_client,
         )
         .await?;
       }
@@ -7400,7 +7405,7 @@ async fn execute_fork<E: RuntimeDagEngine>(
               None,
               (!cancelled).then_some(lifecycle_error),
               options,
-              host,
+              host_client,
             )
             .await?;
           }
@@ -7576,6 +7581,7 @@ async fn execute_parallel_group<E: RuntimeDagEngine>(
   options: &RuntimeExecutionOptions,
   host: &ScriptHostClient,
 ) -> Result<Vec<String>, RuntimeExecutionError> {
+  let host_client = host;
   let policy = match group.on_error.as_str() {
     "fail-fast" => ParallelFailurePolicy::FailFast,
     "wait-all" => ParallelFailurePolicy::WaitAll,
@@ -7615,7 +7621,7 @@ async fn execute_parallel_group<E: RuntimeDagEngine>(
         .map(|invocation| invocation.invocation_id.clone())
         .collect::<Vec<_>>();
       for invocation_id in active_invocation_ids {
-        let _ = host.cancel_run(&invocation_id).await;
+        let _ = host_client.cancel_run(&invocation_id).await;
       }
     }
     if cancelling && !run_cancellation_sent {
@@ -7625,7 +7631,7 @@ async fn execute_parallel_group<E: RuntimeDagEngine>(
         .map(|invocation| invocation.invocation_id.clone())
         .collect::<Vec<_>>();
       for invocation_id in active_invocation_ids {
-        let _ = host.cancel_run(&invocation_id).await;
+        let _ = host_client.cancel_run(&invocation_id).await;
       }
     }
     while !fail_fast_closed && !cancelling && !timed_out && active.len() < group.concurrency {
@@ -7686,7 +7692,7 @@ async fn execute_parallel_group<E: RuntimeDagEngine>(
         node_id: node_id.clone(),
         invocation_id: invocation_id.clone(),
         future: Box::pin(invoke_parallel_child(
-          host,
+          host_client,
           ParallelInvocationRequest {
             run_id: run_id.to_string(),
             node_id,
@@ -7729,7 +7735,7 @@ async fn execute_parallel_group<E: RuntimeDagEngine>(
               .map(|invocation| invocation.invocation_id.clone())
               .collect::<Vec<_>>();
             for invocation_id in active_invocation_ids {
-              let _ = host.cancel_run(&invocation_id).await;
+              let _ = host_client.cancel_run(&invocation_id).await;
             }
           } else if current.status == RunStatus::Cancelling {
             run_cancellation_sent = true;
@@ -7738,7 +7744,7 @@ async fn execute_parallel_group<E: RuntimeDagEngine>(
               .map(|invocation| invocation.invocation_id.clone())
               .collect::<Vec<_>>();
             for invocation_id in active_invocation_ids {
-              let _ = host.cancel_run(&invocation_id).await;
+              let _ = host_client.cancel_run(&invocation_id).await;
             }
           }
         }
@@ -7767,14 +7773,15 @@ async fn execute_parallel_group<E: RuntimeDagEngine>(
         completion_order.push(completion.node_id.clone());
         let completed_node_id = completion.node_id.clone();
         let completed_attempt = completion.attempt_number;
-        engine.append_payload(
+        append_step_attempt_success(
+          engine,
           run_id,
-          RunEventPayload::StepAttemptSucceeded(StepAttemptSucceededData {
+          StepAttemptSucceededData {
             node_id: completion.node_id,
             attempt: completion.attempt_number,
             invocation_id: completion.invocation_id,
             output: output.clone(),
-          }),
+          },
         )?;
         drive_reusable_step_lifecycle(
           engine,
@@ -7784,7 +7791,7 @@ async fn execute_parallel_group<E: RuntimeDagEngine>(
           Some(output),
           None,
           options,
-          host,
+          host_client,
         )
         .await?;
         report_attempt_succeeded(
@@ -7845,7 +7852,7 @@ async fn execute_parallel_group<E: RuntimeDagEngine>(
               None,
               (!cancellation).then_some(lifecycle_error),
               options,
-              host,
+              host_client,
             )
             .await?;
             if !cancellation && policy == ParallelFailurePolicy::FailFast {
@@ -7855,7 +7862,7 @@ async fn execute_parallel_group<E: RuntimeDagEngine>(
                 .map(|invocation| invocation.invocation_id.clone())
                 .collect::<Vec<_>>();
               for invocation_id in active_invocation_ids {
-                let _ = host.cancel(&invocation_id).await;
+                let _ = host_client.cancel(&invocation_id).await;
               }
             }
           }
@@ -7961,24 +7968,26 @@ async fn execute_parallel_group<E: RuntimeDagEngine>(
       code: "WOML_PARALLEL_CHILD_FAILED".to_string(),
       message: message.clone(),
     };
-    engine.append_payloads(
+    engine.append_payload(
       run_id,
-      vec![
-        RunEventPayload::ParallelGroupCompleted(ParallelGroupCompletedData {
-          parallel_id: group.parallel_id.clone(),
-          outcome: ParallelGroupOutcome::Failed,
-          failed_node_ids: failed_node_ids.clone(),
-          cancelled_node_ids: cancelled_node_ids.clone(),
-        }),
-        RunEventPayload::RunFailed(RunFailedData::V3(RunFailedDataV3::Parallel {
-          parallel_id: group.parallel_id.clone(),
-          policy,
-          primary_node_id: primary_node_id.clone(),
-          failed_node_ids: failed_node_ids.clone(),
-          cancelled_node_ids: cancelled_node_ids.clone(),
-          failure: failure.clone(),
-        })),
-      ],
+      RunEventPayload::ParallelGroupCompleted(ParallelGroupCompletedData {
+        parallel_id: group.parallel_id.clone(),
+        outcome: ParallelGroupOutcome::Failed,
+        failed_node_ids: failed_node_ids.clone(),
+        cancelled_node_ids: cancelled_node_ids.clone(),
+      }),
+    )?;
+    correct_saga_failure_for_node(engine, run_id, &primary_node_id, options).await?;
+    engine.append_payload(
+      run_id,
+      RunEventPayload::RunFailed(RunFailedData::V3(RunFailedDataV3::Parallel {
+        parallel_id: group.parallel_id.clone(),
+        policy,
+        primary_node_id: primary_node_id.clone(),
+        failed_node_ids: failed_node_ids.clone(),
+        cancelled_node_ids: cancelled_node_ids.clone(),
+        failure: failure.clone(),
+      })),
     )?;
     return Err(RuntimeExecutionError::ParallelFailed(Box::new(
       FailedParallelDetails {
@@ -9204,17 +9213,38 @@ async fn execute_for_each_script<E: RuntimeDagEngine>(
     match execution {
       Ok(completed) => match completed.outcome {
         HostOutcome::Success { value } => {
+          let success = RunEventPayload::StepAttemptSucceeded(StepAttemptSucceededData {
+            node_id: node.id.clone(),
+            attempt: attempt_number,
+            invocation_id,
+            output: value.clone(),
+          });
+          let completion_sequence = engine
+            .events(run_id)
+            .map_err(|error| AttemptFailure {
+              kind: AttemptFailureKind::Interrupted,
+              code: "WOML_FOR_EACH_EVENT_FAILED".to_string(),
+              message: error.to_string(),
+              details: None,
+              ..AttemptFailure::legacy_defaults()
+            })?
+            .len() as u64
+            + 1;
+          let mut payloads = vec![success];
+          if let Some((saga_id, action_id)) =
+            compensation_registration_for_iteration(engine.workflow(), descriptor, &node.id, index)
+          {
+            payloads.push(RunEventPayload::CompensationRegistered(
+              CompensationRegisteredData {
+                saga_id,
+                action_id,
+                for_step_id: node.id.clone(),
+                completion_sequence,
+              },
+            ));
+          }
           engine
-            .append_scoped_payload(
-              run_id,
-              scope,
-              RunEventPayload::StepAttemptSucceeded(StepAttemptSucceededData {
-                node_id: node.id.clone(),
-                attempt: attempt_number,
-                invocation_id,
-                output: value.clone(),
-              }),
-            )
+            .append_scoped_payloads(run_id, scope, payloads)
             .map_err(|error| AttemptFailure {
               kind: AttemptFailureKind::Interrupted,
               code: "WOML_FOR_EACH_EVENT_FAILED".to_string(),
@@ -10630,23 +10660,7 @@ async fn execute_script_node<E: RuntimeDagEngine>(
         report_attempt_succeeded(engine, options, run_id, node_id, attempt_number);
         return Ok(ScriptNodeOutcome::WorkflowSucceeded);
       }
-      if let Some((saga_id, action_id)) = compensation_registration(engine.workflow(), node_id) {
-        let completion_sequence = engine.events(run_id)?.len() as u64 + 1;
-        engine.append_payloads(
-          run_id,
-          vec![
-            succeeded,
-            RunEventPayload::CompensationRegistered(CompensationRegisteredData {
-              saga_id,
-              action_id,
-              for_step_id: node_id.to_string(),
-              completion_sequence,
-            }),
-          ],
-        )?;
-      } else {
-        engine.append_payload(run_id, succeeded)?;
-      }
+      append_step_attempt_success_payload(engine, run_id, succeeded)?;
       drive_reusable_step_lifecycle(
         engine,
         run_id,
@@ -10697,6 +10711,138 @@ fn compensation_registration(
   Some((saga.saga_id.clone(), action.action_id.clone()))
 }
 
+fn compensation_registration_for_iteration(
+  workflow: &CompiledWorkflowDefinition,
+  descriptor: &crate::model::CompiledForEach,
+  node_id: &str,
+  index: u32,
+) -> Option<(String, String)> {
+  let saga = workflow.saga_for_body_node(&descriptor.open_node_id)?;
+  let action = saga.compensations.iter().find(|action| {
+    action.for_step_id.as_deref() == Some(node_id)
+      && matches!(
+        &action.identity,
+        CompiledCorrectionIdentity::ForEachIteration { for_each_id, .. }
+          if for_each_id == &descriptor.for_each_id
+      )
+  })?;
+  let CompiledCorrectionIdentity::ForEachIteration {
+    action_id_template, ..
+  } = &action.identity
+  else {
+    return None;
+  };
+  Some((
+    saga.saga_id.clone(),
+    action_id_template.replace("{iterationKey}", &index.to_string()),
+  ))
+}
+
+fn correction_iteration_identity<'a>(
+  action: &'a CompiledCorrectiveAction,
+  runtime_action_id: &str,
+) -> Option<(&'a str, u32)> {
+  let CompiledCorrectionIdentity::ForEachIteration {
+    for_each_id,
+    action_id_template,
+  } = &action.identity
+  else {
+    return None;
+  };
+  let (prefix, suffix) = action_id_template.split_once("{iterationKey}")?;
+  let key = runtime_action_id
+    .strip_prefix(prefix)?
+    .strip_suffix(suffix)?;
+  Some((for_each_id, key.parse().ok()?))
+}
+
+fn corrective_action_matches_runtime(
+  action: &CompiledCorrectiveAction,
+  runtime_action_id: &str,
+) -> bool {
+  match &action.identity {
+    CompiledCorrectionIdentity::Static { action_id } => action_id == runtime_action_id,
+    CompiledCorrectionIdentity::ForEachIteration { .. } => {
+      correction_iteration_identity(action, runtime_action_id).is_some()
+    }
+  }
+}
+
+fn append_step_attempt_success<E: RuntimeDagEngine>(
+  engine: &mut E,
+  run_id: &str,
+  succeeded: StepAttemptSucceededData,
+) -> Result<(), RuntimeExecutionError> {
+  append_step_attempt_success_payload(
+    engine,
+    run_id,
+    RunEventPayload::StepAttemptSucceeded(succeeded),
+  )
+}
+
+fn append_step_attempt_success_payload<E: RuntimeDagEngine>(
+  engine: &mut E,
+  run_id: &str,
+  succeeded: RunEventPayload,
+) -> Result<(), RuntimeExecutionError> {
+  let RunEventPayload::StepAttemptSucceeded(data) = &succeeded else {
+    return Err(RuntimeExecutionError::Stalled(
+      "compensation registration requires a step success event".to_string(),
+    ));
+  };
+  let node_id = data.node_id.clone();
+  let Some((saga_id, action_id)) = compensation_registration(engine.workflow(), &node_id) else {
+    return engine.append_payload(run_id, succeeded);
+  };
+  let completion_sequence = engine.events(run_id)?.len() as u64 + 1;
+  engine.append_payloads(
+    run_id,
+    vec![
+      succeeded,
+      RunEventPayload::CompensationRegistered(CompensationRegisteredData {
+        saga_id,
+        action_id,
+        for_step_id: node_id,
+        completion_sequence,
+      }),
+    ],
+  )
+}
+
+async fn correct_saga_failure_for_node<E: RuntimeDagEngine>(
+  engine: &mut E,
+  run_id: &str,
+  node_id: &str,
+  options: &RuntimeExecutionOptions,
+) -> Result<(), RuntimeExecutionError> {
+  let Some(saga) = engine.workflow().saga_for_body_node(node_id).cloned() else {
+    return Ok(());
+  };
+  let mut correction_host = None;
+  let correction_completed = execute_saga_correction(
+    engine,
+    run_id,
+    &saga,
+    SagaCorrectionReason::Failure,
+    options,
+    &mut correction_host,
+  )
+  .await?;
+  if !correction_completed
+    && engine
+      .projection(run_id)?
+      .sagas
+      .get(&saga.saga_id)
+      .is_some_and(|state| state.phase == crate::SagaPhase::ManualRecovery)
+  {
+    return Err(RuntimeExecutionError::Stalled(format!(
+      "saga {:?} requires manual recovery",
+      saga.saga_id
+    )));
+  }
+  Ok(())
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum CorrectiveActionOutcome {
   Succeeded,
@@ -10736,62 +10882,48 @@ async fn execute_corrective_action<E: RuntimeDagEngine>(
   run_id: &str,
   saga_id: &str,
   action: &CompiledCorrectiveAction,
+  runtime_action_id: &str,
   action_kind: CorrectiveActionKind,
+  reason: SagaCorrectionReason,
+  compensation_status: CompensationStatusV1,
   options: &RuntimeExecutionOptions,
   host: &mut Option<ScriptHostClient>,
 ) -> Result<CorrectiveActionOutcome, RuntimeExecutionError> {
-  let attempt = engine
+  let projected = engine
     .projection(run_id)?
     .sagas
     .get(saga_id)
-    .and_then(|saga| saga.actions.get(&action.action_id))
-    .map_or(1, |state| state.attempts + 1);
-  let identity = CorrectionAttemptIdentityData {
-    saga_id: saga_id.to_string(),
-    action_id: action.action_id.clone(),
-    action_kind,
-    attempt,
-  };
-  engine.append_payload(
-    run_id,
-    RunEventPayload::CorrectionAttemptStarted(identity.clone()),
-  )?;
-
-  if host.is_none() {
-    match options.acquire_script_host().await {
-      Ok(client) => *host = Some(client),
-      Err(_) => {
-        engine.append_payloads(
-          run_id,
-          vec![
-            RunEventPayload::CorrectionInterrupted(CorrectionInterruptedData {
-              saga_id: saga_id.to_string(),
-              action_id: action.action_id.clone(),
-              action_kind,
-              attempt,
-              ambiguous: true,
-            }),
-            RunEventPayload::ManualRecoveryRequired(ManualRecoveryRequiredData {
-              saga_id: saga_id.to_string(),
-              action_id: action.action_id.clone(),
-              action_kind,
-              code: "WOML_CORRECTION_HOST_UNAVAILABLE".to_string(),
-            }),
-          ],
-        )?;
-        return Ok(CorrectiveActionOutcome::ManualRecovery);
-      }
-    }
+    .and_then(|saga| saga.actions.get(runtime_action_id))
+    .cloned();
+  if projected
+    .as_ref()
+    .is_some_and(|state| state.status == crate::CorrectionActionStatus::Succeeded)
+  {
+    return Ok(CorrectiveActionOutcome::Succeeded);
   }
-
+  if projected
+    .as_ref()
+    .is_some_and(|state| state.status == crate::CorrectionActionStatus::ManualRecovery)
+  {
+    return Ok(CorrectiveActionOutcome::ManualRecovery);
+  }
   let source = action.node.script_source().ok_or_else(|| {
     RuntimeExecutionError::Stalled(format!(
       "corrective action {:?} has no script source",
-      action.action_id
+      runtime_action_id
     ))
   })?;
   let secrets = resolved_corrective_secrets(action, options)?;
-  let mut context = engine.projection(run_id)?.context;
+  let projection = engine.projection(run_id)?;
+  let mut context = correction_iteration_identity(action, runtime_action_id)
+    .and_then(|(for_each_id, index)| {
+      projection
+        .for_each
+        .get(for_each_id)
+        .and_then(|loop_state| loop_state.executions.get(&index))
+        .map(|execution| execution.context.clone())
+    })
+    .unwrap_or_else(|| projection.context.clone());
   context
     .steps
     .retain(|step_id, _| action.visible_step_ids.contains(step_id));
@@ -10805,97 +10937,215 @@ async fn execute_corrective_action<E: RuntimeDagEngine>(
       exports: module.exports.clone(),
     })
     .collect::<Vec<_>>();
-  let invocation_id =
-    crate::durable::correction_invocation_id(run_id, saga_id, &action.action_id, attempt);
-  let idempotency_key = format!("sha256:{:x}", Sha256::digest(invocation_id.as_bytes()));
   let max_attempts = action
     .node
     .retry_policy
     .as_ref()
     .map_or(1, |policy| policy.max_attempts);
-  let script_attempt = ScriptAttempt::new(attempt, max_attempts, &idempotency_key)
-    .map_err(RuntimeExecutionError::Stalled)?;
   let timeout_ms = action.node.timeout_ms.unwrap_or(options.script_timeout_ms);
-  let request = ExecuteMessage::runtime_script_with_modules(
-    &invocation_id,
-    run_id,
-    &action.action_id,
-    script_attempt,
-    timeout_ms,
-    source,
-    &context,
-    &secrets,
-    &module_bindings,
-  );
-  let cleanup = ArtifactInvocationCleanup::new(options, &invocation_id);
-  let completed = host
-    .as_ref()
-    .expect("corrective script host was initialized")
-    .execute(&request)
-    .await;
-  drop(cleanup);
-  match completed {
-    Ok(completed) => match completed.outcome {
-      HostOutcome::Success { .. } => {
-        engine.append_payload(
-          run_id,
-          RunEventPayload::CorrectionAttemptSucceeded(identity),
-        )?;
-        Ok(CorrectiveActionOutcome::Succeeded)
-      }
-      HostOutcome::Failure { error } => {
-        let failure = error.into_attempt_failure();
-        let ambiguous = failure.ambiguous.unwrap_or(false);
-        engine.append_payload(
-          run_id,
-          RunEventPayload::CorrectionAttemptFailed(CorrectionAttemptFailedData {
-            saga_id: saga_id.to_string(),
-            action_id: action.action_id.clone(),
-            action_kind,
-            attempt,
-            code: failure.code,
-            retryable: failure.retryable.unwrap_or(false),
-            ambiguous,
-          }),
-        )?;
-        if ambiguous {
-          engine.append_payload(
-            run_id,
-            RunEventPayload::ManualRecoveryRequired(ManualRecoveryRequiredData {
-              saga_id: saga_id.to_string(),
-              action_id: action.action_id.clone(),
-              action_kind,
-              code: "WOML_CORRECTION_OUTCOME_AMBIGUOUS".to_string(),
-            }),
-          )?;
-          Ok(CorrectiveActionOutcome::ManualRecovery)
-        } else {
-          Ok(CorrectiveActionOutcome::Failed)
+  let compensation_binding =
+    (action_kind == CorrectiveActionKind::Compensation).then(|| CompensationBindingV1 {
+      saga_id: saga_id.to_string(),
+      for_step_id: action.for_step_id.clone().unwrap_or_default(),
+      reason: match reason {
+        SagaCorrectionReason::Cancel => CorrectionReasonV1::Cancel,
+        SagaCorrectionReason::Failure | SagaCorrectionReason::Success => {
+          CorrectionReasonV1::Failure
         }
-      }
+      },
+    });
+  let cleanup_binding = (action_kind == CorrectiveActionKind::Cleanup).then(|| CleanupBindingV1 {
+    saga_id: saga_id.to_string(),
+    reason: match reason {
+      SagaCorrectionReason::Success => CleanupReasonV1::Success,
+      SagaCorrectionReason::Failure => CleanupReasonV1::Failure,
+      SagaCorrectionReason::Cancel => CleanupReasonV1::Cancel,
     },
-    Err(_) => {
-      engine.append_payloads(
-        run_id,
-        vec![
-          RunEventPayload::CorrectionInterrupted(CorrectionInterruptedData {
-            saga_id: saga_id.to_string(),
-            action_id: action.action_id.clone(),
-            action_kind,
-            attempt,
-            ambiguous: true,
-          }),
-          RunEventPayload::ManualRecoveryRequired(ManualRecoveryRequiredData {
-            saga_id: saga_id.to_string(),
-            action_id: action.action_id.clone(),
-            action_kind,
-            code: "WOML_CORRECTION_INTERRUPTED".to_string(),
-          }),
-        ],
-      )?;
-      Ok(CorrectiveActionOutcome::ManualRecovery)
+    compensation_status,
+  });
+  let correction = match action_kind {
+    CorrectiveActionKind::Compensation => CorrectionBindingRef::Compensation(
+      compensation_binding
+        .as_ref()
+        .expect("compensation binding was constructed"),
+    ),
+    CorrectiveActionKind::Cleanup => CorrectionBindingRef::Cleanup(
+      cleanup_binding
+        .as_ref()
+        .expect("cleanup binding was constructed"),
+    ),
+  };
+
+  let mut attempt = projected.as_ref().map_or(1, |state| state.attempts + 1);
+  if let Some(retry_at) = projected.as_ref().and_then(|state| state.retry_at) {
+    while retry_at > options.clock.now() {
+      let wait = (retry_at - options.clock.now())
+        .to_std()
+        .unwrap_or(CANCELLATION_POLL_INTERVAL)
+        .min(CANCELLATION_POLL_INTERVAL);
+      tokio::time::sleep(wait).await;
     }
   }
+  while attempt <= max_attempts {
+    let identity = CorrectionAttemptIdentityData {
+      saga_id: saga_id.to_string(),
+      action_id: runtime_action_id.to_string(),
+      action_kind,
+      attempt,
+    };
+    engine.append_payload(
+      run_id,
+      RunEventPayload::CorrectionAttemptStarted(identity.clone()),
+    )?;
+    if host.is_none() {
+      match options.acquire_script_host().await {
+        Ok(client) => *host = Some(client),
+        Err(_) => {
+          engine.append_payloads(
+            run_id,
+            vec![
+              RunEventPayload::CorrectionInterrupted(CorrectionInterruptedData {
+                saga_id: saga_id.to_string(),
+                action_id: runtime_action_id.to_string(),
+                action_kind,
+                attempt,
+                ambiguous: true,
+              }),
+              RunEventPayload::ManualRecoveryRequired(ManualRecoveryRequiredData {
+                saga_id: saga_id.to_string(),
+                action_id: runtime_action_id.to_string(),
+                action_kind,
+                code: "WOML_CORRECTION_HOST_UNAVAILABLE".to_string(),
+              }),
+            ],
+          )?;
+          return Ok(CorrectiveActionOutcome::ManualRecovery);
+        }
+      }
+    }
+    let invocation_id =
+      crate::durable::correction_invocation_id(run_id, saga_id, runtime_action_id, attempt);
+    let idempotency_key = format!("sha256:{:x}", Sha256::digest(invocation_id.as_bytes()));
+    let script_attempt = ScriptAttempt::new(attempt, max_attempts, &idempotency_key)
+      .map_err(RuntimeExecutionError::Stalled)?;
+    let request = ExecuteMessage::corrective_script_with_modules(
+      &invocation_id,
+      run_id,
+      runtime_action_id,
+      script_attempt,
+      timeout_ms,
+      source,
+      &context,
+      correction,
+      &secrets,
+      &module_bindings,
+    );
+    let cleanup = ArtifactInvocationCleanup::new(options, &invocation_id);
+    let completed = host
+      .as_ref()
+      .expect("corrective script host was initialized")
+      .execute(&request)
+      .await;
+    drop(cleanup);
+    match completed {
+      Ok(completed) => match completed.outcome {
+        HostOutcome::Success { .. } => {
+          engine.append_payload(
+            run_id,
+            RunEventPayload::CorrectionAttemptSucceeded(identity),
+          )?;
+          return Ok(CorrectiveActionOutcome::Succeeded);
+        }
+        HostOutcome::Failure { error } => {
+          let failure = error.into_attempt_failure();
+          let ambiguous = failure.ambiguous.unwrap_or(false)
+            || matches!(
+              failure.kind,
+              AttemptFailureKind::ScriptTimedOut
+                | AttemptFailureKind::WorkerCrashed
+                | AttemptFailureKind::HostCrashed
+                | AttemptFailureKind::InvocationCancelled
+                | AttemptFailureKind::Interrupted
+            );
+          let retryable = !ambiguous
+            && (failure.retryable.unwrap_or(false)
+              || failure.kind == AttemptFailureKind::ScriptThrew);
+          engine.append_payload(
+            run_id,
+            RunEventPayload::CorrectionAttemptFailed(CorrectionAttemptFailedData {
+              saga_id: saga_id.to_string(),
+              action_id: runtime_action_id.to_string(),
+              action_kind,
+              attempt,
+              code: failure.code,
+              retryable,
+              ambiguous,
+            }),
+          )?;
+          if ambiguous {
+            engine.append_payload(
+              run_id,
+              RunEventPayload::ManualRecoveryRequired(ManualRecoveryRequiredData {
+                saga_id: saga_id.to_string(),
+                action_id: runtime_action_id.to_string(),
+                action_kind,
+                code: "WOML_CORRECTION_OUTCOME_AMBIGUOUS".to_string(),
+              }),
+            )?;
+            return Ok(CorrectiveActionOutcome::ManualRecovery);
+          }
+          if !retryable || attempt >= max_attempts {
+            return Ok(CorrectiveActionOutcome::Failed);
+          }
+          let delay = action
+            .node
+            .retry_policy
+            .as_ref()
+            .and_then(|policy| policy.delay_before_attempt(attempt + 1))
+            .unwrap_or(0);
+          let retry_at = options.clock.now()
+            + chrono::Duration::milliseconds(i64::try_from(delay).unwrap_or(i64::MAX));
+          engine.append_payload(
+            run_id,
+            RunEventPayload::CorrectionRetryScheduled(CorrectionRetryScheduledData {
+              saga_id: saga_id.to_string(),
+              action_id: runtime_action_id.to_string(),
+              action_kind,
+              attempt,
+              retry_at,
+            }),
+          )?;
+          if delay > 0 {
+            tokio::time::sleep(Duration::from_millis(delay)).await;
+          }
+          attempt += 1;
+        }
+      },
+      Err(_) => {
+        *host = None;
+        engine.append_payloads(
+          run_id,
+          vec![
+            RunEventPayload::CorrectionInterrupted(CorrectionInterruptedData {
+              saga_id: saga_id.to_string(),
+              action_id: runtime_action_id.to_string(),
+              action_kind,
+              attempt,
+              ambiguous: true,
+            }),
+            RunEventPayload::ManualRecoveryRequired(ManualRecoveryRequiredData {
+              saga_id: saga_id.to_string(),
+              action_id: runtime_action_id.to_string(),
+              action_kind,
+              code: "WOML_CORRECTION_INTERRUPTED".to_string(),
+            }),
+          ],
+        )?;
+        return Ok(CorrectiveActionOutcome::ManualRecovery);
+      }
+    }
+  }
+  Ok(CorrectiveActionOutcome::Failed)
 }
 
 async fn execute_saga_correction<E: RuntimeDagEngine>(
@@ -10923,6 +11173,7 @@ async fn execute_saga_correction<E: RuntimeDagEngine>(
   }
 
   let mut all_succeeded = true;
+  let mut manual_recovery = false;
   if reason != SagaCorrectionReason::Success {
     let projection = engine.projection(run_id)?;
     let saga_state = projection
@@ -10944,7 +11195,7 @@ async fn execute_saga_correction<E: RuntimeDagEngine>(
       let action = saga
         .compensations
         .iter()
-        .find(|candidate| candidate.action_id == action_id)
+        .find(|candidate| corrective_action_matches_runtime(candidate, &action_id))
         .ok_or_else(|| {
           RuntimeExecutionError::Stalled("registered compensation disappeared".into())
         })?;
@@ -10953,7 +11204,10 @@ async fn execute_saga_correction<E: RuntimeDagEngine>(
         run_id,
         &saga.saga_id,
         action,
+        &action_id,
         CorrectiveActionKind::Compensation,
+        reason,
+        CompensationStatusV1::NotRequired,
         options,
         host,
       )
@@ -10961,18 +11215,33 @@ async fn execute_saga_correction<E: RuntimeDagEngine>(
       {
         CorrectiveActionOutcome::Succeeded => {}
         CorrectiveActionOutcome::Failed => all_succeeded = false,
-        CorrectiveActionOutcome::ManualRecovery => return Ok(false),
+        CorrectiveActionOutcome::ManualRecovery => {
+          all_succeeded = false;
+          manual_recovery = true;
+        }
       }
     }
   }
 
+  let compensation_status = if reason == SagaCorrectionReason::Success {
+    CompensationStatusV1::NotRequired
+  } else if manual_recovery {
+    CompensationStatusV1::ManualRecovery
+  } else if all_succeeded {
+    CompensationStatusV1::Completed
+  } else {
+    CompensationStatusV1::Incomplete
+  };
   for action in &saga.cleanup {
     match execute_corrective_action(
       engine,
       run_id,
       &saga.saga_id,
       action,
+      &action.action_id,
       CorrectiveActionKind::Cleanup,
+      reason,
+      compensation_status,
       options,
       host,
     )
@@ -10980,8 +11249,14 @@ async fn execute_saga_correction<E: RuntimeDagEngine>(
     {
       CorrectiveActionOutcome::Succeeded => {}
       CorrectiveActionOutcome::Failed => all_succeeded = false,
-      CorrectiveActionOutcome::ManualRecovery => return Ok(false),
+      CorrectiveActionOutcome::ManualRecovery => {
+        all_succeeded = false;
+        manual_recovery = true;
+      }
     }
+  }
+  if manual_recovery {
+    return Ok(false);
   }
   engine.append_payload(
     run_id,
@@ -11808,6 +12083,17 @@ trait RuntimeDagEngine {
     iteration: ForEachIterationScope,
     payload: RunEventPayload,
   ) -> Result<(), RuntimeExecutionError>;
+  fn append_scoped_payloads(
+    &mut self,
+    run_id: &str,
+    iteration: ForEachIterationScope,
+    payloads: Vec<RunEventPayload>,
+  ) -> Result<(), RuntimeExecutionError> {
+    for payload in payloads {
+      self.append_scoped_payload(run_id, iteration.clone(), payload)?;
+    }
+    Ok(())
+  }
   fn settle_workflow_timeout(
     &mut self,
     _run_id: &str,
@@ -12094,6 +12380,15 @@ impl<E: RuntimeDagEngine> RuntimeDagEngine for SharedForEachEngine<'_, E> {
     self.with_engine(|engine| engine.append_scoped_payload(run_id, iteration, payload))
   }
 
+  fn append_scoped_payloads(
+    &mut self,
+    run_id: &str,
+    iteration: ForEachIterationScope,
+    payloads: Vec<RunEventPayload>,
+  ) -> Result<(), RuntimeExecutionError> {
+    self.with_engine(|engine| engine.append_scoped_payloads(run_id, iteration, payloads))
+  }
+
   fn settle_workflow_timeout(
     &mut self,
     run_id: &str,
@@ -12368,6 +12663,16 @@ impl RuntimeDagEngine for DurableDagEngine {
       iteration,
       payload,
     )?;
+    Ok(())
+  }
+
+  fn append_scoped_payloads(
+    &mut self,
+    run_id: &str,
+    iteration: ForEachIterationScope,
+    payloads: Vec<RunEventPayload>,
+  ) -> Result<(), RuntimeExecutionError> {
+    self.append_scoped_payloads_atomically(run_id, iteration, payloads)?;
     Ok(())
   }
 

@@ -18,9 +18,15 @@ fn model() -> CompiledWorkflowDefinition {
 }
 
 fn compile_reviewed_woml() -> Option<CompiledWorkflowDefinition> {
+  compile_woml_fixture("model.reviewed.woml")
+}
+
+fn compile_woml_fixture(name: &str) -> Option<CompiledWorkflowDefinition> {
   runtime_options()?;
   let repository = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
-  let fixture = repository.join("woml/tests/fixtures/compensation-and-cleanup/model.reviewed.woml");
+  let fixture = repository
+    .join("woml/tests/fixtures/compensation-and-cleanup")
+    .join(name);
   let output = std::process::Command::new("bun")
     .current_dir(&repository)
     .env("WOML_FIXTURE", fixture)
@@ -120,6 +126,45 @@ fn two_effect_failure_model() -> CompiledWorkflowDefinition {
     },
   );
   saga.compensations.push(deployment_compensation);
+  workflow
+}
+
+fn correction_retry_model() -> CompiledWorkflowDefinition {
+  let mut workflow = two_effect_failure_model();
+  let saga = workflow
+    .graph
+    .sagas
+    .as_mut()
+    .and_then(|sagas| sagas.first_mut())
+    .expect("reviewed saga");
+  let compensation = saga
+    .compensations
+    .iter_mut()
+    .find(|action| action.for_step_id.as_deref() == Some("deployApplication"))
+    .expect("deployment compensation");
+  let woml_engine::model::ValueExpression::Object { fields } = &mut compensation.node.inputs else {
+    panic!("compensation inputs")
+  };
+  fields.insert(
+    "source".to_string(),
+    woml_engine::model::ValueExpression::Literal {
+      value: Value::String(
+        "if (context.compensation.forStepId !== 'deployApplication') throw new Error('binding missing'); if (attempt.number === 1) throw new Error('retry correction'); return { corrected: true };".to_string(),
+      ),
+    },
+  );
+  let cleanup = saga.cleanup.first_mut().expect("mandatory cleanup");
+  let woml_engine::model::ValueExpression::Object { fields } = &mut cleanup.node.inputs else {
+    panic!("cleanup inputs")
+  };
+  fields.insert(
+    "source".to_string(),
+    woml_engine::model::ValueExpression::Literal {
+      value: Value::String(
+        "if (context.cleanup.compensationStatus !== 'completed') throw new Error('cleanup status missing'); return { cleaned: true };".to_string(),
+      ),
+    },
+  );
   workflow
 }
 
@@ -306,4 +351,283 @@ async fn failed_saga_compensates_reverse_completion_then_cleans_up_and_keeps_pri
     })
     .unwrap();
   assert_eq!(rebuilt_actions, 3);
+}
+
+#[tokio::test]
+async fn corrective_attempts_use_v11_bindings_and_durable_retry_identity() {
+  let Some(options) = runtime_options() else {
+    return;
+  };
+  let database = TemporaryDatabase::new("correction-retry");
+  let error = execute_workflow_durable(
+    correction_retry_model(),
+    HASH.to_string(),
+    Map::new(),
+    options,
+    database.path().to_path_buf(),
+  )
+  .await
+  .expect_err("the original forward failure remains primary");
+  let RuntimeExecutionError::RunFailed(details) = error else {
+    panic!("expected durable run failure, received {error:?}")
+  };
+  let events = DurableEventStore::open(database.path())
+    .unwrap()
+    .events(&details.events[0].run_id)
+    .unwrap();
+  let attempts = events
+    .iter()
+    .filter_map(|event| match &event.payload {
+      RunEventPayload::CorrectionAttemptStarted(data)
+        if data.action_id == "provision:compensate:deployApplication" =>
+      {
+        Some(data.attempt)
+      }
+      _ => None,
+    })
+    .collect::<Vec<_>>();
+  assert_eq!(attempts, vec![1, 2]);
+  assert!(events.iter().any(|event| matches!(
+    &event.payload,
+    RunEventPayload::CorrectionRetryScheduled(data)
+      if data.action_id == "provision:compensate:deployApplication"
+        && data.attempt == 1
+  )));
+  assert!(events.iter().any(|event| matches!(
+    &event.payload,
+    RunEventPayload::CorrectionAttemptSucceeded(data)
+      if data.action_id == "provision:cleanup:revokeCredentials"
+  )));
+}
+
+#[tokio::test]
+async fn saga_composes_with_selected_choices_parallel_completion_and_joined_forks() {
+  let Some(workflow) = compile_woml_fixture("control-flow.reviewed.woml") else {
+    return;
+  };
+  let Some(options) = runtime_options() else {
+    return;
+  };
+  let database = TemporaryDatabase::new("control-flow");
+  let error = execute_workflow_durable(
+    workflow,
+    HASH.to_string(),
+    Map::new(),
+    options,
+    database.path().to_path_buf(),
+  )
+  .await
+  .expect_err("the final forward step deliberately fails");
+  let RuntimeExecutionError::RunFailed(details) = error else {
+    panic!("expected durable run failure, received {error:?}")
+  };
+  assert_eq!(details.node_id.as_deref(), Some("failDelivery"));
+
+  let store = DurableEventStore::open(database.path()).unwrap();
+  let events = store.events(&details.events[0].run_id).unwrap();
+  let registered = events
+    .iter()
+    .filter_map(|event| match &event.payload {
+      RunEventPayload::CompensationRegistered(data) => Some(data.for_step_id.as_str()),
+      _ => None,
+    })
+    .collect::<Vec<_>>();
+  assert!(registered.contains(&"chosenEffect"));
+  assert!(registered.contains(&"switchedEffect"));
+  assert!(registered.contains(&"slowEffect"));
+  assert!(registered.contains(&"fastEffect"));
+  assert!(registered.contains(&"firstDestination"));
+  assert!(registered.contains(&"secondDestination"));
+  assert!(!registered.contains(&"unselectedEffect"));
+  assert!(!registered.contains(&"defaultEffect"));
+
+  let starts = events
+    .iter()
+    .filter_map(|event| match &event.payload {
+      RunEventPayload::CorrectionAttemptStarted(data) => Some(data.action_id.as_str()),
+      _ => None,
+    })
+    .collect::<Vec<_>>();
+  let compensations = starts
+    .iter()
+    .copied()
+    .filter(|action_id| action_id.contains(":compensate:"))
+    .collect::<Vec<_>>();
+  let expected = registered
+    .iter()
+    .rev()
+    .map(|step_id| format!("delivery:compensate:{step_id}"))
+    .collect::<Vec<_>>();
+  assert_eq!(
+    compensations,
+    expected.iter().map(String::as_str).collect::<Vec<_>>()
+  );
+  assert_eq!(starts.last(), Some(&"delivery:cleanup:cleanupDelivery"));
+}
+
+#[tokio::test]
+async fn saga_registers_and_compensates_each_for_each_iteration_independently() {
+  let Some(workflow) = compile_woml_fixture("for-each.reviewed.woml") else {
+    return;
+  };
+  let Some(options) = runtime_options() else {
+    return;
+  };
+  let database = TemporaryDatabase::new("for-each");
+  let error = execute_workflow_durable(
+    workflow,
+    HASH.to_string(),
+    Map::new(),
+    options,
+    database.path().to_path_buf(),
+  )
+  .await
+  .expect_err("the final forward step deliberately fails");
+  let RuntimeExecutionError::RunFailed(details) = error else {
+    panic!("expected durable run failure, received {error:?}")
+  };
+
+  let store = DurableEventStore::open(database.path()).unwrap();
+  let events = store.events(&details.events[0].run_id).unwrap();
+  let registered = events
+    .iter()
+    .filter_map(|event| match &event.payload {
+      RunEventPayload::CompensationRegistered(data) => Some(data.action_id.clone()),
+      _ => None,
+    })
+    .collect::<Vec<_>>();
+  assert_eq!(registered.len(), 3);
+  assert_eq!(
+    registered
+      .iter()
+      .collect::<std::collections::HashSet<_>>()
+      .len(),
+    3
+  );
+  assert!(registered
+    .iter()
+    .all(|action_id| action_id.starts_with("provisionItems:compensate:createItem:")));
+
+  let compensated = events
+    .iter()
+    .filter_map(|event| match &event.payload {
+      RunEventPayload::CorrectionAttemptStarted(data)
+        if data.action_id.contains(":compensate:") =>
+      {
+        Some(data.action_id.clone())
+      }
+      _ => None,
+    })
+    .collect::<Vec<_>>();
+  assert_eq!(
+    compensated,
+    registered.into_iter().rev().collect::<Vec<_>>()
+  );
+}
+
+#[tokio::test]
+async fn parallel_saga_failure_settles_siblings_before_correction_and_run_failure() {
+  let Some(workflow) = compile_woml_fixture("parallel-failure.reviewed.woml") else {
+    return;
+  };
+  let Some(options) = runtime_options() else {
+    return;
+  };
+  let database = TemporaryDatabase::new("parallel-failure");
+  let error = execute_workflow_durable(
+    workflow,
+    HASH.to_string(),
+    Map::new(),
+    options,
+    database.path().to_path_buf(),
+  )
+  .await
+  .expect_err("one parallel child deliberately fails");
+  let RuntimeExecutionError::ParallelFailed(details) = error else {
+    panic!("expected parallel failure, received {error:?}")
+  };
+  let events = &details.events;
+  let group_sequence = events
+    .iter()
+    .find(|event| {
+      matches!(
+        &event.payload,
+        RunEventPayload::ParallelGroupCompleted(data)
+          if data.parallel_id == "destinations"
+            && data.outcome == woml_engine::ParallelGroupOutcome::Failed
+      )
+    })
+    .map(|event| event.sequence)
+    .expect("parallel group settled");
+  let correction_sequence = events
+    .iter()
+    .find(|event| {
+      matches!(
+        &event.payload,
+        RunEventPayload::CorrectionAttemptStarted(data)
+          if data.action_id == "publish:compensate:published"
+      )
+    })
+    .map(|event| event.sequence)
+    .expect("successful sibling was compensated");
+  let run_failure_sequence = events
+    .iter()
+    .find(|event| matches!(event.payload, RunEventPayload::RunFailed(_)))
+    .map(|event| event.sequence)
+    .expect("run failure was recorded");
+  assert!(group_sequence < correction_sequence);
+  assert!(correction_sequence < run_failure_sequence);
+}
+
+#[tokio::test]
+async fn joined_fork_saga_failure_settles_all_branches_before_correction() {
+  let Some(workflow) = compile_woml_fixture("fork-failure.reviewed.woml") else {
+    return;
+  };
+  let Some(options) = runtime_options() else {
+    return;
+  };
+  let database = TemporaryDatabase::new("fork-failure");
+  let error = execute_workflow_durable(
+    workflow,
+    HASH.to_string(),
+    Map::new(),
+    options,
+    database.path().to_path_buf(),
+  )
+  .await
+  .expect_err("one joined branch deliberately fails");
+  let RuntimeExecutionError::RunFailed(details) = error else {
+    panic!("expected durable run failure, received {error:?}")
+  };
+  let events = &details.events;
+  let latest_branch_sequence = events
+    .iter()
+    .filter(|event| {
+      matches!(
+        &event.payload,
+        RunEventPayload::ForkBranchSettled(data) if data.fork_id == "destinations"
+      )
+    })
+    .map(|event| event.sequence)
+    .max()
+    .expect("both fork branches settled");
+  let correction_sequence = events
+    .iter()
+    .find(|event| {
+      matches!(
+        &event.payload,
+        RunEventPayload::CorrectionAttemptStarted(data)
+          if data.action_id == "distribute:compensate:published"
+      )
+    })
+    .map(|event| event.sequence)
+    .expect("successful branch was compensated");
+  let run_failure_sequence = events
+    .iter()
+    .find(|event| matches!(event.payload, RunEventPayload::RunFailed(_)))
+    .map(|event| event.sequence)
+    .expect("run failure was recorded");
+  assert!(latest_branch_sequence < correction_sequence);
+  assert!(correction_sequence < run_failure_sequence);
 }

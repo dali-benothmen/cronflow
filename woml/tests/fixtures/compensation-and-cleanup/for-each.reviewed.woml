@@ -1,0 +1,20 @@
+<woml>
+  <workflow id="correction-for-each" name="Correction for-each" version="1.0.0">
+    <triggers><manual id="start" /></triggers>
+    <steps>
+      <step id="prepare"><script>return { items: ["alpha", "beta", "gamma"] };</script></step>
+      <saga id="provisionItems">
+        <for-each id="items" items="{{context.steps.prepare.items}}" concurrency="2">
+          <step id="createItem">
+            <script>return { value: context.item, index: context.iteration.index };</script>
+            <compensate><script>return context.compensation;</script></compensate>
+          </step>
+          <result value="{{context.steps.createItem}}" />
+        </for-each>
+        <step id="failItems"><script>throw new Error("item publication failed");</script></step>
+        <cleanup><step id="cleanupItems"><script>return context.cleanup;</script></step></cleanup>
+      </saga>
+      <step id="done"><script>return { ok: true };</script></step>
+    </steps>
+  </workflow>
+</woml>
