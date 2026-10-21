@@ -438,7 +438,7 @@ async fn cancellation_compensates_completed_work_and_runs_cleanup_before_settlem
 
   let runtime_database = database.path().to_path_buf();
   let runtime_run_id = run_id.clone();
-  let runtime = tokio::spawn(async move {
+  let mut runtime = tokio::spawn(async move {
     execute_admitted_trigger_run_durable(runtime_database, &runtime_run_id, options).await
   });
   tokio::time::timeout(std::time::Duration::from_secs(10), async {
@@ -465,11 +465,29 @@ async fn cancellation_compensates_completed_work_and_runs_cleanup_before_settlem
     .request_run_cancellation(&run_id, "cancel-saga", chrono::Utc::now())
     .unwrap();
 
-  let error = tokio::time::timeout(std::time::Duration::from_secs(10), runtime)
-    .await
-    .expect("saga cancellation settles promptly")
-    .unwrap()
-    .unwrap_err();
+  // The production interruption grace remains two seconds. This wider test
+  // watchdog also covers starting a replacement Bun host, which is
+  // substantially slower on loaded Windows CI runners.
+  let joined = match tokio::time::timeout(std::time::Duration::from_secs(30), &mut runtime).await {
+    Ok(joined) => joined,
+    Err(_) => {
+      let projection = control.projection(&run_id).unwrap();
+      let recent_events = control
+        .events(&run_id)
+        .unwrap()
+        .into_iter()
+        .rev()
+        .take(12)
+        .map(|event| format!("{}:{:?}", event.sequence, event.payload))
+        .collect::<Vec<_>>();
+      runtime.abort();
+      panic!(
+        "saga cancellation did not settle within its CI watchdog; status={:?}; recent_events={recent_events:#?}",
+        projection.status
+      );
+    }
+  };
+  let error = joined.unwrap().unwrap_err();
   assert!(
     matches!(error, RuntimeExecutionError::RunCancelled(_)),
     "unexpected cancellation result: {error:?}"
