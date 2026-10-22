@@ -37,6 +37,13 @@ See [WOML data security](docs/woml-data-security.md) and the
 [production deployment checklist](docs/woml-production-deployment.md) for the
 supported operational boundary.
 
+Infrastructure Policies can further restrict protected effects and require
+engine-owned approval, artifact, or lock evidence. They do not replace Process
+Policy, Artifact Policy, host isolation, cloud IAM, Kubernetes admission,
+database permissions, or operating-system controls. Static policy explanation
+is advisory; only the Rust pre-effect authority makes the runtime decision. See
+[Infrastructure Policies](docs/infrastructure-policies-v1.md).
+
 ## Disclosure
 
 Please allow maintainers time to confirm the issue and prepare a coordinated

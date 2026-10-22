@@ -167,3 +167,27 @@ fn ip0_inventory_keeps_effect_paths_and_trust_invariants_reviewable() {
     .iter()
     .any(|source| source == "ai-output"));
 }
+
+#[test]
+fn malformed_policy_corpus_never_panics_or_crosses_the_size_boundary() {
+  let trust = InfrastructurePolicyTrustV1::default();
+  let mut state = 0x6a09_e667_f3bc_c909_u64;
+  for length in 0..2_048_usize {
+    let mut source = Vec::with_capacity(length);
+    for _ in 0..length {
+      state = state
+        .wrapping_mul(6_364_136_223_846_793_005)
+        .wrapping_add(1_442_695_040_888_963_407);
+      source.push((state >> 32) as u8);
+    }
+    let _ = parse_infrastructure_policy(&source, &trust);
+  }
+
+  assert!(matches!(
+    parse_infrastructure_policy(
+      &vec![b' '; woml_engine::INFRASTRUCTURE_POLICY_MAX_BYTES + 1],
+      &trust
+    ),
+    Err(InfrastructurePolicyError::TooLarge)
+  ));
+}

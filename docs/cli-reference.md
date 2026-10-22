@@ -19,7 +19,8 @@ store is `.woml/state.sqlite`.
 
 ```bash
 woml check <workflow.woml|directory>... [--config <path>] \
-  [--process-policy <path>] [--json]
+  [--policy <name|path>] [--policy-trust <path>] \
+  [--require-policy-signature] [--process-policy <path>] [--json]
 ```
 
 Parses, validates, and compiles one deployment without activating triggers or
@@ -31,7 +32,10 @@ secret names, and optional production configuration.
 
 ```bash
 woml run <workflow.woml|directory>... \
-  [--config <path>] [--process-policy <path>|--allow-process <aliases>] \
+  [--config <path>] [--policy <name|path>] \
+  [--emergency-deny <name|path>] [--policy-trust <path>] \
+  [--require-policy-signature] \
+  [--process-policy <path>|--allow-process <aliases>] \
   [--artifact-policy <path>] [--reviewer-directory <path>] \
   [--host <address>] [--port <port>] \
   [--state <path>] [--trigger <manualTriggerId>] [--resume <runId>] \
@@ -56,10 +60,19 @@ reviewed foreground run. It is rejected with `--background`. Use
 identities and roles for Rich Plan Approvals; missing authority fails closed
 before the workflow reaches a protected effect.
 
+`--policy` selects an operator-owned Infrastructure Policy by project-local
+JSON path or by name from `.woml/policies/<name>.json`. `--policy-trust`
+selects Ed25519 public-key trust; `--require-policy-signature` rejects unsigned
+or untrusted bundles. Either trust option without `--policy` fails closed.
+`--emergency-deny` accepts only a separately validated deny-only overlay and
+also requires a base policy.
+
 ### `woml test`
 
 ```bash
 woml test <workflow.woml> [--process-policy <path>|--allow-process <aliases>] \
+  [--policy <name|path>] [--emergency-deny <name|path>] \
+  [--policy-trust <path>] [--require-policy-signature] \
   [--artifact-policy <path>] [--reviewer-directory <path>] \
   [--state <path>] \
   [--trigger <manualTriggerId>] [--resume <runId>] \
@@ -68,6 +81,30 @@ woml test <workflow.woml> [--process-policy <path>|--allow-process <aliases>] \
 
 Runs one manual occurrence and exits. This is intended for automated tests and
 CI, not as the normal automation host.
+
+## Infrastructure Policies
+
+```bash
+woml policy check <name|path> \
+  [--trust <path>] [--require-signature] [--json]
+woml policy explain <workflow.woml> --policy <name|path> \
+  [--step <stepId>] [--trust <path>] [--require-signature] [--json]
+```
+
+`policy check` validates strict JSON, limits, canonical identity, optional
+signature trust, duplicate coverage, and unreachable allows. `policy explain`
+performs conservative source analysis and reports `allowed`, `denied`,
+`requirements_missing`, or `unknown_until_runtime`. It is not a runtime
+authorization decision: dynamic arguments, targets, effect classification, and
+durable evidence are decided by the Rust authority immediately before dispatch.
+
+Named bundles resolve only from `.woml/policies/`. Explicit paths, names with
+spaces or Unicode, and platform-native separators are accepted when the
+canonical file remains under the project root. Traversal, symlink escape,
+unexpected extensions, duplicate keys, and future contracts are rejected.
+
+See [Infrastructure Policies](infrastructure-policies-v1.md) and the complete
+[`infrastructurePolicies`](../examples/infrastructurePolicies/) example.
 
 ## Process permissions
 

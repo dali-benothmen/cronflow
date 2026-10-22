@@ -1,0 +1,23 @@
+{
+  "contract": "woml.infrastructure-policy",
+  "contractVersion": 1,
+  "id": "production-freeze",
+  "version": "1",
+  "environment": "production",
+  "defaults": {
+    "read": "allow",
+    "idempotent-write": "allow",
+    "unsafe-write": "allow"
+  },
+  "rules": [
+    {
+      "id": "freeze-terraform-effects",
+      "match": {
+        "capabilities": ["process"],
+        "operations": ["run"],
+        "executables": ["terraform"]
+      },
+      "decision": "deny"
+    }
+  ]
+}

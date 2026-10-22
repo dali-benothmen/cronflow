@@ -1,0 +1,28 @@
+{
+  "profile": "woml.reviewer-directory/v1",
+  "version": "replace-before-production",
+  "principals": [
+    {
+      "id": "person:production-owner",
+      "roles": ["production-owner"],
+      "identities": [
+        {
+          "provider": "slack",
+          "accountId": "REPLACE_WORKSPACE_ID",
+          "actorId": "REPLACE_USER_ID"
+        }
+      ]
+    },
+    {
+      "id": "person:security-owner",
+      "roles": ["security-owner"],
+      "identities": [
+        {
+          "provider": "telegram",
+          "accountId": "REPLACE_BOT_ACCOUNT_ID",
+          "actorId": "REPLACE_USER_ID"
+        }
+      ]
+    }
+  ]
+}

@@ -80,6 +80,8 @@ jobs:
           bun scripts/verify-compensation-and-cleanup-release.ts
           bun run test:rich-plan-approvals-authoring
           bun scripts/verify-rich-plan-approvals-release.ts
+          bun run test:infrastructure-policy-foundation
+          bun scripts/verify-infrastructure-policy-release.ts
       - name: Run the final source and dependency security review
         run: |
           bun run test:final-review

@@ -1,0 +1,114 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://woml.dev/schemas/infrastructure-policy-decision/v1",
+  "title": "WOML Infrastructure Policy Decision v1",
+  "description": "Bounded, secret-safe decision recorded by the Rust pre-effect authority.",
+  "x-status": "infrastructure-policies-ip8-frozen",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "contract",
+    "contractVersion",
+    "decisionId",
+    "policyId",
+    "policyVersion",
+    "policyDigest",
+    "descriptorDigest",
+    "outcome",
+    "matchedRuleIds",
+    "operation",
+    "reasonCodes",
+    "requirements",
+    "explanation",
+    "evaluatedAt",
+    "evaluationDurationMicros",
+    "evaluationInstructions"
+  ],
+  "properties": {
+    "contract": { "const": "woml.infrastructure-decision" },
+    "contractVersion": { "const": 1 },
+    "decisionId": { "type": "string", "pattern": "^decision_[A-Za-z0-9_-]+$" },
+    "policyId": { "type": "string", "minLength": 1, "maxLength": 128 },
+    "policyVersion": { "type": "string", "minLength": 1, "maxLength": 128 },
+    "policyDigest": { "$ref": "#/$defs/digest" },
+    "descriptorDigest": { "$ref": "#/$defs/digest" },
+    "outcome": { "enum": ["allow", "deny", "requirements_unsatisfied"] },
+    "matchedRuleIds": {
+      "type": "array",
+      "maxItems": 1024,
+      "uniqueItems": true,
+      "items": { "type": "string", "minLength": 1, "maxLength": 128 }
+    },
+    "operation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["workflowId", "capability", "operation", "effect", "executionMode"],
+      "properties": {
+        "workflowId": { "type": "string", "minLength": 1, "maxLength": 128 },
+        "capability": { "type": "string", "minLength": 1, "maxLength": 128 },
+        "operation": { "type": "string", "minLength": 1, "maxLength": 128 },
+        "effect": { "enum": ["read", "idempotent-write", "unsafe-write"] },
+        "target": { "type": "string", "minLength": 1, "maxLength": 512 },
+        "executable": { "type": "string", "minLength": 1, "maxLength": 128 },
+        "executionMode": { "enum": ["normal", "compensation", "cleanup", "recovery"] }
+      }
+    },
+    "reasonCodes": {
+      "type": "array",
+      "maxItems": 16,
+      "uniqueItems": true,
+      "items": {
+        "enum": [
+          "explicit_deny",
+          "explicit_allow",
+          "default_allow",
+          "default_deny",
+          "environment_mismatch",
+          "requirements_unsatisfied",
+          "evaluation_budget_exhausted",
+          "input_unsupported",
+          "emergency_deny"
+        ]
+      }
+    },
+    "requirements": {
+      "type": "array",
+      "maxItems": 4096,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["ruleId", "requirement", "status", "required", "received"],
+        "properties": {
+          "ruleId": { "type": "string", "minLength": 1, "maxLength": 128 },
+          "requirement": { "type": "string", "minLength": 1, "maxLength": 128 },
+          "status": { "enum": ["satisfied", "unsatisfied"] },
+          "required": { "type": "integer", "minimum": 0 },
+          "received": { "type": "integer", "minimum": 0 }
+        }
+      }
+    },
+    "explanation": { "type": "string", "maxLength": 1024 },
+    "emergencyDeny": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["policyId", "policyVersion", "policyDigest", "matchedRuleIds"],
+      "properties": {
+        "policyId": { "type": "string", "minLength": 1, "maxLength": 128 },
+        "policyVersion": { "type": "string", "minLength": 1, "maxLength": 128 },
+        "policyDigest": { "$ref": "#/$defs/digest" },
+        "matchedRuleIds": {
+          "type": "array",
+          "maxItems": 1024,
+          "uniqueItems": true,
+          "items": { "type": "string", "minLength": 1, "maxLength": 128 }
+        }
+      }
+    },
+    "evaluatedAt": { "type": "string", "format": "date-time" },
+    "evaluationDurationMicros": { "type": "integer", "minimum": 0 },
+    "evaluationInstructions": { "type": "integer", "minimum": 0, "maximum": 250000 }
+  },
+  "$defs": {
+    "digest": { "type": "string", "pattern": "^sha256:[a-f0-9]{64}$" }
+  }
+}

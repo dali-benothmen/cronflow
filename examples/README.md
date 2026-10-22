@@ -53,6 +53,9 @@ documented in [Communication providers](../docs/woml-communication-providers.md)
 For immutable infrastructure plans, role-based quorum, durable reviewer
 identity, and auditable evidence, use the
 [`richApprovals/`](richApprovals/) Terraform and AI-remediation examples.
+For the complete operator-policy boundary—reviewed artifacts, quorum, a fenced
+deployment lease, pre-effect authorization, verification, and compensation—use
+[`infrastructurePolicies/`](infrastructurePolicies/).
 
 ## 4. Reuse code
 

@@ -1971,4 +1971,99 @@ mod tests {
       assert!(decision.evaluation_instructions <= DEFAULT_MAX_EVALUATION_INSTRUCTIONS);
     }
   }
+
+  #[test]
+  fn generated_rule_orders_and_concurrent_evaluations_do_not_diverge() {
+    let mut rules = (0..64)
+      .map(|index| InfrastructurePolicyRuleV1 {
+        id: format!("allow-{index:02}"),
+        description: None,
+        matcher: InfrastructurePolicyRuleMatchV1 {
+          workflows: Some(vec!["other-workflow".to_string()]),
+          ..InfrastructurePolicyRuleMatchV1::default()
+        },
+        decision: InfrastructurePolicyDecisionV1::Allow,
+        requires: None,
+      })
+      .collect::<Vec<_>>();
+    rules.push(InfrastructurePolicyRuleV1 {
+      id: "deny-production".to_string(),
+      description: None,
+      matcher: InfrastructurePolicyRuleMatchV1 {
+        workflows: Some(vec!["deploy-production".to_string()]),
+        ..InfrastructurePolicyRuleMatchV1::default()
+      },
+      decision: InfrastructurePolicyDecisionV1::Deny,
+      requires: None,
+    });
+
+    let expected = InfrastructurePolicyPreparedEvaluatorV1::prepare(bundle(rules.clone()))
+      .evaluate(&descriptor(), &[], now());
+    for offset in 0..rules.len() {
+      rules.rotate_left(1);
+      let actual = InfrastructurePolicyPreparedEvaluatorV1::prepare(bundle(rules.clone()))
+        .evaluate(&descriptor(), &[], now());
+      assert_eq!(actual.outcome, expected.outcome, "rotation {offset}");
+      assert_eq!(actual.matched_rule_ids, expected.matched_rule_ids);
+      assert_eq!(actual.reason_codes, expected.reason_codes);
+    }
+
+    let evaluator = Arc::new(InfrastructurePolicyPreparedEvaluatorV1::prepare(bundle(
+      rules,
+    )));
+    let handles = (0..8)
+      .map(|_| {
+        let evaluator = Arc::clone(&evaluator);
+        std::thread::spawn(move || {
+          for _ in 0..250 {
+            let decision = evaluator.evaluate(&descriptor(), &[], now());
+            assert_eq!(
+              decision.outcome,
+              InfrastructurePolicyDecisionOutcomeV1::Deny
+            );
+            assert!(decision
+              .reason_codes
+              .contains(&InfrastructurePolicyReasonCodeV1::ExplicitDeny));
+          }
+        })
+      })
+      .collect::<Vec<_>>();
+    for handle in handles {
+      handle.join().expect("policy evaluation thread");
+    }
+  }
+
+  #[test]
+  fn publication_budgets_cover_preparation_cache_and_per_effect_evaluation() {
+    let small = bundle(vec![allow_rule("allow-terraform")]);
+    let cache = InfrastructurePolicyEvaluatorCacheV1::new(16);
+    let first = cache.prepare(small.clone());
+    for _ in 0..1_000 {
+      assert!(Arc::ptr_eq(&first, &cache.prepare(small.clone())));
+    }
+    assert_eq!(cache.len(), 1);
+
+    let maximum_rules = (0..crate::INFRASTRUCTURE_POLICY_MAX_RULES)
+      .map(|index| InfrastructurePolicyRuleV1 {
+        id: format!("max-{index:04}"),
+        description: None,
+        matcher: InfrastructurePolicyRuleMatchV1 {
+          workflows: Some(vec!["other-workflow".to_string()]),
+          ..InfrastructurePolicyRuleMatchV1::default()
+        },
+        decision: InfrastructurePolicyDecisionV1::Allow,
+        requires: None,
+      })
+      .collect::<Vec<_>>();
+    let maximum = InfrastructurePolicyPreparedEvaluatorV1::prepare(bundle(maximum_rules));
+
+    for evaluator in [&*first, &maximum] {
+      for _ in 0..25 {
+        let decision = evaluator.evaluate(&descriptor(), &[], now());
+        assert!(decision.evaluation_instructions <= DEFAULT_MAX_EVALUATION_INSTRUCTIONS);
+        assert!(decision.evaluation_duration_micros <= 100_000);
+        assert!(serde_json::to_vec(&decision).unwrap().len() <= 65_536);
+      }
+    }
+  }
 }

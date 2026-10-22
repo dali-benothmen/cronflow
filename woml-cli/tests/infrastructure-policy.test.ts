@@ -1,6 +1,6 @@
 import { mkdir, mkdtemp, readFile, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { resolve } from 'node:path';
+import { relative, resolve } from 'node:path';
 
 import { describe, expect, test } from 'bun:test';
 import type { AnySchema } from 'ajv';
@@ -40,6 +40,13 @@ describe('Infrastructure Policy v1 foundation', () => {
       'utf8'
     );
     await writeFile(resolve(root, '.woml/policies/production.json'), source);
+    await mkdir(resolve(root, 'policies with spaces'), { recursive: true });
+    const unicodePolicy = resolve(
+      root,
+      'policies with spaces',
+      'π production.json'
+    );
+    await writeFile(unicodePolicy, source);
     await writeFile(resolve(outside, 'escaped.json'), source);
     expect(
       (await resolveInfrastructurePolicy('production', { projectRoot: root }))
@@ -59,6 +66,13 @@ describe('Infrastructure Policy v1 foundation', () => {
     ).rejects.toMatchObject({
       code: 'WOML_POLICY_INVALID',
     });
+    expect(
+      (
+        await resolveInfrastructurePolicy(relative(root, unicodePolicy), {
+          projectRoot: root,
+        })
+      ).prepared.bundle.id
+    ).toBe('production');
   });
 
   test('keeps static explanations conservative and rejects an allowing emergency overlay', async () => {
@@ -291,5 +305,76 @@ describe('Infrastructure Policy v1 foundation', () => {
     expect(threatModel.trustedAuthorities).toContain('rust-runtime');
     expect(threatModel.untrustedSources).toContain('ai-output');
     expect(threatModel.invariants.length).toBeGreaterThanOrEqual(10);
+  });
+
+  test('classifies definite allow, deny, requirements, and dynamic operations conservatively', () => {
+    const base = {
+      contract: 'woml.infrastructure-policy',
+      contractVersion: 1,
+      id: 'classification',
+      version: '1',
+      environment: 'production',
+      defaults: {
+        read: 'deny',
+        'idempotent-write': 'deny',
+        'unsafe-write': 'deny',
+      },
+    } as const;
+    const source = '<script>services.http.request({});</script>';
+    const status = (rules: readonly Record<string, unknown>[]) =>
+      analyzeInfrastructurePolicySource(
+        prepareInfrastructurePolicy({ ...base, rules }).bundle,
+        'deploy',
+        source
+      )[0]?.status;
+
+    expect(
+      status([
+        {
+          id: 'allow-http',
+          match: { capabilities: ['http'], operations: ['request'] },
+          decision: 'allow',
+        },
+      ])
+    ).toBe('allowed');
+    expect(
+      status([
+        {
+          id: 'deny-http',
+          match: { capabilities: ['http'], operations: ['request'] },
+          decision: 'deny',
+        },
+      ])
+    ).toBe('denied');
+    expect(
+      status([
+        {
+          id: 'review-http',
+          match: { capabilities: ['http'], operations: ['request'] },
+          decision: 'allow',
+          requires: {
+            approval: {
+              minimum: 1,
+              roles: [],
+              bindReviewDigest: false,
+              maxAgeMs: 60_000,
+            },
+          },
+        },
+      ])
+    ).toBe('requirements_missing');
+    expect(
+      status([
+        {
+          id: 'targeted-http',
+          match: {
+            capabilities: ['http'],
+            operations: ['request'],
+            targets: ['api.example.com'],
+          },
+          decision: 'allow',
+        },
+      ])
+    ).toBe('unknown_until_runtime');
   });
 });

@@ -64,4 +64,20 @@ describe('Infrastructure Policy CLI', () => {
     ).toBe(true);
     expect(report.guarantee).toContain('advisory');
   });
+
+  test('fails closed when signature or trust requirements omit the policy', async () => {
+    const workflow = resolve(
+      repositoryRoot,
+      'woml/tests/fixtures/services-bindings.woml'
+    );
+    for (const args of [
+      ['check', workflow, '--require-policy-signature'],
+      ['run', workflow, '--require-policy-signature'],
+      ['check', workflow, '--policy-trust', 'trust.json'],
+    ]) {
+      const output = capture();
+      expect(await runCli(args, output.io)).not.toBe(0);
+      expect(output.stderr.join('')).toContain('require a base --policy');
+    }
+  });
 });

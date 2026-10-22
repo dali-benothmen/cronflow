@@ -241,7 +241,45 @@ Pass `--policy-trust <path> --require-policy-signature` to `woml run` or `woml c
 
 Runtime startup prints the selected policy identity and environment. `woml get <runId>` includes the immutable admitted binding, recent durable decisions, requirement outcomes, and any emergency-deny identity in both JSON and concise text output. Reviewer private data, raw inputs, secrets, credentials, and artifact contents remain excluded.
 
-## Explicit IP0–IP7 Non-Goals
+## IP8 Release and Security Posture
+
+Policy v1 is release-gated against the original protected-effect inventory.
+Malformed and generated inputs must not panic; rule order and concurrent
+evaluation must not change the result; denied and requirement-unsatisfied
+effects must never reach a handler. Policy parsing, canonical identity,
+signature verification, prepared-evaluator caching, and per-effect evaluation
+have bounded publication budgets in
+`examples/infrastructurePolicies/performance-budgets.v1.json`.
+
+Evaluation is an in-process Rust operation. It performs no network request and
+does not invoke the JavaScript script host. A maximum-sized policy is bounded to
+1 MiB, 1,024 rules, 250,000 evaluation instructions, and a 100 ms fail-closed
+wall-clock ceiling per protected effect. Inspection returns at most 100 recent
+decisions and never includes raw arguments, secrets, payloads, credentials, or
+artifact bodies.
+
+The complete reviewed deployment example is under
+`examples/infrastructurePolicies/`. It demonstrates the intersection of
+Process Policy, Artifact Policy, Rich Plan Approvals, locks, Infrastructure
+Policy, saga compensation, and cleanup. Existing workflows that do not select
+an Infrastructure Policy keep their prior capability-security behavior.
+
+## What Policy v1 Can and Cannot Prove
+
+Policy v1 can prove facts already owned by a WOML authority: the normalized
+capability and operation, effect class, workflow and execution mode, bounded
+target metadata, exact executable and argument prefix, approved reviewer
+identities and directory-owned roles, immutable artifact integrity and review
+binding, and current run-owned lock leases.
+
+It cannot prove the semantic safety of a Terraform plan, Kubernetes manifest,
+SQL migration, IAM change, AI recommendation, or arbitrary provider payload.
+Those values remain untrusted bytes even when their digest is approved. Future
+trusted inspectors or signed attestation sources must introduce their own
+bounded, versioned evidence rather than letting workflow code assert those
+facts.
+
+## Explicit Policy v1 Non-Goals
 
 - Automatic approval creation
 - Vendor-specific Terraform, Kubernetes, or cloud-plan parsing

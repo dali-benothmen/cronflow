@@ -150,6 +150,7 @@ import {
   loadArtifactPolicy,
 } from './artifact-policy';
 import {
+  InfrastructurePolicyError,
   infrastructurePolicyRuntimeAuthority,
   resolveInfrastructurePolicy,
   type ResolvedInfrastructurePolicyV1,
@@ -659,6 +660,16 @@ function parseRunArguments(args: readonly string[]): RunArguments {
     throw new CliInputError(
       'WOML_POLICY_REQUIRED',
       '--emergency-deny requires a base --policy so the overlay can only remove admitted authority.'
+    );
+  }
+  if (
+    infrastructurePolicyReference === undefined &&
+    (requireInfrastructurePolicySignature ||
+      infrastructurePolicyTrustPath !== undefined)
+  ) {
+    throw new CliInputError(
+      'WOML_POLICY_REQUIRED',
+      '--require-policy-signature and --policy-trust require a base --policy.'
     );
   }
   return {
@@ -1800,6 +1811,9 @@ function formatError(
 
   if (error instanceof ArtifactPolicyError) {
     return `WOML artifact policy error [${error.code}]: ${error.message}`;
+  }
+  if (error instanceof InfrastructurePolicyError) {
+    return `WOML infrastructure policy error [${error.code}]: ${error.message}`;
   }
   if (error instanceof ReviewerDirectoryLoadError) {
     return `WOML approval authority error [${error.code}]: ${error.message}`;
@@ -3597,6 +3611,16 @@ function parseCheckArguments(args: readonly string[]): CheckArguments {
   }
   if (inputPaths.length === 0) {
     throw new CliInputError('WOML_CLI_ARGUMENTS_INVALID', checkUsage());
+  }
+  if (
+    infrastructurePolicyReference === undefined &&
+    (requireInfrastructurePolicySignature ||
+      infrastructurePolicyTrustPath !== undefined)
+  ) {
+    throw new CliInputError(
+      'WOML_POLICY_REQUIRED',
+      '--require-policy-signature and --policy-trust require a base --policy.'
+    );
   }
   return {
     inputPaths,

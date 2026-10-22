@@ -107,6 +107,11 @@ jobs:
         run: >-
           bun run benchmark:rich-plan-approvals &&
           bun scripts/verify-rich-plan-approvals-release.ts
+      - name: Enforce Infrastructure Policies performance and publication contracts
+        working-directory: woml-cli
+        run: >-
+          bun run benchmark:infrastructure-policy &&
+          bun scripts/verify-infrastructure-policy-release.ts
       - name: Test for-each presentation and clean package
         working-directory: woml-cli
         run: >-
@@ -186,6 +191,7 @@ jobs:
           --test rich_plan_approval_model
           --test rich_plan_approval_authority
           --test rich_plan_approval_runtime
+          --test infrastructure_policy_contract
           --test infrastructure_policy_authority
           --test retention
           --test webhook_runtime
@@ -328,6 +334,41 @@ jobs:
           cargo --version
           git status --short
 
+  infrastructure-policies:
+    name: Infrastructure Policies (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, macos-15, windows-2022]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v6
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: ${{ env.BUN_VERSION }}
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Install locked runtime dependencies
+        working-directory: woml-cli
+        run: bun install --frozen-lockfile
+      - name: Install compiler dependencies
+        working-directory: woml
+        run: bun install --frozen-lockfile
+      - name: Test policy parsing, generated inputs, evaluation, evidence, recovery, and authority
+        working-directory: woml-cli
+        run: bun run test:infrastructure-policy-hardening
+      - name: Enforce policy publication budgets and bypass inventory
+        working-directory: woml-cli
+        run: >-
+          bun run benchmark:infrastructure-policy &&
+          bun scripts/verify-infrastructure-policy-release.ts
+      - name: Failure diagnostics
+        if: failure()
+        run: |
+          bun --version
+          rustc --version
+          cargo --version
+          git status --short
+
   lock-authority:
     name: Lock authority (${{ matrix.os }})
     strategy:
@@ -447,6 +488,9 @@ jobs:
       - name: Test Rich Plan Approvals from the clean release package
         working-directory: woml-cli
         run: bun test tests/rich-plan-approvals-packaged-release.test.ts --max-concurrency=1
+      - name: Test Infrastructure Policies from the clean release package
+        working-directory: woml-cli
+        run: bun test tests/infrastructure-policy-packaged-release.test.ts --max-concurrency=1
       - name: Pack, seal, and reverify the main artifact
         run: |
           bun woml-cli/scripts/release-artifact.ts pack --root release/main
