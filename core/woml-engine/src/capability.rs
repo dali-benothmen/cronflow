@@ -27,6 +27,10 @@ use tokio::{
 use uuid::Uuid;
 
 use crate::{
+  infrastructure_policy_runtime::{
+    adapt_infrastructure_policy_metadata, InfrastructurePolicyDescriptorContextV1,
+    InfrastructurePolicyOperationDescriptorV1, InfrastructurePolicyOperationMetadataV1,
+  },
   DurableEventStore, DurableStoreError, OperationExecutionMode, OperationFailedData,
   OperationStartedData, OperationSucceededData, RunEventPayload,
 };
@@ -318,6 +322,16 @@ pub trait CapabilityHandler: Send + Sync + 'static {
     request: &CapabilityCallRequest,
   ) -> Result<Map<String, Value>, CapabilityFailure> {
     Ok(self.safe_metadata(&request.input))
+  }
+
+  /// Produces bounded policy-only facts after the request has passed the
+  /// registered handler's normal validation. Policy facts are deliberately
+  /// separate from presentation and durable operation metadata.
+  fn infrastructure_policy_metadata(
+    &self,
+    request: &CapabilityCallRequest,
+  ) -> Result<InfrastructurePolicyOperationMetadataV1, CapabilityFailure> {
+    adapt_infrastructure_policy_metadata(&self.descriptor(), request)
   }
 
   fn safe_result_metadata(&self, _result: &Value) -> Map<String, Value> {
@@ -1354,6 +1368,35 @@ impl CapabilityRegistry {
       )
     })?;
     Ok(metadata)
+  }
+
+  /// Builds a trusted operation descriptor after both the generic capability
+  /// contract and the concrete registered handler have accepted the request.
+  pub fn infrastructure_policy_descriptor(
+    &self,
+    request: &CapabilityCallRequest,
+    context: InfrastructurePolicyDescriptorContextV1,
+  ) -> Result<InfrastructurePolicyOperationDescriptorV1, CapabilityFailure> {
+    request.validate()?;
+    let input_bytes = serialized_bytes(&request.input);
+    if input_bytes > request.limits.input_bytes {
+      return Err(failure_with_size(
+        CapabilityFailureKind::InputTooLarge,
+        "WOML_CAPABILITY_INPUT_TOO_LARGE",
+        "The capability input exceeds its configured byte limit.",
+        input_bytes,
+        request.limits.input_bytes,
+      ));
+    }
+    let handler = self.lookup_and_validate(request)?;
+    let metadata = handler.infrastructure_policy_metadata(request)?;
+    InfrastructurePolicyOperationDescriptorV1::build(
+      request,
+      &handler.descriptor(),
+      handler.effect(&request.input),
+      context,
+      metadata,
+    )
   }
 
   pub async fn execute(

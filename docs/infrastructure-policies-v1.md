@@ -1,8 +1,10 @@
 # Infrastructure Policies v1: Boundary and Threat Model
 
-**Status:** Frozen for IP0 and IP1  
+**Status:** Frozen through IP3
+
 **Contract:** `woml.infrastructure-policy` v1  
-**Enforcement:** Planned for IP4; IP0 and IP1 do not authorize or execute effects
+
+**Enforcement:** Planned for IP4; descriptor construction and evaluation do not yet authorize or execute effects
 
 ## Purpose
 
@@ -80,7 +82,41 @@ Untrusted values may be part of an operation, but cannot assert that an approval
 | raw process APIs | Script-host isolation and module permissions | None | Must remain unavailable; policy is not a sandbox |
 | direct uninstrumented network APIs | Script-host isolation and module permissions | None | Must remain unavailable or enforcement cannot claim coverage |
 
-The table is a contract for later enforcement work. IP1 only defines bundle identity and validation.
+The table is the closed descriptor-coverage contract. IP2 covers the registered built-in capability paths shown above. Native `fetch` and custom providers remain unsupported and therefore fail closed until reviewed adapters exist.
+
+## Operation Descriptor v1
+
+Rust builds `woml.infrastructure-operation` v1 only after the generic capability envelope and the registered handler have validated the request. The descriptor binds:
+
+- run, workflow, definition, node, attempt, invocation, and stable operation identity;
+- registered capability, operation, effective effect class, environment, execution mode, and runtime-selected target;
+- service-specific safe facts such as executable alias, HTTP origin and method, database operation class, workflow target, artifact identity, or provider identity;
+- an optional engine-owned review digest.
+
+Raw process arguments exist only in evaluator memory for exact prefix comparison. Serialized descriptors contain their count and a domain-separated digest. Database connections, storage/cache keys, lock sessions, and provider destinations are likewise represented by domain-separated digests. Authorization headers, credentials, request bodies, artifact bodies, provider tokens, environment values, and message text are excluded.
+
+The policy metadata method is separate from presentation metadata and durable operation metadata. An adapter cannot silently fall back to arbitrary capability input: an unregistered capability/operation returns `WOML_POLICY_INPUT_UNSUPPORTED`.
+
+## Evidence Reference v1
+
+`woml.infrastructure-evidence` v1 is a Rust-owned typed reference, not a deserializable workflow payload. Its constructors are crate-private and reserved for durable WOML authorities. A JSON object that resembles an approval, artifact, attestation, lock, or operator record cannot become evaluator evidence.
+
+Evidence binds its authority and digest to a run, with optional node and operation bindings. It also carries issue time, optional expiry, optional review-digest binding, and only the typed facts needed by its evidence kind. The evaluator rejects evidence that is stale, expired, cross-run, cross-step, cross-operation, integrity-unverified, or review-mismatched.
+
+## Deterministic Evaluation
+
+The immutable Rust evaluator sorts rules by ID and applies this precedence:
+
+1. any matching deny rule denies;
+2. every requirement on every matching allow rule must be satisfied;
+3. a matching allow with satisfied requirements allows;
+4. otherwise the bundle default for the effective operation class applies.
+
+Decisions use `woml.infrastructure-decision` v1 and include the policy and descriptor digests, deterministic matched rule IDs, safe operation summary, reason codes, bounded requirement summaries, a bounded explanation, authority time, and an instruction count. Runtime duration is returned as telemetry but excluded from canonical decision serialization.
+
+Prepared bundles are cached only by canonical policy digest. Decisions are never cached because evidence, time, target, and execution mode are context-dependent. Evaluation performs no I/O and has frozen limits of 250,000 instructions, 100 ms wall time, 128 evidence references, 1,024 rules, and 1,024 explanation bytes. Exhaustion denies with `evaluation_budget_exhausted`.
+
+Focused debug-profile measurements evaluate the maximum 1,024-rule bundle within the 100 ms evaluator watchdog on the release development baseline. The compatibility fixture records the budget; enforcement in IP4 must not widen it implicitly.
 
 ## Policy Bundle Limits
 
@@ -140,9 +176,9 @@ A policy error must never be translated into an allow. Later enforcement maps fa
 
 Diagnostics expose safe rule and requirement summaries only. They never include credentials, unrestricted payloads, complete command output, artifact bodies, or private reviewer assertions.
 
-## Explicit IP0/IP1 Non-Goals
+## Explicit IP0–IP3 Non-Goals
 
-- Runtime decisions or enforcement
+- Central runtime enforcement (planned for IP4)
 - Automatic approval creation
 - Vendor-specific Terraform, Kubernetes, or cloud-plan parsing
 - Remote policy distribution

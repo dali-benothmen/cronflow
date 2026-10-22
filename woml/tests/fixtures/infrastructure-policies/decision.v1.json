@@ -1,0 +1,30 @@
+{
+  "profile": "woml.infrastructure-policy-decision/v1",
+  "contract": "woml.infrastructure-decision",
+  "contractVersion": 1,
+  "outcomes": ["allow", "deny", "requirements_unsatisfied"],
+  "precedence": ["deny", "requirements", "allow", "default"],
+  "stableFields": [
+    "decisionId",
+    "policyId",
+    "policyVersion",
+    "policyDigest",
+    "descriptorDigest",
+    "outcome",
+    "matchedRuleIds",
+    "operation",
+    "reasonCodes",
+    "requirements",
+    "explanation",
+    "evaluatedAt",
+    "evaluationInstructions"
+  ],
+  "excludedFromCanonicalEvent": ["evaluationDurationMicros"],
+  "maximumExplanationBytes": 1024,
+  "maximumEvidenceReferences": 128,
+  "evaluationBudget": {
+    "maximumRules": 1024,
+    "maximumInstructions": 250000,
+    "maximumWallClockMs": 100
+  }
+}

@@ -1,0 +1,28 @@
+{
+  "profile": "woml.infrastructure-policy-operation-descriptors/v1",
+  "contract": "woml.infrastructure-operation",
+  "contractVersion": 1,
+  "protectedCapabilities": [
+    { "capability": "process", "operations": ["run"], "normalized": ["executable", "argumentDigest", "cwdClass"] },
+    { "capability": "http", "operations": ["request"], "normalized": ["method", "origin", "pathClass"] },
+    { "capability": "db", "operations": ["query", "execute", "read", "insert", "update", "delete", "transaction"], "normalized": ["driver", "operationClass", "connectionDigest"] },
+    { "capability": "storage", "operations": ["put", "get", "head", "list", "delete"], "normalized": ["action", "keyDigest"] },
+    { "capability": "cache", "operations": ["get", "set", "delete", "has", "increment", "set_if_absent"], "normalized": ["action", "keyDigest"] },
+    { "capability": "events", "operations": ["emit"], "normalized": ["eventName"] },
+    { "capability": "workflows", "operations": ["call", "start"], "normalized": ["invocationMode", "targetWorkflowId"] },
+    { "capability": "artifacts", "operations": ["put", "head", "materialize"], "normalized": ["action", "artifactIdentity", "artifactDigest"] },
+    { "capability": "locks", "operations": ["acquire", "assert-current", "release"], "normalized": ["action", "keyDigest", "sessionDigest"] },
+    { "capability": "telegram", "operations": ["send"], "normalized": ["provider", "destinationDigest"] },
+    { "capability": "discord", "operations": ["send"], "normalized": ["provider", "destinationDigest"] },
+    { "capability": "whatsapp", "operations": ["send"], "normalized": ["provider", "destinationDigest"] }
+  ],
+  "unsupportedUntilReviewedAdapterExists": ["native-fetch", "custom-provider"],
+  "neverSerialized": [
+    "authorizationHeaders",
+    "databaseCredentials",
+    "rawArguments",
+    "artifactBodies",
+    "providerTokens",
+    "messageText"
+  ]
+}

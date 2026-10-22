@@ -21,6 +21,7 @@ pub mod events_service;
 pub mod host;
 pub mod http;
 pub mod infrastructure_policy;
+pub mod infrastructure_policy_runtime;
 pub mod interval;
 pub mod locks;
 pub mod model;
@@ -191,6 +192,17 @@ pub use infrastructure_policy::{
   InfrastructurePolicyTrustV1, PreparedInfrastructurePolicyV1, INFRASTRUCTURE_POLICY_CONTRACT,
   INFRASTRUCTURE_POLICY_CONTRACT_VERSION, INFRASTRUCTURE_POLICY_MAX_BYTES,
   INFRASTRUCTURE_POLICY_MAX_RULES,
+};
+pub use infrastructure_policy_runtime::{
+  InfrastructurePolicyDecisionOutcomeV1, InfrastructurePolicyDecisionRecordV1,
+  InfrastructurePolicyDescriptorContextV1, InfrastructurePolicyEvaluationBudgetV1,
+  InfrastructurePolicyEvaluatorCacheV1, InfrastructurePolicyEvidenceAuthorityV1,
+  InfrastructurePolicyEvidenceKindV1, InfrastructurePolicyEvidenceReferenceV1,
+  InfrastructurePolicyOperationDescriptorV1, InfrastructurePolicyOperationMetadataV1,
+  InfrastructurePolicyPreparedEvaluatorV1, InfrastructurePolicyReasonCodeV1,
+  InfrastructurePolicyRequirementResultV1, InfrastructurePolicyRequirementStatusV1,
+  INFRASTRUCTURE_POLICY_DECISION_CONTRACT, INFRASTRUCTURE_POLICY_DESCRIPTOR_CONTRACT,
+  INFRASTRUCTURE_POLICY_EVIDENCE_CONTRACT,
 };
 pub use interval::{
   IntervalError, IntervalProgress, IntervalProgressReason, IntervalProgressReporter, WomlInterval,
