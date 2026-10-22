@@ -1,0 +1,209 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://woml.dev/schemas/infrastructure-policy/v1",
+  "title": "WOML Infrastructure Policy Bundle v1",
+  "description": "Operator-owned declarative authorization rules for protected WOML effects.",
+  "x-status": "infrastructure-policies-ip1-frozen",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "contract",
+    "contractVersion",
+    "id",
+    "version",
+    "environment",
+    "defaults",
+    "rules"
+  ],
+  "properties": {
+    "contract": { "const": "woml.infrastructure-policy" },
+    "contractVersion": { "const": 1 },
+    "id": { "$ref": "#/$defs/identifier" },
+    "version": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$",
+      "maxLength": 128
+    },
+    "environment": { "$ref": "#/$defs/identifier" },
+    "defaults": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["read", "idempotent-write", "unsafe-write"],
+      "properties": {
+        "read": { "$ref": "#/$defs/defaultDecision" },
+        "idempotent-write": { "$ref": "#/$defs/defaultDecision" },
+        "unsafe-write": { "$ref": "#/$defs/defaultDecision" }
+      }
+    },
+    "rules": {
+      "type": "array",
+      "maxItems": 1024,
+      "items": { "$ref": "#/$defs/rule" }
+    },
+    "signature": { "$ref": "#/$defs/signature" }
+  },
+  "$defs": {
+    "identifier": {
+      "type": "string",
+      "pattern": "^[a-z][a-z0-9._-]{0,127}$",
+      "maxLength": 128
+    },
+    "role": {
+      "type": "string",
+      "pattern": "^[a-z][A-Za-z0-9:_-]{0,127}$",
+      "maxLength": 128
+    },
+    "defaultDecision": { "enum": ["allow", "deny"] },
+    "effect": {
+      "enum": ["read", "idempotent-write", "unsafe-write"]
+    },
+    "executionMode": {
+      "enum": ["normal", "compensation", "cleanup", "recovery"]
+    },
+    "identifierSet": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 128,
+      "uniqueItems": true,
+      "items": { "$ref": "#/$defs/identifier" }
+    },
+    "match": {
+      "type": "object",
+      "additionalProperties": false,
+      "minProperties": 1,
+      "properties": {
+        "capabilities": { "$ref": "#/$defs/identifierSet" },
+        "operations": { "$ref": "#/$defs/identifierSet" },
+        "effects": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 3,
+          "uniqueItems": true,
+          "items": { "$ref": "#/$defs/effect" }
+        },
+        "workflows": { "$ref": "#/$defs/identifierSet" },
+        "targets": { "$ref": "#/$defs/identifierSet" },
+        "executables": { "$ref": "#/$defs/identifierSet" },
+        "argumentPrefix": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 128,
+          "items": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 4096
+          }
+        },
+        "executionModes": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 4,
+          "uniqueItems": true,
+          "items": { "$ref": "#/$defs/executionMode" }
+        }
+      }
+    },
+    "approvalRequirement": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["minimum", "roles", "bindReviewDigest", "maxAgeMs"],
+      "properties": {
+        "minimum": { "type": "integer", "minimum": 1, "maximum": 20 },
+        "roles": {
+          "type": "array",
+          "maxItems": 64,
+          "uniqueItems": true,
+          "items": { "$ref": "#/$defs/role" }
+        },
+        "bindReviewDigest": { "type": "boolean" },
+        "maxAgeMs": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 31536000000
+        }
+      }
+    },
+    "artifactRequirement": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["minimum", "verifiedIntegrity", "bindReviewDigest"],
+      "properties": {
+        "minimum": { "type": "integer", "minimum": 1, "maximum": 32 },
+        "verifiedIntegrity": { "const": true },
+        "bindReviewDigest": { "type": "boolean" }
+      }
+    },
+    "lockRequirement": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["key", "minimumRemainingMs"],
+      "properties": {
+        "key": { "type": "string", "minLength": 1, "maxLength": 256 },
+        "minimumRemainingMs": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 86400000
+        }
+      }
+    },
+    "validityRequirement": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["notBefore", "notAfter"],
+      "properties": {
+        "notBefore": { "type": "string", "format": "date-time", "maxLength": 64 },
+        "notAfter": { "type": "string", "format": "date-time", "maxLength": 64 }
+      }
+    },
+    "requirements": {
+      "type": "object",
+      "additionalProperties": false,
+      "minProperties": 1,
+      "properties": {
+        "approval": { "$ref": "#/$defs/approvalRequirement" },
+        "artifacts": { "$ref": "#/$defs/artifactRequirement" },
+        "lock": { "$ref": "#/$defs/lockRequirement" },
+        "validBetween": { "$ref": "#/$defs/validityRequirement" }
+      }
+    },
+    "rule": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "match", "decision"],
+      "properties": {
+        "id": { "$ref": "#/$defs/identifier" },
+        "description": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 512
+        },
+        "match": { "$ref": "#/$defs/match" },
+        "decision": { "enum": ["allow", "deny"] },
+        "requires": { "$ref": "#/$defs/requirements" }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": { "decision": { "const": "deny" } },
+            "required": ["decision"]
+          },
+          "then": { "not": { "required": ["requires"] } }
+        }
+      ]
+    },
+    "signature": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["algorithm", "keyId", "value"],
+      "properties": {
+        "algorithm": { "const": "ed25519" },
+        "keyId": { "$ref": "#/$defs/identifier" },
+        "value": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9_-]{86}$",
+          "maxLength": 128
+        }
+      }
+    }
+  }
+}

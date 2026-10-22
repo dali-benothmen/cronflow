@@ -1,0 +1,209 @@
+import { readFile } from 'node:fs/promises';
+import { resolve } from 'node:path';
+
+import { describe, expect, test } from 'bun:test';
+import type { AnySchema } from 'ajv';
+import Ajv2020 from 'ajv/dist/2020';
+import addFormats from 'ajv-formats';
+
+import {
+  InfrastructurePolicyError,
+  canonicalizeInfrastructurePolicy,
+  parseInfrastructurePolicy,
+  prepareInfrastructurePolicy,
+} from '../src/infrastructure-policy';
+
+const repositoryRoot = resolve(import.meta.dir, '../..');
+const fixtureRoot = resolve(
+  repositoryRoot,
+  'woml/tests/fixtures/infrastructure-policies'
+);
+
+async function json(path: string): Promise<unknown> {
+  return JSON.parse(await readFile(path, 'utf8')) as unknown;
+}
+
+describe('Infrastructure Policy v1 foundation', () => {
+  test('validates the frozen unsigned and signed fixtures against JSON Schema', async () => {
+    const schema = (await json(
+      resolve(repositoryRoot, 'docs/schemas/infrastructure-policy.v1.schema.json')
+    )) as AnySchema;
+    const ajv = new Ajv2020({ allErrors: true, strict: false });
+    addFormats(ajv);
+    const validate = ajv.compile(schema);
+    for (const name of ['production.unsigned.v1.json', 'production.signed.v1.json']) {
+      const fixture = await json(resolve(fixtureRoot, name));
+      expect(validate(fixture), `${name}: ${ajv.errorsText(validate.errors)}`).toBe(true);
+    }
+  });
+
+  test('freezes canonical identity independently of object-key order', async () => {
+    const source = await readFile(
+      resolve(fixtureRoot, 'production.unsigned.v1.json'),
+      'utf8'
+    );
+    const identity = (await json(resolve(fixtureRoot, 'identity.v1.json'))) as {
+      digest: string;
+    };
+    const prepared = parseInfrastructurePolicy(source);
+    expect(prepared.digest).toBe(identity.digest);
+    expect(prepared.signatureStatus).toBe('unsigned');
+
+    const reordered = {
+      rules: prepared.bundle.rules,
+      environment: prepared.bundle.environment,
+      defaults: prepared.bundle.defaults,
+      version: prepared.bundle.version,
+      id: prepared.bundle.id,
+      contractVersion: prepared.bundle.contractVersion,
+      contract: prepared.bundle.contract,
+    };
+    const second = prepareInfrastructurePolicy(reordered);
+    expect(second.digest).toBe(identity.digest);
+    expect(canonicalizeInfrastructurePolicy(second.bundle)).toBe(
+      Buffer.from(prepared.canonicalPayload).toString('utf8')
+    );
+  });
+
+  test('verifies the frozen Ed25519 signature using only operator trust', async () => {
+    const source = await readFile(
+      resolve(fixtureRoot, 'production.signed.v1.json'),
+      'utf8'
+    );
+    const identity = (await json(resolve(fixtureRoot, 'identity.v1.json'))) as {
+      digest: string;
+      signingKeyId: string;
+      publicKey: string;
+    };
+    const prepared = parseInfrastructurePolicy(source, {
+      keys: { [identity.signingKeyId]: identity.publicKey },
+      requireSignature: true,
+    });
+    expect(prepared.digest).toBe(identity.digest);
+    expect(prepared.signatureStatus).toBe('verified');
+    expect(prepared.signingKeyId).toBe(identity.signingKeyId);
+  });
+
+  test('fails closed for missing, unknown, revoked, or altered signatures', async () => {
+    const unsigned = await readFile(
+      resolve(fixtureRoot, 'production.unsigned.v1.json'),
+      'utf8'
+    );
+    const signed = await readFile(
+      resolve(fixtureRoot, 'production.signed.v1.json'),
+      'utf8'
+    );
+    const identity = (await json(resolve(fixtureRoot, 'identity.v1.json'))) as {
+      signingKeyId: string;
+      publicKey: string;
+    };
+    expect(() =>
+      parseInfrastructurePolicy(unsigned, { requireSignature: true })
+    ).toThrow(InfrastructurePolicyError);
+    for (const trust of [
+      {},
+      {
+        keys: { [identity.signingKeyId]: identity.publicKey },
+        revokedKeyIds: [identity.signingKeyId],
+      },
+    ]) {
+      try {
+        parseInfrastructurePolicy(signed, trust);
+        throw new Error('expected signature rejection');
+      } catch (error) {
+        expect(error).toMatchObject({ code: 'WOML_POLICY_SIGNATURE_INVALID' });
+      }
+    }
+    const altered = signed.replace('2026-10-22.1', '2026-10-22.2');
+    expect(() =>
+      parseInfrastructurePolicy(altered, {
+        keys: { [identity.signingKeyId]: identity.publicKey },
+      })
+    ).toThrow(InfrastructurePolicyError);
+  });
+
+  test('rejects duplicate keys, unknown fields, future versions, and ambiguous rules', async () => {
+    const source = await readFile(
+      resolve(fixtureRoot, 'production.unsigned.v1.json'),
+      'utf8'
+    );
+    const duplicate = source.replace(
+      '"contractVersion": 1,',
+      '"contractVersion": 1, "contractVersion": 1,'
+    );
+    expect(() => parseInfrastructurePolicy(duplicate)).toThrow(
+      InfrastructurePolicyError
+    );
+
+    const base = JSON.parse(source) as Record<string, unknown>;
+    expect(() => prepareInfrastructurePolicy({ ...base, surprise: true })).toThrow(
+      InfrastructurePolicyError
+    );
+    expect(() =>
+      prepareInfrastructurePolicy({ ...base, contractVersion: 2 })
+    ).toThrow(InfrastructurePolicyError);
+
+    const rules = structuredClone(base.rules) as Record<string, unknown>[];
+    rules[0] = { ...rules[0], match: {} };
+    expect(() => prepareInfrastructurePolicy({ ...base, rules })).toThrow(
+      InfrastructurePolicyError
+    );
+
+    const emptySet = structuredClone(base.rules) as Record<string, unknown>[];
+    emptySet[0] = {
+      ...emptySet[0],
+      match: { capabilities: [], effects: ['unsafe-write'] },
+    };
+    expect(() => prepareInfrastructurePolicy({ ...base, rules: emptySet })).toThrow(
+      InfrastructurePolicyError
+    );
+
+    const denyWithRequirements = structuredClone(base.rules) as Record<
+      string,
+      unknown
+    >[];
+    denyWithRequirements[0] = {
+      ...denyWithRequirements[0],
+      decision: 'deny',
+    };
+    expect(() =>
+      prepareInfrastructurePolicy({ ...base, rules: denyWithRequirements })
+    ).toThrow(InfrastructurePolicyError);
+
+    expect(() => parseInfrastructurePolicy(`\u00a0${source}`)).toThrow(
+      InfrastructurePolicyError
+    );
+    expect(() =>
+      parseInfrastructurePolicy(source.replace(
+        'Allow only a reviewed Terraform apply while the deployment lock is valid.',
+        String.fromCharCode(0xd800)
+      ))
+    ).toThrow(InfrastructurePolicyError);
+    expect(() => parseInfrastructurePolicy(`${'['.repeat(18)}null${']'.repeat(18)}`)).toThrow(
+      InfrastructurePolicyError
+    );
+    expect(() => parseInfrastructurePolicy(' '.repeat(1024 * 1024 + 1))).toThrow(
+      InfrastructurePolicyError
+    );
+  });
+
+  test('keeps the IP0 coverage and threat model explicit and machine-reviewable', async () => {
+    const coverage = (await json(resolve(fixtureRoot, 'coverage.v1.json'))) as {
+      paths: { path: string; posture: string }[];
+    };
+    const threatModel = (await json(resolve(fixtureRoot, 'threat-model.v1.json'))) as {
+      trustedAuthorities: string[];
+      untrustedSources: string[];
+      invariants: string[];
+    };
+    expect(new Set(coverage.paths.map(path => path.path)).size).toBe(
+      coverage.paths.length
+    );
+    expect(coverage.paths.find(path => path.path === 'fetch')?.posture).toBe(
+      'protect-or-block'
+    );
+    expect(threatModel.trustedAuthorities).toContain('rust-runtime');
+    expect(threatModel.untrustedSources).toContain('ai-output');
+    expect(threatModel.invariants.length).toBeGreaterThanOrEqual(10);
+  });
+});

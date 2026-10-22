@@ -3191,6 +3191,7 @@ dependencies = [
  "jsonschema",
  "libc",
  "reqwest",
+ "ring",
  "rusqlite",
  "rustls",
  "serde",

@@ -20,6 +20,7 @@ pub mod event;
 pub mod events_service;
 pub mod host;
 pub mod http;
+pub mod infrastructure_policy;
 pub mod interval;
 pub mod locks;
 pub mod model;
@@ -181,6 +182,16 @@ pub use host::{
   ScriptHostClient, ScriptHostClientError, ScriptHostModuleArtifact, ScriptHostProcessOptions,
 };
 pub use http::ManagedHttpHandler;
+pub use infrastructure_policy::{
+  parse_infrastructure_policy, prepare_infrastructure_policy, InfrastructurePolicyBundleV1,
+  InfrastructurePolicyDecisionV1, InfrastructurePolicyDefaultV1, InfrastructurePolicyEffectV1,
+  InfrastructurePolicyError, InfrastructurePolicyExecutionModeV1,
+  InfrastructurePolicyRequirementsV1, InfrastructurePolicyRuleMatchV1, InfrastructurePolicyRuleV1,
+  InfrastructurePolicySignatureStatusV1, InfrastructurePolicySignatureV1,
+  InfrastructurePolicyTrustV1, PreparedInfrastructurePolicyV1, INFRASTRUCTURE_POLICY_CONTRACT,
+  INFRASTRUCTURE_POLICY_CONTRACT_VERSION, INFRASTRUCTURE_POLICY_MAX_BYTES,
+  INFRASTRUCTURE_POLICY_MAX_RULES,
+};
 pub use interval::{
   IntervalError, IntervalProgress, IntervalProgressReason, IntervalProgressReporter, WomlInterval,
   INTERVAL_PROGRESS_CONTRACT, INTERVAL_PROGRESS_CONTRACT_VERSION, MAX_INTERVAL_MS, MIN_INTERVAL_MS,
