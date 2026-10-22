@@ -150,6 +150,15 @@ import {
   loadArtifactPolicy,
 } from './artifact-policy';
 import {
+  infrastructurePolicyRuntimeAuthority,
+  resolveInfrastructurePolicy,
+  type ResolvedInfrastructurePolicyV1,
+} from './infrastructure-policy';
+import {
+  analyzeInfrastructurePolicySource,
+  infrastructurePolicyDiagnostics,
+} from './infrastructure-policy-analysis';
+import {
   CommunicationProviderRegistry,
   CommunicationTriggerHost,
 } from './communication-provider';
@@ -287,11 +296,19 @@ class CliInputError extends Error {
 }
 
 function runUsage(): string {
-  return 'Usage: woml run <workflow.woml|directory>... [--config <path>] [--process-policy <path>|--allow-process <aliases>] [--artifact-policy <path>] [--reviewer-directory <path>] [--host <address>] [--port <port>] [--state <path>] [--trigger <manualTriggerId>] [--resume <runId>] [--approval-port <port>] [--json] [--verbose] [--color=auto|always|never] [--background|-d]';
+  return 'Usage: woml run <workflow.woml|directory>... [--config <path>] [--policy <name|path>] [--emergency-deny <name|path>] [--policy-trust <path>] [--require-policy-signature] [--process-policy <path>|--allow-process <aliases>] [--artifact-policy <path>] [--reviewer-directory <path>] [--host <address>] [--port <port>] [--state <path>] [--trigger <manualTriggerId>] [--resume <runId>] [--approval-port <port>] [--json] [--verbose] [--color=auto|always|never] [--background|-d]';
 }
 
 function testUsage(): string {
-  return 'Usage: woml test <workflow.woml> [--process-policy <path>|--allow-process <aliases>] [--artifact-policy <path>] [--reviewer-directory <path>] [--state <path>] [--trigger <manualTriggerId>] [--resume <runId>] [--approval-port <port>]';
+  return 'Usage: woml test <workflow.woml> [--policy <name|path>] [--emergency-deny <name|path>] [--policy-trust <path>] [--require-policy-signature] [--process-policy <path>|--allow-process <aliases>] [--artifact-policy <path>] [--reviewer-directory <path>] [--state <path>] [--trigger <manualTriggerId>] [--resume <runId>] [--approval-port <port>]';
+}
+
+function policyUsage(): string {
+  return [
+    'Usage:',
+    '  woml policy check <name|path> [--trust <path>] [--require-signature] [--json]',
+    '  woml policy explain <workflow.woml> --policy <name|path> [--step <stepId>] [--trust <path>] [--require-signature] [--json]',
+  ].join('\n');
 }
 
 function listUsage(): string {
@@ -347,7 +364,7 @@ function signalUsage(): string {
 }
 
 function checkUsage(): string {
-  return 'Usage: woml check <workflow.woml|directory>... [--config <path>] [--process-policy <path>] [--artifact-policy <path>] [--json]';
+  return 'Usage: woml check <workflow.woml|directory>... [--config <path>] [--policy <name|path>] [--policy-trust <path>] [--require-policy-signature] [--process-policy <path>] [--artifact-policy <path>] [--json]';
 }
 
 function typesUsage(): string {
@@ -355,7 +372,7 @@ function typesUsage(): string {
 }
 
 function usage(): string {
-  return `${runUsage()}\n${testUsage()}\n${logFollowUsage}\n${checkUsage()}\n${typesUsage()}\n${inspectUsage}\n${artifactsUsage()}\n${backupUsage}\n${restoreUsage}\n${pruneUsage}\n${listUsage()}\n${getUsage()}\n${cancelUsage()}\n${recoverUsage()}\n${stopUsage()}\n${emitUsage()}\n${signalUsage()}\n${secretsUsage()}\n${providerDoctorUsage()}`;
+  return `${runUsage()}\n${testUsage()}\n${logFollowUsage}\n${checkUsage()}\n${policyUsage()}\n${typesUsage()}\n${inspectUsage}\n${artifactsUsage()}\n${backupUsage}\n${restoreUsage}\n${pruneUsage}\n${listUsage()}\n${getUsage()}\n${cancelUsage()}\n${recoverUsage()}\n${stopUsage()}\n${emitUsage()}\n${signalUsage()}\n${secretsUsage()}\n${providerDoctorUsage()}`;
 }
 
 interface RunArguments {
@@ -372,6 +389,10 @@ interface RunArguments {
   readonly processPolicyPath?: string;
   readonly artifactPolicyPath?: string;
   readonly reviewerDirectoryPath?: string;
+  readonly infrastructurePolicyReference?: string;
+  readonly emergencyDenyReference?: string;
+  readonly infrastructurePolicyTrustPath?: string;
+  readonly requireInfrastructurePolicySignature: boolean;
   readonly allowProcess?: string;
   readonly runtimeCapabilities?: RuntimeCapabilitiesV1;
   readonly stateExplicit: boolean;
@@ -423,6 +444,10 @@ function parseRunArguments(args: readonly string[]): RunArguments {
   let processPolicyPath: string | undefined;
   let artifactPolicyPath: string | undefined;
   let reviewerDirectoryPath: string | undefined;
+  let infrastructurePolicyReference: string | undefined;
+  let emergencyDenyReference: string | undefined;
+  let infrastructurePolicyTrustPath: string | undefined;
+  let requireInfrastructurePolicySignature = false;
   let allowProcess: string | undefined;
   let stateExplicit = false;
   let hostExplicit = false;
@@ -444,7 +469,15 @@ function parseRunArguments(args: readonly string[]): RunArguments {
       );
     }
     seen.add(option);
-    if (option === '--verbose' || option === '--json') {
+    if (
+      option === '--verbose' ||
+      option === '--json' ||
+      option === '--require-policy-signature'
+    ) {
+      if (option === '--require-policy-signature') {
+        requireInfrastructurePolicySignature = true;
+        continue;
+      }
       if (command !== 'run') {
         throw new CliInputError('WOML_CLI_ARGUMENTS_INVALID', testUsage());
       }
@@ -460,6 +493,9 @@ function parseRunArguments(args: readonly string[]): RunArguments {
         option !== '--process-policy' &&
         option !== '--artifact-policy' &&
         option !== '--reviewer-directory' &&
+        option !== '--policy' &&
+        option !== '--emergency-deny' &&
+        option !== '--policy-trust' &&
         option !== '--allow-process' &&
         option !== '--resume' &&
         option !== '--approval-port' &&
@@ -514,6 +550,30 @@ function parseRunArguments(args: readonly string[]): RunArguments {
         );
       }
       reviewerDirectoryPath = value;
+    } else if (option === '--policy') {
+      if (value.length === 0) {
+        throw new CliInputError(
+          'WOML_CLI_ARGUMENTS_INVALID',
+          '--policy requires a policy name or JSON file path.'
+        );
+      }
+      infrastructurePolicyReference = value;
+    } else if (option === '--emergency-deny') {
+      if (value.length === 0) {
+        throw new CliInputError(
+          'WOML_CLI_ARGUMENTS_INVALID',
+          '--emergency-deny requires a policy name or JSON file path.'
+        );
+      }
+      emergencyDenyReference = value;
+    } else if (option === '--policy-trust') {
+      if (value.length === 0) {
+        throw new CliInputError(
+          'WOML_CLI_ARGUMENTS_INVALID',
+          '--policy-trust requires a JSON file path.'
+        );
+      }
+      infrastructurePolicyTrustPath = value;
     } else if (option === '--allow-process') {
       if (value.length === 0) {
         throw new CliInputError(
@@ -592,6 +652,15 @@ function parseRunArguments(args: readonly string[]): RunArguments {
       'Use either --process-policy or --allow-process, not both.'
     );
   }
+  if (
+    emergencyDenyReference !== undefined &&
+    infrastructurePolicyReference === undefined
+  ) {
+    throw new CliInputError(
+      'WOML_POLICY_REQUIRED',
+      '--emergency-deny requires a base --policy so the overlay can only remove admitted authority.'
+    );
+  }
   return {
     command,
     filePath,
@@ -606,6 +675,14 @@ function parseRunArguments(args: readonly string[]): RunArguments {
     ...(processPolicyPath === undefined ? {} : { processPolicyPath }),
     ...(artifactPolicyPath === undefined ? {} : { artifactPolicyPath }),
     ...(reviewerDirectoryPath === undefined ? {} : { reviewerDirectoryPath }),
+    ...(infrastructurePolicyReference === undefined
+      ? {}
+      : { infrastructurePolicyReference }),
+    ...(emergencyDenyReference === undefined ? {} : { emergencyDenyReference }),
+    ...(infrastructurePolicyTrustPath === undefined
+      ? {}
+      : { infrastructurePolicyTrustPath }),
+    requireInfrastructurePolicySignature,
     ...(allowProcess === undefined ? {} : { allowProcess }),
     stateExplicit,
     hostExplicit,
@@ -655,15 +732,43 @@ async function resolveRunArgumentsConfiguration(
     args.reviewerDirectoryPath === undefined
       ? undefined
       : await loadReviewerDirectory(args.reviewerDirectoryPath);
+  const infrastructurePolicy =
+    args.infrastructurePolicyReference === undefined
+      ? undefined
+      : await resolveInfrastructurePolicy(args.infrastructurePolicyReference, {
+          ...(args.infrastructurePolicyTrustPath === undefined
+            ? {}
+            : { trustPath: args.infrastructurePolicyTrustPath }),
+          requireSignature: args.requireInfrastructurePolicySignature,
+        });
+  const emergencyDeny =
+    args.emergencyDenyReference === undefined
+      ? undefined
+      : await resolveInfrastructurePolicy(args.emergencyDenyReference, {
+          ...(args.infrastructurePolicyTrustPath === undefined
+            ? {}
+            : { trustPath: args.infrastructurePolicyTrustPath }),
+          requireSignature: args.requireInfrastructurePolicySignature,
+          emergencyDeny: true,
+        });
+  const infrastructurePolicyCapabilities =
+    infrastructurePolicy === undefined
+      ? undefined
+      : infrastructurePolicyRuntimeAuthority(
+          infrastructurePolicy,
+          emergencyDeny
+        );
   const runtimeCapabilities: RuntimeCapabilitiesV1 | undefined =
     processCapabilities === undefined &&
     artifactCapabilities === undefined &&
-    reviewerCapabilities === undefined
+    reviewerCapabilities === undefined &&
+    infrastructurePolicyCapabilities === undefined
       ? undefined
       : {
           ...processCapabilities,
           ...artifactCapabilities,
           ...reviewerCapabilities,
+          ...infrastructurePolicyCapabilities,
         };
   if (args.command !== 'run') {
     return {
@@ -1195,6 +1300,35 @@ function formatRunInspection(
       lines.push(`Workflow timeout at: ${inspection.policy.timeoutAt}`);
     }
   }
+  if (inspection.infrastructurePolicy !== undefined) {
+    const policy = inspection.infrastructurePolicy;
+    lines.push(
+      `Infrastructure policy: ${policy.binding.policyId}@${policy.binding.policyVersion} · ${policy.binding.policyDigest}`
+    );
+    lines.push(`Policy admitted at: ${policy.binding.admittedAt}`);
+    lines.push(
+      `Policy decisions: ${policy.totalDecisions}${policy.truncated ? ' (showing latest 100)' : ''}`
+    );
+    for (const decision of policy.decisions.slice(0, 10)) {
+      const operation =
+        typeof decision.operation === 'object' && decision.operation !== null
+          ? (decision.operation as Record<string, unknown>)
+          : undefined;
+      lines.push(
+        `  ${String(decision.outcome ?? 'unknown')}: ${String(operation?.capability ?? 'unknown')}.${String(operation?.operation ?? 'unknown')} · ${String(decision.decisionId ?? 'unknown')}`
+      );
+      const overlay =
+        typeof decision.emergencyDeny === 'object' &&
+        decision.emergencyDeny !== null
+          ? (decision.emergencyDeny as Record<string, unknown>)
+          : undefined;
+      if (overlay !== undefined) {
+        lines.push(
+          `    Emergency deny: ${String(overlay.policyId ?? 'unknown')} · ${String(overlay.policyDigest ?? 'unknown')}`
+        );
+      }
+    }
+  }
   if (inspection.forEach !== undefined && inspection.forEach.items.length > 0) {
     lines.push('For each:');
     for (const loop of inspection.forEach.items) {
@@ -1277,7 +1411,10 @@ function formatRunInspection(
       `Warnings: ${inspection.warnings.map(warning => warning.code).join(', ')}`
     );
   }
-  if (inspection.approvals !== undefined && inspection.approvals.items.length > 0) {
+  if (
+    inspection.approvals !== undefined &&
+    inspection.approvals.items.length > 0
+  ) {
     lines.push('Rich approvals:');
     for (const approval of inspection.approvals.items) {
       const review = approval.review as {
@@ -1285,7 +1422,8 @@ function formatRunInspection(
         readonly risk?: unknown;
         readonly artifacts?: unknown;
       };
-      const title = typeof review.title === 'string' ? review.title : approval.approvalId;
+      const title =
+        typeof review.title === 'string' ? review.title : approval.approvalId;
       const risk = typeof review.risk === 'string' ? review.risk : 'unknown';
       lines.push(
         `  ${approval.approvalId}: ${approval.status} · ${approval.received}/${approval.required} approvals · risk ${risk}`
@@ -1299,12 +1437,14 @@ function formatRunInspection(
         );
       }
       lines.push(`    Reviewer directory: ${approval.directoryVersion}`);
-      if (approval.deadline !== undefined) lines.push(`    Deadline: ${approval.deadline}`);
+      if (approval.deadline !== undefined)
+        lines.push(`    Deadline: ${approval.deadline}`);
       if (Array.isArray(review.artifacts) && review.artifacts.length > 0) {
         lines.push(`    Reviewed artifacts: ${review.artifacts.length}`);
       }
       for (const decision of approval.decisions) {
-        const roles = decision.roles.length === 0 ? '' : ` · ${decision.roles.join(', ')}`;
+        const roles =
+          decision.roles.length === 0 ? '' : ` · ${decision.roles.join(', ')}`;
         lines.push(
           `    ${decision.decision}: ${decision.principalId} via ${decision.provider}${roles} · ${decision.decidedAt}`
         );
@@ -1316,7 +1456,9 @@ function formatRunInspection(
       }
     }
     if (inspection.approvals.truncated) {
-      lines.push('  Additional rich approvals were omitted from this bounded view.');
+      lines.push(
+        '  Additional rich approvals were omitted from this bounded view.'
+      );
     }
   }
   if (artifacts !== undefined && artifacts.length > 0) {
@@ -3351,6 +3493,9 @@ interface CheckArguments {
   readonly configPath?: string;
   readonly processPolicyPath?: string;
   readonly artifactPolicyPath?: string;
+  readonly infrastructurePolicyReference?: string;
+  readonly infrastructurePolicyTrustPath?: string;
+  readonly requireInfrastructurePolicySignature: boolean;
   readonly json: boolean;
 }
 
@@ -3362,6 +3507,9 @@ function parseCheckArguments(args: readonly string[]): CheckArguments {
   let configPath: string | undefined;
   let processPolicyPath: string | undefined;
   let artifactPolicyPath: string | undefined;
+  let infrastructurePolicyReference: string | undefined;
+  let infrastructurePolicyTrustPath: string | undefined;
+  let requireInfrastructurePolicySignature = false;
   let json = false;
   for (let index = 1; index < args.length; index += 1) {
     const argument = args[index]!;
@@ -3369,6 +3517,12 @@ function parseCheckArguments(args: readonly string[]): CheckArguments {
       if (json)
         throw new CliInputError('WOML_CLI_ARGUMENTS_INVALID', checkUsage());
       json = true;
+      continue;
+    }
+    if (argument === '--require-policy-signature') {
+      if (requireInfrastructurePolicySignature)
+        throw new CliInputError('WOML_CLI_ARGUMENTS_INVALID', checkUsage());
+      requireInfrastructurePolicySignature = true;
       continue;
     }
     if (argument === '--config') {
@@ -3410,6 +3564,32 @@ function parseCheckArguments(args: readonly string[]): CheckArguments {
       index += 1;
       continue;
     }
+    if (argument === '--policy') {
+      const value = args[index + 1];
+      if (
+        infrastructurePolicyReference !== undefined ||
+        value === undefined ||
+        value.startsWith('--')
+      ) {
+        throw new CliInputError('WOML_CLI_ARGUMENTS_INVALID', checkUsage());
+      }
+      infrastructurePolicyReference = value;
+      index += 1;
+      continue;
+    }
+    if (argument === '--policy-trust') {
+      const value = args[index + 1];
+      if (
+        infrastructurePolicyTrustPath !== undefined ||
+        value === undefined ||
+        value.startsWith('--')
+      ) {
+        throw new CliInputError('WOML_CLI_ARGUMENTS_INVALID', checkUsage());
+      }
+      infrastructurePolicyTrustPath = value;
+      index += 1;
+      continue;
+    }
     if (argument.startsWith('--')) {
       throw new CliInputError('WOML_CLI_ARGUMENTS_INVALID', checkUsage());
     }
@@ -3423,6 +3603,13 @@ function parseCheckArguments(args: readonly string[]): CheckArguments {
     ...(configPath === undefined ? {} : { configPath }),
     ...(processPolicyPath === undefined ? {} : { processPolicyPath }),
     ...(artifactPolicyPath === undefined ? {} : { artifactPolicyPath }),
+    ...(infrastructurePolicyReference === undefined
+      ? {}
+      : { infrastructurePolicyReference }),
+    ...(infrastructurePolicyTrustPath === undefined
+      ? {}
+      : { infrastructurePolicyTrustPath }),
+    requireInfrastructurePolicySignature,
     json,
   };
 }
@@ -3457,6 +3644,16 @@ interface ProductionPreflightReportV1 {
   readonly configuration?: ResolvedRuntimeConfigurationV1;
   readonly environment?: RuntimePreflightV1;
   readonly secretProvider?: string;
+  readonly infrastructurePolicy?: {
+    readonly id: string;
+    readonly version: string;
+    readonly environment: string;
+    readonly digest: string;
+    readonly signatureStatus: 'unsigned' | 'verified';
+    readonly staticAnalysis: readonly ReturnType<
+      typeof analyzeInfrastructurePolicySource
+    >[number][];
+  };
   readonly workflows: readonly {
     readonly workflowId: string;
     readonly sourcePath: string;
@@ -3491,6 +3688,18 @@ async function runDeploymentCheckCommand(
     if (parsed.artifactPolicyPath !== undefined) {
       await loadArtifactPolicy(parsed.artifactPolicyPath, 'background');
     }
+    const infrastructurePolicy =
+      parsed.infrastructurePolicyReference === undefined
+        ? undefined
+        : await resolveInfrastructurePolicy(
+            parsed.infrastructurePolicyReference,
+            {
+              ...(parsed.infrastructurePolicyTrustPath === undefined
+                ? {}
+                : { trustPath: parsed.infrastructurePolicyTrustPath }),
+              requireSignature: parsed.requireInfrastructurePolicySignature,
+            }
+          );
     if (processUsage.length > 0 && parsed.processPolicyPath === undefined) {
       io.stderr(
         'WOML check: services.process is valid but disabled at runtime unless --allow-process or --process-policy is provided to woml run.\n'
@@ -3532,6 +3741,28 @@ async function runDeploymentCheckCommand(
       ...(configuration === undefined ? {} : { configuration }),
       ...(environment === undefined ? {} : { environment }),
       ...(secretProvider === undefined ? {} : { secretProvider }),
+      ...(infrastructurePolicy === undefined
+        ? {}
+        : {
+            infrastructurePolicy: {
+              id: infrastructurePolicy.prepared.bundle.id,
+              version: infrastructurePolicy.prepared.bundle.version,
+              environment: infrastructurePolicy.prepared.bundle.environment,
+              digest: infrastructurePolicy.prepared.digest,
+              signatureStatus: infrastructurePolicy.prepared.signatureStatus,
+              staticAnalysis: (
+                await Promise.all(
+                  sources.map(async source =>
+                    analyzeInfrastructurePolicySource(
+                      infrastructurePolicy.prepared.bundle,
+                      source.workflow.workflowId,
+                      await readFile(source.filePath, 'utf8')
+                    )
+                  )
+                )
+              ).flat(),
+            },
+          }),
       workflows: sources.map(source => ({
         workflowId: source.workflow.workflowId,
         sourcePath: source.filePath,
@@ -3558,6 +3789,16 @@ async function runDeploymentCheckCommand(
       io.stdout(
         `Workflow ${workflow.workflowId}: ${workflow.triggerCount} trigger${workflow.triggerCount === 1 ? '' : 's'}, ${workflow.moduleCount} module${workflow.moduleCount === 1 ? '' : 's'}, ${workflow.requiredSecrets.length} required secret${workflow.requiredSecrets.length === 1 ? '' : 's'}.\n`
       );
+    }
+    if (report.infrastructurePolicy !== undefined) {
+      io.stdout(
+        `Policy ${report.infrastructurePolicy.id}@${report.infrastructurePolicy.version}: ${report.infrastructurePolicy.environment} · ${report.infrastructurePolicy.digest}.\n`
+      );
+      for (const decision of report.infrastructurePolicy.staticAnalysis) {
+        io.stdout(
+          `  ${decision.workflowId} ${decision.capability}.${decision.operation}: ${decision.status.replaceAll('_', ' ')}.\n`
+        );
+      }
     }
     if (configuration !== undefined && environment !== undefined) {
       io.stdout(`Deployment: ${configuration.deploymentName}.\n`);
@@ -3609,6 +3850,7 @@ async function runCheckCommand(
     parsed.configPath === undefined &&
     parsed.processPolicyPath === undefined &&
     parsed.artifactPolicyPath === undefined &&
+    parsed.infrastructurePolicyReference === undefined &&
     onlyInputIsFile
   ) {
     return await runSingleCheckCommand(
@@ -3617,6 +3859,195 @@ async function runCheckCommand(
     );
   }
   return await runDeploymentCheckCommand(parsed, io, dependencies);
+}
+
+interface PolicyCommandArguments {
+  readonly action: 'check' | 'explain';
+  readonly policyReference: string;
+  readonly workflowPath?: string;
+  readonly stepId?: string;
+  readonly trustPath?: string;
+  readonly requireSignature: boolean;
+  readonly json: boolean;
+}
+
+function parsePolicyCommandArguments(
+  args: readonly string[]
+): PolicyCommandArguments {
+  const action = args[1];
+  if (args[0] !== 'policy' || (action !== 'check' && action !== 'explain')) {
+    throw new CliInputError('WOML_CLI_ARGUMENTS_INVALID', policyUsage());
+  }
+  let policyReference: string | undefined;
+  let workflowPath: string | undefined;
+  let stepId: string | undefined;
+  let trustPath: string | undefined;
+  let requireSignature = false;
+  let json = false;
+  for (let index = 2; index < args.length; index += 1) {
+    const argument = args[index]!;
+    if (argument === '--json' || argument === '--require-signature') {
+      if (
+        (argument === '--json' && json) ||
+        (argument === '--require-signature' && requireSignature)
+      ) {
+        throw new CliInputError('WOML_CLI_ARGUMENTS_INVALID', policyUsage());
+      }
+      if (argument === '--json') json = true;
+      else requireSignature = true;
+      continue;
+    }
+    if (
+      argument === '--policy' ||
+      argument === '--step' ||
+      argument === '--trust'
+    ) {
+      const value = args[index + 1];
+      if (value === undefined || value.startsWith('--')) {
+        throw new CliInputError('WOML_CLI_ARGUMENTS_INVALID', policyUsage());
+      }
+      if (argument === '--policy') {
+        if (policyReference !== undefined)
+          throw new CliInputError('WOML_CLI_ARGUMENTS_INVALID', policyUsage());
+        policyReference = value;
+      } else if (argument === '--step') {
+        if (stepId !== undefined)
+          throw new CliInputError('WOML_CLI_ARGUMENTS_INVALID', policyUsage());
+        stepId = value;
+      } else {
+        if (trustPath !== undefined)
+          throw new CliInputError('WOML_CLI_ARGUMENTS_INVALID', policyUsage());
+        trustPath = value;
+      }
+      index += 1;
+      continue;
+    }
+    if (argument.startsWith('--')) {
+      throw new CliInputError('WOML_CLI_ARGUMENTS_INVALID', policyUsage());
+    }
+    if (action === 'check') {
+      if (policyReference !== undefined)
+        throw new CliInputError('WOML_CLI_ARGUMENTS_INVALID', policyUsage());
+      policyReference = argument;
+    } else {
+      if (workflowPath !== undefined)
+        throw new CliInputError('WOML_CLI_ARGUMENTS_INVALID', policyUsage());
+      workflowPath = resolve(argument);
+    }
+  }
+  if (
+    policyReference === undefined ||
+    (action === 'explain' && workflowPath === undefined) ||
+    (action === 'check' && (workflowPath !== undefined || stepId !== undefined))
+  ) {
+    throw new CliInputError('WOML_CLI_ARGUMENTS_INVALID', policyUsage());
+  }
+  return {
+    action,
+    policyReference,
+    ...(workflowPath === undefined ? {} : { workflowPath }),
+    ...(stepId === undefined ? {} : { stepId }),
+    ...(trustPath === undefined ? {} : { trustPath }),
+    requireSignature,
+    json,
+  };
+}
+
+async function runPolicyCommand(
+  args: readonly string[],
+  io: CliIo
+): Promise<number> {
+  try {
+    const parsed = parsePolicyCommandArguments(args);
+    const resolvedPolicy: ResolvedInfrastructurePolicyV1 =
+      await resolveInfrastructurePolicy(parsed.policyReference, {
+        ...(parsed.trustPath === undefined
+          ? {}
+          : { trustPath: parsed.trustPath }),
+        requireSignature: parsed.requireSignature,
+      });
+    const diagnostics = infrastructurePolicyDiagnostics(
+      resolvedPolicy.prepared
+    );
+    if (parsed.action === 'check') {
+      const report = {
+        profile: 'woml.infrastructure-policy-check/v1' as const,
+        status: 'valid' as const,
+        path: resolvedPolicy.path,
+        id: resolvedPolicy.prepared.bundle.id,
+        version: resolvedPolicy.prepared.bundle.version,
+        environment: resolvedPolicy.prepared.bundle.environment,
+        digest: resolvedPolicy.prepared.digest,
+        signatureStatus: resolvedPolicy.prepared.signatureStatus,
+        ruleCount: resolvedPolicy.prepared.bundle.rules.length,
+        diagnostics,
+      };
+      if (parsed.json) io.stdout(`${JSON.stringify(report, null, 2)}\n`);
+      else {
+        io.stdout(
+          `Infrastructure policy ${report.id}@${report.version} is valid.\n`
+        );
+        io.stdout(
+          `Environment: ${report.environment}\nDigest: ${report.digest}\nSignature: ${report.signatureStatus}\nRules: ${report.ruleCount}\n`
+        );
+        for (const diagnostic of diagnostics)
+          io.stdout(`Warning: ${diagnostic.message}\n`);
+      }
+      return 0;
+    }
+    const sources = await compileWorkflowInputs([parsed.workflowPath!], io);
+    const analysis = (
+      await Promise.all(
+        sources.map(async source =>
+          analyzeInfrastructurePolicySource(
+            resolvedPolicy.prepared.bundle,
+            source.workflow.workflowId,
+            await readFile(source.filePath, 'utf8'),
+            parsed.stepId
+          )
+        )
+      )
+    ).flat();
+    const report = {
+      profile: 'woml.infrastructure-policy-explanation/v1' as const,
+      policy: {
+        id: resolvedPolicy.prepared.bundle.id,
+        version: resolvedPolicy.prepared.bundle.version,
+        environment: resolvedPolicy.prepared.bundle.environment,
+        digest: resolvedPolicy.prepared.digest,
+      },
+      workflowPath: parsed.workflowPath!,
+      ...(parsed.stepId === undefined ? {} : { stepId: parsed.stepId }),
+      diagnostics,
+      operations: analysis,
+      guarantee:
+        'Static analysis is advisory. The Rust authority evaluates the final trusted descriptor and durable evidence immediately before each effect.',
+    };
+    if (parsed.json) io.stdout(`${JSON.stringify(report, null, 2)}\n`);
+    else {
+      io.stdout(
+        `Policy ${report.policy.id}@${report.policy.version} · ${report.policy.environment}\n`
+      );
+      if (analysis.length === 0)
+        io.stdout(
+          'No statically identifiable protected service calls were found.\n'
+        );
+      for (const operation of analysis) {
+        io.stdout(
+          `${operation.workflowId} · ${operation.capability}.${operation.operation} · ${operation.status.replaceAll('_', ' ')}\n  ${operation.reason}\n`
+        );
+      }
+      io.stdout(`${report.guarantee}\n`);
+    }
+    return 0;
+  } catch (error) {
+    if (error instanceof CliInputError && error.message === policyUsage()) {
+      io.stderr(`${policyUsage()}\n`);
+      return 2;
+    }
+    io.stderr(`${formatError(error)}\n`);
+    return error instanceof CliInputError ? 2 : 1;
+  }
 }
 
 async function runTypesCommand(
@@ -6750,6 +7181,7 @@ async function runCliUnprofiled(
     'run',
     'test',
     'check',
+    'policy',
     'types',
     'secrets',
     'emit',
@@ -6798,6 +7230,10 @@ async function runCliUnprofiled(
 
   if (args[0] === 'check') {
     return await runCheckCommand(args, io, dependencies);
+  }
+
+  if (args[0] === 'policy') {
+    return await runPolicyCommand(args, io);
   }
 
   if (args[0] === 'types') {
@@ -7182,38 +7618,40 @@ async function runCliUnprofiled(
                 : { correction: correctionInspection }),
             }
           : correctionInspection !== undefined
-          ? {
-              ...result,
-              profile: 'woml.run-inspection/v10' as const,
-              artifacts: artifactInspection,
-              ...(waitInspection.waits.length === 0
-                ? {}
-                : { durableWaits: waitInspection }),
-              ...(lockInspection.length === 0 ? {} : { locks: lockInspection }),
-              correction: correctionInspection,
-            }
-          : lockInspection.length > 0
             ? {
                 ...result,
-                profile: 'woml.run-inspection/v9' as const,
+                profile: 'woml.run-inspection/v10' as const,
                 artifacts: artifactInspection,
                 ...(waitInspection.waits.length === 0
                   ? {}
                   : { durableWaits: waitInspection }),
-                locks: lockInspection,
+                ...(lockInspection.length === 0
+                  ? {}
+                  : { locks: lockInspection }),
+                correction: correctionInspection,
               }
-            : waitInspection.waits.length === 0
+            : lockInspection.length > 0
               ? {
                   ...result,
-                  profile: 'woml.run-inspection/v7' as const,
+                  profile: 'woml.run-inspection/v9' as const,
                   artifacts: artifactInspection,
+                  ...(waitInspection.waits.length === 0
+                    ? {}
+                    : { durableWaits: waitInspection }),
+                  locks: lockInspection,
                 }
-              : {
-                  ...result,
-                  profile: 'woml.run-inspection/v8' as const,
-                  artifacts: artifactInspection,
-                  durableWaits: waitInspection,
-                };
+              : waitInspection.waits.length === 0
+                ? {
+                    ...result,
+                    profile: 'woml.run-inspection/v7' as const,
+                    artifacts: artifactInspection,
+                  }
+                : {
+                    ...result,
+                    profile: 'woml.run-inspection/v8' as const,
+                    artifacts: artifactInspection,
+                    durableWaits: waitInspection,
+                  };
       io.stdout(
         get.json
           ? `${JSON.stringify(publicResult)}\n`
@@ -7386,6 +7824,16 @@ async function runCliUnprofiled(
       io,
       sources.flatMap(source => source.migrationDiagnostics)
     );
+    const activeInfrastructurePolicy =
+      runArguments.runtimeCapabilities?.infrastructurePolicy;
+    if (activeInfrastructurePolicy !== undefined && !runArguments.json) {
+      io.stdout(
+        `Policy ${activeInfrastructurePolicy.policy.id}@${activeInfrastructurePolicy.policy.version} · ${activeInfrastructurePolicy.policy.environment}` +
+          (runArguments.runtimeCapabilities?.emergencyDeny === undefined
+            ? '\n'
+            : ` · emergency deny ${runArguments.runtimeCapabilities.emergencyDeny.policy.id}@${runArguments.runtimeCapabilities.emergencyDeny.policy.version}\n`)
+      );
+    }
     if (runArguments.command === 'test') {
       if ((await stat(filePath)).isDirectory()) {
         throw new CliInputError(

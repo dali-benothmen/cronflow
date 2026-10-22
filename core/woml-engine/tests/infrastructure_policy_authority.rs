@@ -9,14 +9,14 @@ use serde_json::{json, Map, Value};
 use tokio::sync::Mutex;
 use woml_engine::event::StepAttemptStartedData;
 use woml_engine::{
-  create_online_backup, derive_operation_key, prepare_infrastructure_policy,
-  prepare_restored_store, step_effect_idempotency_key, CapabilityCallIdentity,
-  CapabilityCallLimits, CapabilityCallRequest, CapabilityCallResult, CapabilityCancellationToken,
-  CapabilityDescriptor, CapabilityEffect, CapabilityFailure, CapabilityFailureKind,
-  CapabilityHandler, CapabilityRegistry, CompiledWorkflowDefinition, DurableCapabilityAuthority,
-  DurableEventStore, InfrastructurePolicyBundleV1, InfrastructurePolicyTrustV1,
-  ManagedLocksService, NativeFetchInvocationIdentity, NativeFetchObservation, RunEventPayload,
-  RunStartedData,
+  create_online_backup, derive_operation_key, prepare_emergency_deny_overlay,
+  prepare_infrastructure_policy, prepare_restored_store, step_effect_idempotency_key,
+  CapabilityCallIdentity, CapabilityCallLimits, CapabilityCallRequest, CapabilityCallResult,
+  CapabilityCancellationToken, CapabilityDescriptor, CapabilityEffect, CapabilityFailure,
+  CapabilityFailureKind, CapabilityHandler, CapabilityRegistry, CompiledWorkflowDefinition,
+  DurableCapabilityAuthority, DurableEventStore, InfrastructurePolicyBundleV1,
+  InfrastructurePolicyTrustV1, ManagedLocksService, NativeFetchInvocationIdentity,
+  NativeFetchObservation, RunEventPayload, RunStartedData,
 };
 
 const MODEL: &str = include_str!("../../../woml/tests/fixtures/services-bindings.compiled.v8.json");
@@ -178,6 +178,28 @@ fn policy_requiring_verified_artifact() -> woml_engine::PreparedInfrastructurePo
   prepare_infrastructure_policy(bundle, &InfrastructurePolicyTrustV1::default()).unwrap()
 }
 
+fn emergency_deny() -> woml_engine::PreparedInfrastructurePolicyV1 {
+  let bundle: InfrastructurePolicyBundleV1 = serde_json::from_value(json!({
+    "contract": "woml.infrastructure-policy",
+    "contractVersion": 1,
+    "id": "incident-stop",
+    "version": "1",
+    "environment": "production",
+    "defaults": {
+      "read": "allow",
+      "idempotent-write": "allow",
+      "unsafe-write": "allow"
+    },
+    "rules": [{
+      "id": "stop-process",
+      "match": { "capabilities": ["process"], "operations": ["run"] },
+      "decision": "deny"
+    }]
+  }))
+  .unwrap();
+  prepare_emergency_deny_overlay(bundle, &InfrastructurePolicyTrustV1::default()).unwrap()
+}
+
 fn request(run_id: &str, invocation_id: &str, call_id: &str) -> CapabilityCallRequest {
   let step_key = step_effect_idempotency_key(run_id, DEFINITION_HASH, "loadCustomer");
   let operation_name = format!("process.run.{call_id}");
@@ -220,6 +242,91 @@ async fn authority(
     true,
   );
   (store, authority)
+}
+
+async fn authority_with_emergency_deny(
+  store: DurableEventStore,
+  handler: CountingProcessHandler,
+) -> (Arc<Mutex<DurableEventStore>>, DurableCapabilityAuthority) {
+  let store = Arc::new(Mutex::new(store));
+  let registry = Arc::new(CapabilityRegistry::default());
+  registry.register(Arc::new(handler)).unwrap();
+  let authority = DurableCapabilityAuthority::new_with_infrastructure_policy_authorities(
+    registry,
+    Arc::clone(&store),
+    Arc::new(ManagedLocksService::default()),
+    true,
+    None,
+    Some(Arc::new(emergency_deny())),
+  );
+  (store, authority)
+}
+
+#[test]
+fn an_emergency_overlay_is_structurally_unable_to_allow() {
+  let mut bundle = emergency_deny().bundle;
+  bundle.rules[0].decision = woml_engine::InfrastructurePolicyDecisionV1::Allow;
+  assert!(
+    prepare_emergency_deny_overlay(bundle, &InfrastructurePolicyTrustV1::default())
+      .unwrap_err()
+      .to_string()
+      .contains("deny rules")
+  );
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn emergency_deny_stops_a_new_effect_without_mutating_the_admitted_policy() {
+  let calls = Arc::new(AtomicUsize::new(0));
+  let mut store = active_store("run-policy-emergency", "inv-policy-emergency");
+  let admitted = policy("allow", "1");
+  store
+    .bind_infrastructure_policy("run-policy-emergency", &admitted, Utc::now())
+    .unwrap();
+  let (store, authority) = authority_with_emergency_deny(
+    store,
+    CountingProcessHandler {
+      calls: Arc::clone(&calls),
+      fail_after_dispatch: false,
+    },
+  )
+  .await;
+  let result = authority
+    .execute(
+      request(
+        "run-policy-emergency",
+        "inv-policy-emergency",
+        "call-policy-emergency",
+      ),
+      CapabilityCancellationToken::default(),
+    )
+    .await
+    .unwrap();
+  assert!(matches!(
+    result,
+    CapabilityCallResult::Failed(ref failed) if failed.error.code == "WOML_POLICY_DENIED"
+  ));
+  assert_eq!(calls.load(Ordering::SeqCst), 0);
+  let store = store.lock().await;
+  assert_eq!(
+    store
+      .infrastructure_policy_binding("run-policy-emergency")
+      .unwrap()
+      .unwrap()
+      .policy_digest,
+    admitted.digest
+  );
+  let events = store.events("run-policy-emergency").unwrap();
+  let decision = events.iter().find_map(|event| match &event.payload {
+    RunEventPayload::InfrastructurePolicyDecisionRecorded(data) => Some(&data.decision),
+    _ => None,
+  });
+  let overlay = decision
+    .expect("durable policy decision")
+    .emergency_deny
+    .as_ref()
+    .unwrap();
+  assert_eq!(overlay.policy_id, "incident-stop");
+  assert_eq!(overlay.matched_rule_ids, vec!["stop-process"]);
 }
 
 #[tokio::test(flavor = "current_thread")]

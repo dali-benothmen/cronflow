@@ -283,6 +283,7 @@ pub struct RuntimeExecutionOptions {
   managed_artifact_store: Option<Arc<crate::ManagedArtifactStore>>,
   artifact_policy: Option<Arc<crate::artifacts::PreparedArtifactPolicy>>,
   infrastructure_policy: Option<Arc<crate::PreparedInfrastructurePolicyV1>>,
+  emergency_deny_overlay: Option<Arc<crate::PreparedInfrastructurePolicyV1>>,
   infrastructure_policy_required: bool,
   reviewer_authority: Option<Arc<ReviewerDirectoryAuthorityV1>>,
   policy_execution: Option<Arc<PolicyExecutionCoordinator>>,
@@ -359,6 +360,13 @@ impl std::fmt::Debug for RuntimeExecutionOptions {
       .field(
         "infrastructure_policy_required",
         &self.infrastructure_policy_required,
+      )
+      .field(
+        "emergency_deny_overlay_digest",
+        &self
+          .emergency_deny_overlay
+          .as_ref()
+          .map(|policy| &policy.digest),
       )
       .field(
         "shared_script_hosts",
@@ -505,6 +513,7 @@ impl RuntimeExecutionOptions {
       managed_artifact_store: None,
       artifact_policy: None,
       infrastructure_policy: None,
+      emergency_deny_overlay: None,
       infrastructure_policy_required: false,
       reviewer_authority: None,
       policy_execution: None,
@@ -559,6 +568,15 @@ impl RuntimeExecutionOptions {
   }
 
   pub fn require_infrastructure_policy(mut self) -> Self {
+    self.infrastructure_policy_required = true;
+    self
+  }
+
+  pub fn with_emergency_deny_overlay(
+    mut self,
+    policy: crate::PreparedInfrastructurePolicyV1,
+  ) -> Self {
+    self.emergency_deny_overlay = Some(Arc::new(policy));
     self.infrastructure_policy_required = true;
     self
   }
@@ -2101,11 +2119,13 @@ fn attach_durable_capability_authority(
     .clone()
     .unwrap_or_else(|| Arc::new(crate::ManagedLocksService::default()));
   options.capability_authority = Some(Arc::new(
-    DurableCapabilityAuthority::new_with_locks_and_infrastructure_policy(
+    DurableCapabilityAuthority::new_with_infrastructure_policy_authorities(
       Arc::clone(&options.capability_registry),
       Arc::new(tokio::sync::Mutex::new(store)),
       locks,
       options.infrastructure_policy_required || options.infrastructure_policy.is_some(),
+      options.managed_artifact_store.clone(),
+      options.emergency_deny_overlay.clone(),
     ),
   ));
   Ok(options)

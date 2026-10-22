@@ -2763,6 +2763,17 @@ impl RunEvent {
           || data.decision.matched_rule_ids.len() > 1024
           || data.decision.requirements.len() > 4096
           || data.decision.explanation.len() > 1024
+          || data
+            .decision
+            .emergency_deny
+            .as_ref()
+            .is_some_and(|overlay| {
+              overlay.policy_id.is_empty()
+                || overlay.policy_version.is_empty()
+                || !valid_sha256(&overlay.policy_digest)
+                || overlay.matched_rule_ids.is_empty()
+                || overlay.matched_rule_ids.len() > 1024
+            })
           || serde_json::to_vec(&data.decision).map_or(true, |encoded| encoded.len() > 262_144)
         {
           return Err(EventValidationError::Invalid(

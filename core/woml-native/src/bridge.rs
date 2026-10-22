@@ -1,6 +1,6 @@
 // WOML-only N-API boundary for the Rust execution path.
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::{mpsc, Arc, Mutex, OnceLock};
@@ -18,23 +18,24 @@ use woml_engine::{
   execute_workflow_durable, execute_workflow_durable_outcome, export_artifact,
   export_artifact_backup, inspect_artifact, inspect_backup_store, inspect_run_artifacts,
   last_retention_result, maintain_artifacts, observe_artifacts, plan_retention,
-  prepare_restored_store, recent_run_presentations_from_store_v1, record_verified_backup,
-  recover_durable_runs, resolve_human_approval_durable, resolve_rich_approval_durable,
-  restore_artifact_backup, resume_workflow_durable, resume_workflow_durable_any_outcome,
-  resume_workflow_durable_outcome, run_notification_provider_journey_with_custom,
-  run_presentation_from_store_v1, settle_approval_timeout_durable, verify_artifact_backup,
-  ApprovalDecision, ApprovalDecisionOutcome, ArtifactPolicyV1, ArtifactRuntimeMode, BackupError,
+  prepare_emergency_deny_overlay, prepare_infrastructure_policy, prepare_restored_store,
+  recent_run_presentations_from_store_v1, record_verified_backup, recover_durable_runs,
+  resolve_human_approval_durable, resolve_rich_approval_durable, restore_artifact_backup,
+  resume_workflow_durable, resume_workflow_durable_any_outcome, resume_workflow_durable_outcome,
+  run_notification_provider_journey_with_custom, run_presentation_from_store_v1,
+  settle_approval_timeout_durable, verify_artifact_backup, ApprovalDecision,
+  ApprovalDecisionOutcome, ArtifactPolicyV1, ArtifactRuntimeMode, BackupError,
   CompiledReusableInvocation, CompiledWorkflowDefinition, CorrectionRecoveryRequestV1,
   CustomNotificationJourneyOptions, CustomProviderScriptArtifact, DurableEventStore,
   DurableStoreError, ExternalSignalAdmissionOutcome, ExternalSignalAdmissionRequest,
-  ExternalTriggerAdmissionCommand, IntervalProgress, IntervalProgressReporter, LifecycleProgress,
-  NotificationHostClientError, NotificationHostProcessOptions, NotificationJourneyDiagnostics,
-  NotificationJourneyError, ParallelFailurePolicy, ProcessPolicyV1, ProcessRuntimeMode,
-  RetentionError, RetentionPolicyV1, ReviewerDirectoryAuthorityV1, ReviewerDirectoryV1,
-  ReviewerIdentityClaimV1, ReviewerProviderV1, RichApprovalDecisionStatus,
-  RichApprovalIdentityDecision, RunFailure, RunPresentationError, RunStatus, RuntimeExecutionError,
-  RuntimeExecutionOptions, RuntimeModuleArtifact, RuntimePolicyProgress,
-  RuntimePolicyProgressReporter, ScheduleProgress, ScheduleProgressReporter,
+  ExternalTriggerAdmissionCommand, InfrastructurePolicyBundleV1, InfrastructurePolicyTrustV1,
+  IntervalProgress, IntervalProgressReporter, LifecycleProgress, NotificationHostClientError,
+  NotificationHostProcessOptions, NotificationJourneyDiagnostics, NotificationJourneyError,
+  ParallelFailurePolicy, ProcessPolicyV1, ProcessRuntimeMode, RetentionError, RetentionPolicyV1,
+  ReviewerDirectoryAuthorityV1, ReviewerDirectoryV1, ReviewerIdentityClaimV1, ReviewerProviderV1,
+  RichApprovalDecisionStatus, RichApprovalIdentityDecision, RunFailure, RunPresentationError,
+  RunStatus, RuntimeExecutionError, RuntimeExecutionOptions, RuntimeModuleArtifact,
+  RuntimePolicyProgress, RuntimePolicyProgressReporter, ScheduleProgress, ScheduleProgressReporter,
   ScriptHostProcessOptions, SystemEngineClock, TimerWaitSettlement, TriggerAdmissionRequest,
   TriggerProgress, TriggerProgressReporter, WebhookDefinitionRegistration, WebhookRuntimeError,
   WomlWebhookServer, WomlWebhookServerConfig, WorkflowCallProgress, WorkflowCallProgressReporter,
@@ -817,6 +818,41 @@ struct NativeRuntimeCapabilities {
   artifacts: Option<NativeArtifactRuntime>,
   #[serde(default)]
   reviewers: Option<NativeReviewerRuntime>,
+  #[serde(default)]
+  infrastructure_policy: Option<NativeInfrastructurePolicyRuntime>,
+  #[serde(default)]
+  emergency_deny: Option<NativeInfrastructurePolicyRuntime>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct NativeInfrastructurePolicyTrust {
+  #[serde(default)]
+  keys: BTreeMap<String, String>,
+  #[serde(default)]
+  revoked_key_ids: BTreeSet<String>,
+  #[serde(default)]
+  require_signature: bool,
+}
+
+impl From<NativeInfrastructurePolicyTrust> for InfrastructurePolicyTrustV1 {
+  fn from(value: NativeInfrastructurePolicyTrust) -> Self {
+    Self {
+      keys: value.keys,
+      revoked_key_ids: value.revoked_key_ids,
+      require_signature: value.require_signature,
+    }
+  }
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct NativeInfrastructurePolicyRuntime {
+  policy: InfrastructurePolicyBundleV1,
+  #[serde(default)]
+  trust: NativeInfrastructurePolicyTrust,
+  #[serde(default)]
+  required: bool,
 }
 
 #[derive(Debug, Deserialize)]
@@ -861,10 +897,39 @@ fn apply_runtime_capabilities(
       .map_err(|error| napi::Error::from_reason(error.to_string())),
     None => Ok(options),
   }?;
-  match capabilities.reviewers {
+  let options = match capabilities.reviewers {
     Some(reviewers) => ReviewerDirectoryAuthorityV1::from_document(reviewers.directory)
       .map(|authority| options.with_reviewer_directory(Arc::new(authority)))
       .map_err(|error| napi::Error::from_reason(format!("{}: {error}", error.code()))),
+    None => Ok(options),
+  }?;
+  let mut base_policy_environment = None;
+  let options = if let Some(policy) = capabilities.infrastructure_policy {
+    let required = policy.required;
+    let prepared = prepare_infrastructure_policy(policy.policy, &policy.trust.into())
+      .map_err(|error| napi::Error::from_reason(format!("{}: {error}", error.code())))?;
+    base_policy_environment = Some(prepared.bundle.environment.clone());
+    let options = options.with_infrastructure_policy(prepared);
+    if required {
+      options.require_infrastructure_policy()
+    } else {
+      options
+    }
+  } else {
+    options
+  };
+  match capabilities.emergency_deny {
+    Some(policy) => {
+      let prepared = prepare_emergency_deny_overlay(policy.policy, &policy.trust.into())
+        .map_err(|error| napi::Error::from_reason(format!("{}: {error}", error.code())))?;
+      if base_policy_environment.as_deref() != Some(prepared.bundle.environment.as_str()) {
+        return Err(napi::Error::from_reason(
+          "WOML_POLICY_INVALID: an emergency deny overlay requires a base policy in the same environment."
+            .to_string(),
+        ));
+      }
+      Ok(options.with_emergency_deny_overlay(prepared))
+    }
     None => Ok(options),
   }
 }
@@ -2712,7 +2777,7 @@ pub fn inspect_woml_run_v2(event_store_path: String, run_id: String) -> napi::Re
   let workflow = store
     .definition(&binding.definition_hash)
     .map_err(|error| native_run_management_error("WOML_RUN_INSPECTION_FAILED", error))?;
-  let inspection = if workflow.schema_version >= 20 {
+  let mut inspection = if workflow.schema_version >= 20 {
     serde_json::to_value(
       store
         .inspect_run_v11(&run_id)
@@ -2752,6 +2817,34 @@ pub fn inspect_woml_run_v2(event_store_path: String, run_id: String) -> napi::Re
   .map_err(|error| {
     napi::Error::from_reason(format!("Could not encode WOML run inspection: {error}"))
   })?;
+  if let Some(policy) = store
+    .infrastructure_policy_binding(&run_id)
+    .map_err(|error| native_run_management_error("WOML_RUN_INSPECTION_FAILED", error))?
+  {
+    let projection = store
+      .projection(&run_id)
+      .map_err(|error| native_run_management_error("WOML_RUN_INSPECTION_FAILED", error))?;
+    let total_decisions = projection.infrastructure_policy_decisions.len();
+    let decisions = projection
+      .infrastructure_policy_decisions
+      .iter()
+      .rev()
+      .take(100)
+      .map(|event| event.decision.clone())
+      .collect::<Vec<_>>();
+    if let Some(object) = inspection.as_object_mut() {
+      object.insert(
+        "infrastructurePolicy".to_string(),
+        serde_json::json!({
+          "profile": "woml.infrastructure-policy-run-inspection/v1",
+          "binding": policy,
+          "decisions": decisions,
+          "totalDecisions": total_decisions,
+          "truncated": total_decisions > 100,
+        }),
+      );
+    }
+  }
   serde_json::to_string(&inspection).map_err(|error| {
     napi::Error::from_reason(format!("Could not encode WOML run inspection: {error}"))
   })

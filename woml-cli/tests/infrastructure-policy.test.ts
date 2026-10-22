@@ -1,4 +1,5 @@
-import { readFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, symlink, writeFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
 import { resolve } from 'node:path';
 
 import { describe, expect, test } from 'bun:test';
@@ -11,7 +12,13 @@ import {
   canonicalizeInfrastructurePolicy,
   parseInfrastructurePolicy,
   prepareInfrastructurePolicy,
+  resolveInfrastructurePolicy,
+  validateEmergencyDenyOverlay,
 } from '../src/infrastructure-policy';
+import {
+  analyzeInfrastructurePolicySource,
+  infrastructurePolicyDiagnostics,
+} from '../src/infrastructure-policy-analysis';
 
 const repositoryRoot = resolve(import.meta.dir, '../..');
 const fixtureRoot = resolve(
@@ -24,16 +31,91 @@ async function json(path: string): Promise<unknown> {
 }
 
 describe('Infrastructure Policy v1 foundation', () => {
+  test('resolves project policy names while rejecting extensions and symlink escapes', async () => {
+    const root = await mkdtemp(resolve(tmpdir(), 'woml-policy-resolution-'));
+    const outside = await mkdtemp(resolve(tmpdir(), 'woml-policy-outside-'));
+    await mkdir(resolve(root, '.woml/policies'), { recursive: true });
+    const source = await readFile(
+      resolve(fixtureRoot, 'production.unsigned.v1.json'),
+      'utf8'
+    );
+    await writeFile(resolve(root, '.woml/policies/production.json'), source);
+    await writeFile(resolve(outside, 'escaped.json'), source);
+    expect(
+      (await resolveInfrastructurePolicy('production', { projectRoot: root }))
+        .prepared.bundle.id
+    ).toBe('production');
+    await symlink(
+      resolve(outside, 'escaped.json'),
+      resolve(root, '.woml/policies/escaped.json')
+    );
+    await expect(
+      resolveInfrastructurePolicy('escaped', { projectRoot: root })
+    ).rejects.toMatchObject({
+      code: 'WOML_POLICY_INVALID',
+    });
+    await expect(
+      resolveInfrastructurePolicy('production.yaml', { projectRoot: root })
+    ).rejects.toMatchObject({
+      code: 'WOML_POLICY_INVALID',
+    });
+  });
+
+  test('keeps static explanations conservative and rejects an allowing emergency overlay', async () => {
+    const prepared = parseInfrastructurePolicy(
+      await readFile(
+        resolve(fixtureRoot, 'production.unsigned.v1.json'),
+        'utf8'
+      )
+    );
+    const analysis = analyzeInfrastructurePolicySource(
+      prepared.bundle,
+      'deploy',
+      '<script>await services.process.run({ executable: tool, args })</script>'
+    );
+    expect(analysis).toHaveLength(1);
+    expect(analysis[0]?.status).not.toBe('allowed');
+    expect(infrastructurePolicyDiagnostics(prepared)).toEqual([]);
+
+    const overlay = prepareInfrastructurePolicy({
+      ...prepared.bundle,
+      defaults: {
+        read: 'allow',
+        'idempotent-write': 'allow',
+        'unsafe-write': 'allow',
+      },
+      rules: [
+        {
+          id: 'bad-allow',
+          match: { capabilities: ['process'] },
+          decision: 'allow',
+        },
+      ],
+    });
+    expect(() => validateEmergencyDenyOverlay(overlay)).toThrow(
+      InfrastructurePolicyError
+    );
+  });
+
   test('validates the frozen unsigned and signed fixtures against JSON Schema', async () => {
     const schema = (await json(
-      resolve(repositoryRoot, 'docs/schemas/infrastructure-policy.v1.schema.json')
+      resolve(
+        repositoryRoot,
+        'docs/schemas/infrastructure-policy.v1.schema.json'
+      )
     )) as AnySchema;
     const ajv = new Ajv2020({ allErrors: true, strict: false });
     addFormats(ajv);
     const validate = ajv.compile(schema);
-    for (const name of ['production.unsigned.v1.json', 'production.signed.v1.json']) {
+    for (const name of [
+      'production.unsigned.v1.json',
+      'production.signed.v1.json',
+    ]) {
       const fixture = await json(resolve(fixtureRoot, name));
-      expect(validate(fixture), `${name}: ${ajv.errorsText(validate.errors)}`).toBe(true);
+      expect(
+        validate(fixture),
+        `${name}: ${ajv.errorsText(validate.errors)}`
+      ).toBe(true);
     }
   });
 
@@ -136,9 +218,9 @@ describe('Infrastructure Policy v1 foundation', () => {
     );
 
     const base = JSON.parse(source) as Record<string, unknown>;
-    expect(() => prepareInfrastructurePolicy({ ...base, surprise: true })).toThrow(
-      InfrastructurePolicyError
-    );
+    expect(() =>
+      prepareInfrastructurePolicy({ ...base, surprise: true })
+    ).toThrow(InfrastructurePolicyError);
     expect(() =>
       prepareInfrastructurePolicy({ ...base, contractVersion: 2 })
     ).toThrow(InfrastructurePolicyError);
@@ -154,9 +236,9 @@ describe('Infrastructure Policy v1 foundation', () => {
       ...emptySet[0],
       match: { capabilities: [], effects: ['unsafe-write'] },
     };
-    expect(() => prepareInfrastructurePolicy({ ...base, rules: emptySet })).toThrow(
-      InfrastructurePolicyError
-    );
+    expect(() =>
+      prepareInfrastructurePolicy({ ...base, rules: emptySet })
+    ).toThrow(InfrastructurePolicyError);
 
     const denyWithRequirements = structuredClone(base.rules) as Record<
       string,
@@ -174,24 +256,28 @@ describe('Infrastructure Policy v1 foundation', () => {
       InfrastructurePolicyError
     );
     expect(() =>
-      parseInfrastructurePolicy(source.replace(
-        'Allow only a reviewed Terraform apply while the deployment lock is valid.',
-        String.fromCharCode(0xd800)
-      ))
+      parseInfrastructurePolicy(
+        source.replace(
+          'Allow only a reviewed Terraform apply while the deployment lock is valid.',
+          String.fromCharCode(0xd800)
+        )
+      )
     ).toThrow(InfrastructurePolicyError);
-    expect(() => parseInfrastructurePolicy(`${'['.repeat(18)}null${']'.repeat(18)}`)).toThrow(
-      InfrastructurePolicyError
-    );
-    expect(() => parseInfrastructurePolicy(' '.repeat(1024 * 1024 + 1))).toThrow(
-      InfrastructurePolicyError
-    );
+    expect(() =>
+      parseInfrastructurePolicy(`${'['.repeat(18)}null${']'.repeat(18)}`)
+    ).toThrow(InfrastructurePolicyError);
+    expect(() =>
+      parseInfrastructurePolicy(' '.repeat(1024 * 1024 + 1))
+    ).toThrow(InfrastructurePolicyError);
   });
 
   test('keeps the IP0 coverage and threat model explicit and machine-reviewable', async () => {
     const coverage = (await json(resolve(fixtureRoot, 'coverage.v1.json'))) as {
       paths: { path: string; posture: string }[];
     };
-    const threatModel = (await json(resolve(fixtureRoot, 'threat-model.v1.json'))) as {
+    const threatModel = (await json(
+      resolve(fixtureRoot, 'threat-model.v1.json')
+    )) as {
       trustedAuthorities: string[];
       untrustedSources: string[];
       invariants: string[];

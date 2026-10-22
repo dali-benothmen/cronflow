@@ -283,6 +283,35 @@ pub fn prepare_infrastructure_policy(
   })
 }
 
+/// Prepares an emergency overlay after proving that it can only remove
+/// authority. A non-match is neutral and a matching rule can only deny.
+pub fn prepare_emergency_deny_overlay(
+  bundle: InfrastructurePolicyBundleV1,
+  trust: &InfrastructurePolicyTrustV1,
+) -> Result<PreparedInfrastructurePolicyV1, InfrastructurePolicyError> {
+  let prepared = prepare_infrastructure_policy(bundle, trust)?;
+  let defaults = &prepared.bundle.defaults;
+  if defaults.read != InfrastructurePolicyDefaultV1::Allow
+    || defaults.idempotent_write != InfrastructurePolicyDefaultV1::Allow
+    || defaults.unsafe_write != InfrastructurePolicyDefaultV1::Allow
+  {
+    return Err(invalid(
+      "an emergency deny overlay must use allow for every default",
+    ));
+  }
+  if prepared
+    .bundle
+    .rules
+    .iter()
+    .any(|rule| rule.decision != InfrastructurePolicyDecisionV1::Deny || rule.requires.is_some())
+  {
+    return Err(invalid(
+      "an emergency deny overlay may contain only deny rules without requirements",
+    ));
+  }
+  Ok(prepared)
+}
+
 fn validate_bundle(bundle: &InfrastructurePolicyBundleV1) -> Result<(), InfrastructurePolicyError> {
   if bundle.contract != INFRASTRUCTURE_POLICY_CONTRACT
     || bundle.contract_version != INFRASTRUCTURE_POLICY_CONTRACT_VERSION

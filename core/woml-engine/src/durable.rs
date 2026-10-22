@@ -1,5 +1,5 @@
 use std::cell::RefCell;
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::path::Path;
 use std::time::Duration;
 
@@ -1169,6 +1169,38 @@ pub struct InfrastructurePolicyRunBindingV1 {
   #[serde(skip_serializing_if = "Option::is_none")]
   pub signing_key_id: Option<String>,
   pub admitted_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct InfrastructurePolicyApprovalEvidenceV1 {
+  pub request_id: String,
+  pub review_digest: String,
+  pub principal_id: String,
+  pub roles: BTreeSet<String>,
+  pub decided_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct InfrastructurePolicyArtifactEvidenceV1 {
+  pub artifact_id: String,
+  pub sha256: String,
+  pub review_digest: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct InfrastructurePolicyLockEvidenceV1 {
+  pub key: String,
+  pub lease_id: String,
+  pub fencing_token: String,
+  pub acquired_at: DateTime<Utc>,
+  pub expires_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub(crate) struct InfrastructurePolicyEvidenceSnapshotV1 {
+  pub approvals: Vec<InfrastructurePolicyApprovalEvidenceV1>,
+  pub artifacts: Vec<InfrastructurePolicyArtifactEvidenceV1>,
+  pub locks: Vec<InfrastructurePolicyLockEvidenceV1>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -4102,6 +4134,101 @@ impl DurableEventStore {
     };
     prepared.signing_key_id = key_id;
     Ok(Some(prepared))
+  }
+
+  pub(crate) fn infrastructure_policy_evidence_snapshot(
+    &self,
+    run_id: &str,
+    now: DateTime<Utc>,
+  ) -> Result<InfrastructurePolicyEvidenceSnapshotV1, DurableStoreError> {
+    ensure_run_exists(&self.connection, run_id)?;
+    let mut approvals_statement = self.connection.prepare(
+      "SELECT reviews.request_id, reviews.review_digest, decisions.principal_id,
+              decisions.roles_json, decisions.decided_at
+       FROM woml_approval_reviews AS reviews
+       JOIN woml_approval_reviewer_decisions AS decisions
+         ON decisions.run_id = reviews.run_id AND decisions.request_id = reviews.request_id
+       WHERE reviews.run_id = ?1 AND reviews.status = 'approved'
+         AND decisions.decision = 'approved'
+       ORDER BY decisions.decided_at, decisions.principal_id",
+    )?;
+    let approvals = approvals_statement
+      .query_map([run_id], |row| {
+        Ok((
+          row.get::<_, String>(0)?,
+          row.get::<_, String>(1)?,
+          row.get::<_, String>(2)?,
+          row.get::<_, String>(3)?,
+          row.get::<_, String>(4)?,
+        ))
+      })?
+      .map(|row| {
+        let (request_id, review_digest, principal_id, roles_json, decided_at) = row?;
+        Ok(InfrastructurePolicyApprovalEvidenceV1 {
+          request_id,
+          review_digest,
+          principal_id,
+          roles: serde_json::from_str::<Vec<String>>(&roles_json)?
+            .into_iter()
+            .collect(),
+          decided_at: parse_timestamp(&decided_at)?,
+        })
+      })
+      .collect::<Result<Vec<_>, DurableStoreError>>()?;
+
+    let mut artifacts_statement = self.connection.prepare(
+      "SELECT pins.artifact_id, pins.artifact_sha256, reviews.review_digest
+       FROM woml_approval_artifact_pins AS pins
+       JOIN woml_approval_reviews AS reviews
+         ON reviews.run_id = pins.run_id AND reviews.request_id = pins.request_id
+       WHERE reviews.run_id = ?1 AND reviews.status = 'approved'
+       ORDER BY pins.artifact_id, reviews.review_digest",
+    )?;
+    let artifacts = artifacts_statement
+      .query_map([run_id], |row| {
+        Ok(InfrastructurePolicyArtifactEvidenceV1 {
+          artifact_id: row.get(0)?,
+          sha256: row.get(1)?,
+          review_digest: row.get(2)?,
+        })
+      })?
+      .collect::<Result<Vec<_>, _>>()?;
+
+    let mut locks_statement = self.connection.prepare(
+      "SELECT key, owner_lease_id, CAST(owner_fencing_token AS TEXT), acquired_at, expires_at
+       FROM woml_lock_resources
+       WHERE owner_run_id = ?1 AND owner_lease_id IS NOT NULL
+         AND owner_fencing_token IS NOT NULL AND acquired_at IS NOT NULL
+         AND expires_at IS NOT NULL AND expires_at > ?2
+       ORDER BY key",
+    )?;
+    let locks = locks_statement
+      .query_map(params![run_id, now.to_rfc3339()], |row| {
+        Ok((
+          row.get::<_, String>(0)?,
+          row.get::<_, String>(1)?,
+          row.get::<_, String>(2)?,
+          row.get::<_, String>(3)?,
+          row.get::<_, String>(4)?,
+        ))
+      })?
+      .map(|row| {
+        let (key, lease_id, fencing_token, acquired_at, expires_at) = row?;
+        Ok(InfrastructurePolicyLockEvidenceV1 {
+          key,
+          lease_id,
+          fencing_token,
+          acquired_at: parse_timestamp(&acquired_at)?,
+          expires_at: parse_timestamp(&expires_at)?,
+        })
+      })
+      .collect::<Result<Vec<_>, DurableStoreError>>()?;
+
+    Ok(InfrastructurePolicyEvidenceSnapshotV1 {
+      approvals,
+      artifacts,
+      locks,
+    })
   }
 
   fn initialize(mut connection: Connection) -> Result<Self, DurableStoreError> {

@@ -28,13 +28,15 @@ use uuid::Uuid;
 
 use crate::{
   infrastructure_policy_runtime::{
-    adapt_infrastructure_policy_metadata, InfrastructurePolicyDecisionOutcomeV1,
-    InfrastructurePolicyDescriptorContextV1, InfrastructurePolicyEvaluatorCacheV1,
+    adapt_infrastructure_policy_metadata, apply_emergency_deny_overlay,
+    InfrastructurePolicyDecisionOutcomeV1, InfrastructurePolicyDescriptorContextV1,
+    InfrastructurePolicyEvaluatorCacheV1, InfrastructurePolicyEvidenceAuthorityV1,
+    InfrastructurePolicyEvidenceKindV1, InfrastructurePolicyEvidenceReferenceV1,
     InfrastructurePolicyOperationDescriptorV1, InfrastructurePolicyOperationMetadataV1,
   },
   DurableEventStore, DurableStoreError, InfrastructurePolicyDecisionRecordedData,
   InfrastructurePolicyExecutionModeV1, OperationExecutionMode, OperationFailedData,
-  OperationStartedData, OperationSucceededData, RunEventPayload,
+  OperationStartedData, OperationSucceededData, PreparedInfrastructurePolicyV1, RunEventPayload,
 };
 
 pub const CAPABILITY_CALL_CONTRACT: &str = "woml.capability-call";
@@ -703,12 +705,104 @@ fn infrastructure_policy_execution_mode(
   InfrastructurePolicyExecutionModeV1::Normal
 }
 
+fn infrastructure_policy_evidence(
+  store: &DurableEventStore,
+  artifact_store: Option<&Arc<crate::ManagedArtifactStore>>,
+  run_id: &str,
+  now: chrono::DateTime<Utc>,
+) -> Result<(Option<String>, Vec<InfrastructurePolicyEvidenceReferenceV1>), DurableStoreError> {
+  let snapshot = store.infrastructure_policy_evidence_snapshot(run_id, now)?;
+  let authority = InfrastructurePolicyEvidenceAuthorityV1::engine();
+  let mut review_digests = std::collections::BTreeSet::new();
+  let mut evidence = Vec::new();
+  for approval in snapshot.approvals {
+    review_digests.insert(approval.review_digest.clone());
+    let identity = format!(
+      "{}\0{}\0{}",
+      approval.request_id, approval.review_digest, approval.principal_id
+    );
+    if let Ok(reference) = authority.issue(
+      InfrastructurePolicyEvidenceKindV1::Approval,
+      format!("approval_{:x}", Sha256::digest(identity.as_bytes())),
+      "woml.rich-approval-authority/v1".to_string(),
+      approval.decided_at,
+      None,
+      run_id.to_string(),
+      None,
+      None,
+      Some(approval.review_digest),
+      Some(approval.principal_id),
+      approval.roles,
+      true,
+      None,
+    ) {
+      evidence.push(reference);
+    }
+  }
+  if let Some(artifact_store) = artifact_store {
+    for artifact in snapshot.artifacts {
+      if artifact_store
+        .verify_policy_evidence(run_id, &artifact.artifact_id, &artifact.sha256)
+        .is_err()
+      {
+        continue;
+      }
+      review_digests.insert(artifact.review_digest.clone());
+      if let Ok(reference) = authority.issue(
+        InfrastructurePolicyEvidenceKindV1::Artifact,
+        artifact.artifact_id,
+        "woml.artifact-store/v1".to_string(),
+        now,
+        None,
+        run_id.to_string(),
+        None,
+        None,
+        Some(artifact.review_digest),
+        None,
+        std::collections::BTreeSet::new(),
+        true,
+        None,
+      ) {
+        evidence.push(reference);
+      }
+    }
+  }
+  for lock in snapshot.locks {
+    let identity = format!("{}\0{}\0{}", lock.key, lock.lease_id, lock.fencing_token);
+    if let Ok(reference) = authority.issue(
+      InfrastructurePolicyEvidenceKindV1::Lock,
+      format!("lock_{:x}", Sha256::digest(identity.as_bytes())),
+      "woml.lock-authority/v1".to_string(),
+      lock.acquired_at,
+      Some(lock.expires_at),
+      run_id.to_string(),
+      None,
+      None,
+      None,
+      None,
+      std::collections::BTreeSet::new(),
+      true,
+      Some(lock.key),
+    ) {
+      evidence.push(reference);
+    }
+  }
+  let review_digest = if review_digests.len() == 1 {
+    review_digests.into_iter().next()
+  } else {
+    None
+  };
+  Ok((review_digest, evidence))
+}
+
 pub struct DurableCapabilityAuthority {
   registry: Arc<CapabilityRegistry>,
   store: Arc<AsyncMutex<DurableEventStore>>,
   locks: Arc<crate::ManagedLocksService>,
   infrastructure_policy_required: bool,
   infrastructure_policy_evaluators: Arc<InfrastructurePolicyEvaluatorCacheV1>,
+  artifact_store: Option<Arc<crate::ManagedArtifactStore>>,
+  emergency_deny_overlay: Option<Arc<PreparedInfrastructurePolicyV1>>,
 }
 
 impl DurableCapabilityAuthority {
@@ -719,6 +813,8 @@ impl DurableCapabilityAuthority {
       locks: Arc::new(crate::ManagedLocksService::default()),
       infrastructure_policy_required: false,
       infrastructure_policy_evaluators: Arc::new(InfrastructurePolicyEvaluatorCacheV1::default()),
+      artifact_store: None,
+      emergency_deny_overlay: None,
     }
   }
 
@@ -733,6 +829,8 @@ impl DurableCapabilityAuthority {
       locks,
       infrastructure_policy_required: false,
       infrastructure_policy_evaluators: Arc::new(InfrastructurePolicyEvaluatorCacheV1::default()),
+      artifact_store: None,
+      emergency_deny_overlay: None,
     }
   }
 
@@ -742,12 +840,32 @@ impl DurableCapabilityAuthority {
     locks: Arc<crate::ManagedLocksService>,
     infrastructure_policy_required: bool,
   ) -> Self {
+    Self::new_with_infrastructure_policy_authorities(
+      registry,
+      store,
+      locks,
+      infrastructure_policy_required,
+      None,
+      None,
+    )
+  }
+
+  pub fn new_with_infrastructure_policy_authorities(
+    registry: Arc<CapabilityRegistry>,
+    store: Arc<AsyncMutex<DurableEventStore>>,
+    locks: Arc<crate::ManagedLocksService>,
+    infrastructure_policy_required: bool,
+    artifact_store: Option<Arc<crate::ManagedArtifactStore>>,
+    emergency_deny_overlay: Option<Arc<PreparedInfrastructurePolicyV1>>,
+  ) -> Self {
     Self {
       registry,
       store,
       locks,
       infrastructure_policy_required,
       infrastructure_policy_evaluators: Arc::new(InfrastructurePolicyEvaluatorCacheV1::default()),
+      artifact_store,
+      emergency_deny_overlay,
     }
   }
 
@@ -909,6 +1027,27 @@ impl DurableCapabilityAuthority {
       }
       if let Some(policy) = admitted_policy {
         let evaluated_at = Utc::now();
+        let (review_digest, evidence) = match infrastructure_policy_evidence(
+          &store,
+          self.artifact_store.as_ref(),
+          &request.run_id,
+          evaluated_at,
+        ) {
+          Ok(evidence) => evidence,
+          Err(error) => {
+            return Ok(failed_result(
+              &request,
+              Instant::now(),
+              failure(
+                CapabilityFailureKind::ServiceRejected,
+                "WOML_POLICY_DECISION_UNAVAILABLE",
+                format!("Trusted infrastructure-policy evidence is unavailable: {error}"),
+                false,
+                false,
+              ),
+            ));
+          }
+        };
         let descriptor = match self.registry.infrastructure_policy_descriptor(
           &request,
           InfrastructurePolicyDescriptorContextV1 {
@@ -917,7 +1056,7 @@ impl DurableCapabilityAuthority {
             environment: policy.bundle.environment.clone(),
             effective_target: None,
             execution_mode: policy_execution_mode,
-            review_digest: None,
+            review_digest,
           },
         ) {
           Ok(descriptor) => descriptor,
@@ -960,7 +1099,18 @@ impl DurableCapabilityAuthority {
           }
         };
         let evaluator = self.infrastructure_policy_evaluators.prepare(policy);
-        Some(evaluator.evaluate(&descriptor, &[], evaluated_at))
+        let base = evaluator.evaluate(&descriptor, &evidence, evaluated_at);
+        Some(
+          if let Some(overlay) = self.emergency_deny_overlay.as_ref() {
+            let overlay = self
+              .infrastructure_policy_evaluators
+              .prepare(overlay.as_ref().clone());
+            let overlay_decision = overlay.evaluate(&descriptor, &[], evaluated_at);
+            apply_emergency_deny_overlay(base, overlay_decision)
+          } else {
+            base
+          },
+        )
       } else {
         None
       }

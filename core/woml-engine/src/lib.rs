@@ -185,9 +185,9 @@ pub use host::{
 };
 pub use http::ManagedHttpHandler;
 pub use infrastructure_policy::{
-  parse_infrastructure_policy, prepare_infrastructure_policy, InfrastructurePolicyBundleV1,
-  InfrastructurePolicyDecisionV1, InfrastructurePolicyDefaultV1, InfrastructurePolicyEffectV1,
-  InfrastructurePolicyError, InfrastructurePolicyExecutionModeV1,
+  parse_infrastructure_policy, prepare_emergency_deny_overlay, prepare_infrastructure_policy,
+  InfrastructurePolicyBundleV1, InfrastructurePolicyDecisionV1, InfrastructurePolicyDefaultV1,
+  InfrastructurePolicyEffectV1, InfrastructurePolicyError, InfrastructurePolicyExecutionModeV1,
   InfrastructurePolicyRequirementsV1, InfrastructurePolicyRuleMatchV1, InfrastructurePolicyRuleV1,
   InfrastructurePolicySignatureStatusV1, InfrastructurePolicySignatureV1,
   InfrastructurePolicyTrustV1, PreparedInfrastructurePolicyV1, INFRASTRUCTURE_POLICY_CONTRACT,
@@ -195,8 +195,9 @@ pub use infrastructure_policy::{
   INFRASTRUCTURE_POLICY_MAX_RULES,
 };
 pub use infrastructure_policy_runtime::{
-  InfrastructurePolicyDecisionOutcomeV1, InfrastructurePolicyDecisionRecordV1,
-  InfrastructurePolicyDescriptorContextV1, InfrastructurePolicyEvaluationBudgetV1,
+  apply_emergency_deny_overlay, InfrastructurePolicyDecisionOutcomeV1,
+  InfrastructurePolicyDecisionRecordV1, InfrastructurePolicyDescriptorContextV1,
+  InfrastructurePolicyEmergencyDenyV1, InfrastructurePolicyEvaluationBudgetV1,
   InfrastructurePolicyEvaluatorCacheV1, InfrastructurePolicyEvidenceAuthorityV1,
   InfrastructurePolicyEvidenceKindV1, InfrastructurePolicyEvidenceReferenceV1,
   InfrastructurePolicyOperationDescriptorV1, InfrastructurePolicyOperationMetadataV1,

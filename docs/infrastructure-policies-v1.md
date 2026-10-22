@@ -1,10 +1,10 @@
 # Infrastructure Policies v1: Boundary and Threat Model
 
-**Status:** Frozen through IP3
+**Status:** Implemented through IP7
 
 **Contract:** `woml.infrastructure-policy` v1  
 
-**Enforcement:** Planned for IP4; descriptor construction and evaluation do not yet authorize or execute effects
+**Enforcement:** The Rust capability authority evaluates the admitted bundle immediately before every covered protected effect
 
 ## Purpose
 
@@ -57,7 +57,7 @@ Untrusted values may be part of an operation, but cannot assert that an approval
 9. Signing keys are trusted or revoked through operator configuration outside workflow source.
 10. A valid signature proves bundle provenance; it does not grant authority by itself.
 11. The admitted base bundle is immutable for deterministic recovery.
-12. A future emergency overlay may only deny; it cannot grant authority.
+12. An emergency overlay may only deny; its shape is validated before runtime activation and it cannot grant authority.
 13. Missing required policy, a future contract, an unknown signing key, a revoked key, or an invalid signature fails closed.
 14. Policies do not synthesize approval steps. They verify durable evidence produced by explicit workflow operations.
 15. Static checks must report runtime-dependent outcomes as unknown rather than allowed.
@@ -190,7 +190,58 @@ The durable Rust capability authority is the mandatory pre-effect enforcement po
 
 Programmatic runtimes select a prepared bundle with `RuntimeExecutionOptions::with_infrastructure_policy`. `require_infrastructure_policy` provides a fail-closed production posture while still allowing recovery to use a policy already pinned to the run.
 
-## Explicit IP0–IP5 Non-Goals
+## IP6 Durable Evidence and Emergency Denies
+
+Policy does not create a second approval, artifact, or lock database. Immediately before evaluation, Rust obtains a bounded evidence snapshot from the existing durable authorities:
+
+- approved rich-review decisions contribute one identity per durable reviewer principal, including only directory-authorized roles, the review digest, decision time, and run binding;
+- reviewed artifacts contribute evidence only after the artifact store proves same-run authorization, live retention, immutable SHA-256 identity, backend byte integrity, and the approval-pinned review digest;
+- locks contribute evidence only for the exact current run-owned lease and fencing token while its authority expiry remains in the future;
+- compensation, cleanup, recovery, and normal effects carry distinct engine-owned execution modes in their operation descriptor.
+
+Rejected or expired reviews, foreign or corrupt artifacts, stale leases, workflow payloads, and provider callback fields never become Evidence Reference v1 values. Backup or attestation semantics remain unsupported until a trusted attestation authority exists.
+
+An emergency bundle is configured separately from the admitted base policy. Validation requires `allow` for all three defaults and permits only `deny` rules without requirements. A match records the overlay ID, version, digest, and matched rule IDs in the durable decision while leaving the run's admitted base policy unchanged. This lets an operator stop new effects in active runs without silently granting or rewriting authority.
+
+## IP7 CLI and Operator Workflow
+
+Store named policy bundles under `.woml/policies/<name>.json`, or pass an explicit project-local `.json` path. Symlink escapes, traversal outside the project root, unexpected extensions, duplicate JSON keys, unknown fields, and future contracts fail closed.
+
+```bash
+woml policy check production
+woml policy explain deploy.woml --policy production
+woml policy explain deploy.woml --policy production --step applyPlan
+woml check deploy.woml --policy production
+woml run deploy.woml --policy production
+```
+
+Use an emergency overlay only together with a base policy:
+
+```bash
+woml run deploy.woml \
+  --policy production \
+  --emergency-deny incident-stop
+```
+
+Optional trust configuration lives at `.woml/policy-trust.json` by default:
+
+```json
+{
+  "keys": {
+    "production-2026": "<unpadded-base64url-ed25519-public-key>"
+  },
+  "revokedKeyIds": [],
+  "requireSignature": true
+}
+```
+
+Pass `--policy-trust <path> --require-policy-signature` to `woml run` or `woml check`, or `--trust <path> --require-signature` to `woml policy check/explain`, when the selected environment must accept signed bundles only.
+
+`woml policy explain` is deliberately conservative. It reports `allowed`, `denied`, `requirements missing`, or `unknown until runtime`, but never treats dynamic targets, arguments, effects, or evidence as definitely authorized. The final decision always belongs to the Rust authority at the effect boundary.
+
+Runtime startup prints the selected policy identity and environment. `woml get <runId>` includes the immutable admitted binding, recent durable decisions, requirement outcomes, and any emergency-deny identity in both JSON and concise text output. Reviewer private data, raw inputs, secrets, credentials, and artifact contents remain excluded.
+
+## Explicit IP0–IP7 Non-Goals
 
 - Automatic approval creation
 - Vendor-specific Terraform, Kubernetes, or cloud-plan parsing

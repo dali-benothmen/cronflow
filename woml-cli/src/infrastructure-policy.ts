@@ -1,6 +1,9 @@
-import { createPublicKey, verify as verifyCryptographicSignature } from 'node:crypto';
-import { readFile, stat } from 'node:fs/promises';
-import { resolve } from 'node:path';
+import {
+  createPublicKey,
+  verify as verifyCryptographicSignature,
+} from 'node:crypto';
+import { readFile, realpath, stat } from 'node:fs/promises';
+import { extname, relative, resolve, sep } from 'node:path';
 
 export const INFRASTRUCTURE_POLICY_CONTRACT = 'woml.infrastructure-policy';
 export const INFRASTRUCTURE_POLICY_CONTRACT_VERSION = 1;
@@ -12,16 +15,11 @@ export const INFRASTRUCTURE_POLICY_MAX_JSON_DEPTH = 16;
 export const INFRASTRUCTURE_POLICY_MAX_JSON_VALUES = 100_000;
 
 export type InfrastructurePolicyEffectV1 =
-  | 'read'
-  | 'idempotent-write'
-  | 'unsafe-write';
+  'read' | 'idempotent-write' | 'unsafe-write';
 export type InfrastructurePolicyDefaultV1 = 'allow' | 'deny';
 export type InfrastructurePolicyDecisionV1 = 'allow' | 'deny';
 export type InfrastructurePolicyExecutionModeV1 =
-  | 'normal'
-  | 'compensation'
-  | 'cleanup'
-  | 'recovery';
+  'normal' | 'compensation' | 'cleanup' | 'recovery';
 
 export interface InfrastructurePolicySignatureV1 {
   readonly algorithm: 'ed25519';
@@ -97,11 +95,32 @@ export interface InfrastructurePolicyTrustV1 {
   readonly requireSignature?: boolean;
 }
 
+export interface ResolvedInfrastructurePolicyV1 {
+  readonly path: string;
+  readonly prepared: PreparedInfrastructurePolicyV1;
+  readonly trust: InfrastructurePolicyTrustV1;
+}
+
+export interface InfrastructurePolicyRuntimeAuthorityV1 {
+  readonly infrastructurePolicy: {
+    readonly policy: InfrastructurePolicyBundleV1;
+    readonly trust: InfrastructurePolicyTrustV1;
+    readonly required: true;
+  };
+  readonly emergencyDeny?: {
+    readonly policy: InfrastructurePolicyBundleV1;
+    readonly trust: InfrastructurePolicyTrustV1;
+    readonly required: false;
+  };
+}
+
 export class InfrastructurePolicyError extends Error {
   readonly code: string;
 
   constructor(code: string, message: string) {
-    super(`${message} Corrective action: provide a valid, operator-owned Infrastructure Policy v1 bundle.`);
+    super(
+      `${message} Corrective action: provide a valid, operator-owned Infrastructure Policy v1 bundle.`
+    );
     this.name = 'InfrastructurePolicyError';
     this.code = code;
   }
@@ -135,6 +154,196 @@ export async function loadInfrastructurePolicy(
     );
   }
   return parseInfrastructurePolicy(source, trust);
+}
+
+export async function resolveInfrastructurePolicy(
+  reference: string,
+  options: {
+    readonly projectRoot?: string;
+    readonly trustPath?: string;
+    readonly requireSignature?: boolean;
+    readonly emergencyDeny?: boolean;
+  } = {}
+): Promise<ResolvedInfrastructurePolicyV1> {
+  if (reference.length === 0 || reference.includes('\0')) {
+    throw new InfrastructurePolicyError(
+      'WOML_POLICY_INVALID',
+      'The infrastructure policy name or path is invalid.'
+    );
+  }
+  if (/\.(?:ya?ml|toml)$/i.test(reference)) {
+    throw new InfrastructurePolicyError(
+      'WOML_POLICY_INVALID',
+      'Infrastructure policy files must use the .json extension.'
+    );
+  }
+  const projectRoot = await realpath(
+    resolve(options.projectRoot ?? process.cwd())
+  ).catch(() => resolve(options.projectRoot ?? process.cwd()));
+  const named =
+    /^[a-z][a-z0-9._-]{0,127}$/.test(reference) &&
+    !reference.toLowerCase().endsWith('.json');
+  const candidate = named
+    ? resolve(projectRoot, '.woml', 'policies', `${reference}.json`)
+    : resolve(projectRoot, reference);
+  if (extname(candidate).toLowerCase() !== '.json') {
+    throw new InfrastructurePolicyError(
+      'WOML_POLICY_INVALID',
+      'Infrastructure policy files must use the .json extension.'
+    );
+  }
+  const canonical = await realpath(candidate).catch(() => {
+    throw new InfrastructurePolicyError(
+      'WOML_POLICY_UNAVAILABLE',
+      `The infrastructure policy could not be read: ${candidate}`
+    );
+  });
+  const fromRoot = relative(projectRoot, canonical);
+  if (
+    fromRoot === '..' ||
+    fromRoot.startsWith(`..${sep}`) ||
+    resolve(canonical) === projectRoot
+  ) {
+    throw new InfrastructurePolicyError(
+      'WOML_POLICY_INVALID',
+      'The infrastructure policy must remain inside the project root.'
+    );
+  }
+  const trust = await loadInfrastructurePolicyTrust(
+    options.trustPath ?? resolve(projectRoot, '.woml', 'policy-trust.json'),
+    options.requireSignature === true
+  );
+  const prepared = await loadInfrastructurePolicy(canonical, trust);
+  if (options.emergencyDeny === true) validateEmergencyDenyOverlay(prepared);
+  return { path: canonical, prepared, trust };
+}
+
+export function infrastructurePolicyRuntimeAuthority(
+  policy: ResolvedInfrastructurePolicyV1,
+  emergencyDeny?: ResolvedInfrastructurePolicyV1
+): InfrastructurePolicyRuntimeAuthorityV1 {
+  if (
+    emergencyDeny !== undefined &&
+    emergencyDeny.prepared.bundle.environment !==
+      policy.prepared.bundle.environment
+  ) {
+    throw new InfrastructurePolicyError(
+      'WOML_POLICY_INVALID',
+      'The emergency deny overlay environment must match the base policy environment.'
+    );
+  }
+  return {
+    infrastructurePolicy: {
+      policy: policy.prepared.bundle,
+      trust: policy.trust,
+      required: true,
+    },
+    ...(emergencyDeny === undefined
+      ? {}
+      : {
+          emergencyDeny: {
+            policy: emergencyDeny.prepared.bundle,
+            trust: emergencyDeny.trust,
+            required: false as const,
+          },
+        }),
+  };
+}
+
+export function validateEmergencyDenyOverlay(
+  prepared: PreparedInfrastructurePolicyV1
+): void {
+  const defaults = prepared.bundle.defaults;
+  if (
+    defaults.read !== 'allow' ||
+    defaults['idempotent-write'] !== 'allow' ||
+    defaults['unsafe-write'] !== 'allow' ||
+    prepared.bundle.rules.some(
+      rule => rule.decision !== 'deny' || rule.requires !== undefined
+    )
+  ) {
+    throw new InfrastructurePolicyError(
+      'WOML_POLICY_INVALID',
+      'An emergency deny overlay must have allow defaults and deny-only rules without requirements.'
+    );
+  }
+}
+
+async function loadInfrastructurePolicyTrust(
+  path: string,
+  requireSignature: boolean
+): Promise<InfrastructurePolicyTrustV1> {
+  let source: string;
+  try {
+    source = await readFile(path, 'utf8');
+  } catch {
+    return requireSignature ? { requireSignature: true } : {};
+  }
+  let decoded: unknown;
+  try {
+    decoded = new StrictJsonParser(source).parse();
+  } catch {
+    invalid('The infrastructure policy trust file is not strict JSON.');
+  }
+  const object = strictObject(
+    decoded,
+    'policy trust',
+    ['keys', 'revokedKeyIds', 'requireSignature'],
+    []
+  );
+  const keys =
+    object.keys === undefined
+      ? undefined
+      : strictStringMap(object.keys, 'policy trust keys');
+  const revokedKeyIds =
+    object.revokedKeyIds === undefined
+      ? undefined
+      : strictStringArray(object.revokedKeyIds, 'policy trust revokedKeyIds');
+  if (
+    object.requireSignature !== undefined &&
+    typeof object.requireSignature !== 'boolean'
+  ) {
+    invalid('policy trust requireSignature must be a boolean.');
+  }
+  return {
+    ...(keys === undefined ? {} : { keys }),
+    ...(revokedKeyIds === undefined ? {} : { revokedKeyIds }),
+    requireSignature: requireSignature || object.requireSignature === true,
+  };
+}
+
+function strictStringMap(
+  value: unknown,
+  label: string
+): Record<string, string> {
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) {
+    invalid(`${label} must be an object.`);
+  }
+  const entries = Object.entries(value as Record<string, unknown>);
+  if (entries.length > 128) invalid(`${label} contains too many keys.`);
+  const result: Record<string, string> = {};
+  for (const [key, item] of entries) {
+    if (
+      !identifierPattern.test(key) ||
+      typeof item !== 'string' ||
+      item.length > 1024
+    ) {
+      invalid(`${label} contains an invalid key or value.`);
+    }
+    result[key] = item;
+  }
+  return result;
+}
+
+function strictStringArray(value: unknown, label: string): string[] {
+  if (
+    !Array.isArray(value) ||
+    value.length > 128 ||
+    value.some(item => typeof item !== 'string')
+  ) {
+    invalid(`${label} must be a bounded string array.`);
+  }
+  return value as string[];
 }
 
 export function parseInfrastructurePolicy(
@@ -177,11 +386,15 @@ export function prepareInfrastructurePolicy(
   } else {
     signingKeyId = bundle.signature.keyId;
     if (revoked.has(signingKeyId)) {
-      signatureInvalid(`Infrastructure policy signing key "${signingKeyId}" is revoked.`);
+      signatureInvalid(
+        `Infrastructure policy signing key "${signingKeyId}" is revoked.`
+      );
     }
     const encodedKey = trust.keys?.[signingKeyId];
     if (encodedKey === undefined) {
-      signatureInvalid(`Infrastructure policy signing key "${signingKeyId}" is not trusted.`);
+      signatureInvalid(
+        `Infrastructure policy signing key "${signingKeyId}" is not trusted.`
+      );
     }
     const publicKey = decodeBase64Url(encodedKey, 32, 'public key');
     const signature = decodeBase64Url(bundle.signature.value, 64, 'signature');
@@ -200,7 +413,8 @@ export function prepareInfrastructurePolicy(
     } catch {
       verified = false;
     }
-    if (!verified) signatureInvalid('The infrastructure policy signature is invalid.');
+    if (!verified)
+      signatureInvalid('The infrastructure policy signature is invalid.');
     signatureStatus = 'verified';
   }
   return {
@@ -234,7 +448,15 @@ function normalizeBundle(input: unknown): InfrastructurePolicyBundleV1 {
       'rules',
       'signature',
     ],
-    ['contract', 'contractVersion', 'id', 'version', 'environment', 'defaults', 'rules']
+    [
+      'contract',
+      'contractVersion',
+      'id',
+      'version',
+      'environment',
+      'defaults',
+      'rules',
+    ]
   );
   if (
     authored.contract !== INFRASTRUCTURE_POLICY_CONTRACT ||
@@ -243,7 +465,11 @@ function normalizeBundle(input: unknown): InfrastructurePolicyBundleV1 {
     invalid('The document does not match Infrastructure Policy v1.');
   }
   const id = identifier(authored.id, 'policy.id');
-  const version = patternString(authored.version, 'policy.version', versionPattern);
+  const version = patternString(
+    authored.version,
+    'policy.version',
+    versionPattern
+  );
   const environment = identifier(authored.environment, 'policy.environment');
   const defaultsValue = strictObject(
     authored.defaults,
@@ -268,12 +494,15 @@ function normalizeBundle(input: unknown): InfrastructurePolicyBundleV1 {
     !Array.isArray(authored.rules) ||
     authored.rules.length > INFRASTRUCTURE_POLICY_MAX_RULES
   ) {
-    invalid(`policy.rules must contain at most ${INFRASTRUCTURE_POLICY_MAX_RULES} rules.`);
+    invalid(
+      `policy.rules must contain at most ${INFRASTRUCTURE_POLICY_MAX_RULES} rules.`
+    );
   }
   const ruleIds = new Set<string>();
   const rules = authored.rules.map((rule, index) => {
     const normalized = normalizeRule(rule, index);
-    if (ruleIds.has(normalized.id)) invalid(`Duplicate policy rule id "${normalized.id}".`);
+    if (ruleIds.has(normalized.id))
+      invalid(`Duplicate policy rule id "${normalized.id}".`);
     ruleIds.add(normalized.id);
     return normalized;
   });
@@ -293,7 +522,10 @@ function normalizeBundle(input: unknown): InfrastructurePolicyBundleV1 {
   };
 }
 
-function normalizeRule(input: unknown, index: number): InfrastructurePolicyRuleV1 {
+function normalizeRule(
+  input: unknown,
+  index: number
+): InfrastructurePolicyRuleV1 {
   const label = `policy.rules[${index}]`;
   const authored = strictObject(
     input,
@@ -353,10 +585,17 @@ function normalizeMatch(
   return {
     ...(authored.capabilities === undefined
       ? {}
-      : { capabilities: identifierSet(authored.capabilities, `${label}.capabilities`) }),
+      : {
+          capabilities: identifierSet(
+            authored.capabilities,
+            `${label}.capabilities`
+          ),
+        }),
     ...(authored.operations === undefined
       ? {}
-      : { operations: identifierSet(authored.operations, `${label}.operations`) }),
+      : {
+          operations: identifierSet(authored.operations, `${label}.operations`),
+        }),
     ...(authored.effects === undefined
       ? {}
       : {
@@ -374,10 +613,20 @@ function normalizeMatch(
       : { targets: identifierSet(authored.targets, `${label}.targets`) }),
     ...(authored.executables === undefined
       ? {}
-      : { executables: identifierSet(authored.executables, `${label}.executables`) }),
+      : {
+          executables: identifierSet(
+            authored.executables,
+            `${label}.executables`
+          ),
+        }),
     ...(authored.argumentPrefix === undefined
       ? {}
-      : { argumentPrefix: argumentList(authored.argumentPrefix, `${label}.argumentPrefix`) }),
+      : {
+          argumentPrefix: argumentList(
+            authored.argumentPrefix,
+            `${label}.argumentPrefix`
+          ),
+        }),
     ...(authored.executionModes === undefined
       ? {}
       : {
@@ -401,83 +650,103 @@ function normalizeRequirements(
     []
   );
   if (Object.keys(authored).length === 0) invalid(`${label} cannot be empty.`);
-  const approval = authored.approval === undefined
-    ? undefined
-    : (() => {
-        const value = strictObject(
-          authored.approval,
-          `${label}.approval`,
-          ['minimum', 'roles', 'bindReviewDigest', 'maxAgeMs'],
-          ['minimum', 'roles', 'bindReviewDigest', 'maxAgeMs']
-        );
-        if (typeof value.bindReviewDigest !== 'boolean') {
-          invalid(`${label}.approval.bindReviewDigest must be boolean.`);
-        }
-        return {
-          minimum: integer(value.minimum, 1, 20, `${label}.approval.minimum`),
-          roles: roleSet(value.roles, `${label}.approval.roles`),
-          bindReviewDigest: value.bindReviewDigest,
-          maxAgeMs: integer(
-            value.maxAgeMs,
-            1,
-            365 * 24 * 60 * 60 * 1000,
-            `${label}.approval.maxAgeMs`
-          ),
-        };
-      })();
-  const artifacts = authored.artifacts === undefined
-    ? undefined
-    : (() => {
-        const value = strictObject(
-          authored.artifacts,
-          `${label}.artifacts`,
-          ['minimum', 'verifiedIntegrity', 'bindReviewDigest'],
-          ['minimum', 'verifiedIntegrity', 'bindReviewDigest']
-        );
-        if (value.verifiedIntegrity !== true || typeof value.bindReviewDigest !== 'boolean') {
-          invalid(`${label}.artifacts requires verifiedIntegrity=true and bindReviewDigest boolean.`);
-        }
-        return {
-          minimum: integer(value.minimum, 1, 32, `${label}.artifacts.minimum`),
-          verifiedIntegrity: true as const,
-          bindReviewDigest: value.bindReviewDigest,
-        };
-      })();
-  const lock = authored.lock === undefined
-    ? undefined
-    : (() => {
-        const value = strictObject(
-          authored.lock,
-          `${label}.lock`,
-          ['key', 'minimumRemainingMs'],
-          ['key', 'minimumRemainingMs']
-        );
-        return {
-          key: boundedString(value.key, `${label}.lock.key`, 256),
-          minimumRemainingMs: integer(
-            value.minimumRemainingMs,
-            1,
-            86_400_000,
-            `${label}.lock.minimumRemainingMs`
-          ),
-        };
-      })();
-  const validBetween = authored.validBetween === undefined
-    ? undefined
-    : (() => {
-        const value = strictObject(
-          authored.validBetween,
-          `${label}.validBetween`,
-          ['notBefore', 'notAfter'],
-          ['notBefore', 'notAfter']
-        );
-        const notBefore = timestamp(value.notBefore, `${label}.validBetween.notBefore`);
-        const notAfter = timestamp(value.notAfter, `${label}.validBetween.notAfter`);
-        if (Date.parse(notBefore) >= Date.parse(notAfter)) {
-          invalid(`${label}.validBetween must end after it starts.`);
-        }
-        return { notBefore, notAfter };
-      })();
+  const approval =
+    authored.approval === undefined
+      ? undefined
+      : (() => {
+          const value = strictObject(
+            authored.approval,
+            `${label}.approval`,
+            ['minimum', 'roles', 'bindReviewDigest', 'maxAgeMs'],
+            ['minimum', 'roles', 'bindReviewDigest', 'maxAgeMs']
+          );
+          if (typeof value.bindReviewDigest !== 'boolean') {
+            invalid(`${label}.approval.bindReviewDigest must be boolean.`);
+          }
+          return {
+            minimum: integer(value.minimum, 1, 20, `${label}.approval.minimum`),
+            roles: roleSet(value.roles, `${label}.approval.roles`),
+            bindReviewDigest: value.bindReviewDigest,
+            maxAgeMs: integer(
+              value.maxAgeMs,
+              1,
+              365 * 24 * 60 * 60 * 1000,
+              `${label}.approval.maxAgeMs`
+            ),
+          };
+        })();
+  const artifacts =
+    authored.artifacts === undefined
+      ? undefined
+      : (() => {
+          const value = strictObject(
+            authored.artifacts,
+            `${label}.artifacts`,
+            ['minimum', 'verifiedIntegrity', 'bindReviewDigest'],
+            ['minimum', 'verifiedIntegrity', 'bindReviewDigest']
+          );
+          if (
+            value.verifiedIntegrity !== true ||
+            typeof value.bindReviewDigest !== 'boolean'
+          ) {
+            invalid(
+              `${label}.artifacts requires verifiedIntegrity=true and bindReviewDigest boolean.`
+            );
+          }
+          return {
+            minimum: integer(
+              value.minimum,
+              1,
+              32,
+              `${label}.artifacts.minimum`
+            ),
+            verifiedIntegrity: true as const,
+            bindReviewDigest: value.bindReviewDigest,
+          };
+        })();
+  const lock =
+    authored.lock === undefined
+      ? undefined
+      : (() => {
+          const value = strictObject(
+            authored.lock,
+            `${label}.lock`,
+            ['key', 'minimumRemainingMs'],
+            ['key', 'minimumRemainingMs']
+          );
+          return {
+            key: boundedString(value.key, `${label}.lock.key`, 256),
+            minimumRemainingMs: integer(
+              value.minimumRemainingMs,
+              1,
+              86_400_000,
+              `${label}.lock.minimumRemainingMs`
+            ),
+          };
+        })();
+  const validBetween =
+    authored.validBetween === undefined
+      ? undefined
+      : (() => {
+          const value = strictObject(
+            authored.validBetween,
+            `${label}.validBetween`,
+            ['notBefore', 'notAfter'],
+            ['notBefore', 'notAfter']
+          );
+          const notBefore = timestamp(
+            value.notBefore,
+            `${label}.validBetween.notBefore`
+          );
+          const notAfter = timestamp(
+            value.notAfter,
+            `${label}.validBetween.notAfter`
+          );
+          if (Date.parse(notBefore) >= Date.parse(notAfter)) {
+            invalid(`${label}.validBetween must end after it starts.`);
+          }
+          return { notBefore, notAfter };
+        })();
   return {
     ...(approval === undefined ? {} : { approval }),
     ...(artifacts === undefined ? {} : { artifacts }),
@@ -494,7 +763,9 @@ function normalizeSignature(input: unknown): InfrastructurePolicySignatureV1 {
     ['algorithm', 'keyId', 'value']
   );
   if (value.algorithm !== 'ed25519') {
-    signatureInvalid('Infrastructure Policy v1 supports only Ed25519 signatures.');
+    signatureInvalid(
+      'Infrastructure Policy v1 supports only Ed25519 signatures.'
+    );
   }
   return {
     algorithm: 'ed25519',
@@ -507,7 +778,8 @@ function canonicalJson(value: unknown): string {
   if (value === null) return 'null';
   if (typeof value === 'boolean') return value ? 'true' : 'false';
   if (typeof value === 'number') {
-    if (!Number.isSafeInteger(value)) invalid('Policy numbers must be safe integers.');
+    if (!Number.isSafeInteger(value))
+      invalid('Policy numbers must be safe integers.');
     return JSON.stringify(value);
   }
   if (typeof value === 'string') return JSON.stringify(value);
@@ -551,7 +823,11 @@ function patternString(value: unknown, label: string, pattern: RegExp): string {
   return text;
 }
 
-function boundedString(value: unknown, label: string, maximumBytes: number): string {
+function boundedString(
+  value: unknown,
+  label: string,
+  maximumBytes: number
+): string {
   if (
     typeof value !== 'string' ||
     value.length === 0 ||
@@ -559,17 +835,30 @@ function boundedString(value: unknown, label: string, maximumBytes: number): str
     value.includes('\0') ||
     !isWellFormedUnicode(value)
   ) {
-    invalid(`${label} must be a non-empty string no larger than ${maximumBytes} bytes.`);
+    invalid(
+      `${label} must be a non-empty string no larger than ${maximumBytes} bytes.`
+    );
   }
   return value;
 }
 
 function identifierSet(value: unknown, label: string): readonly string[] {
-  return stringSet(value, label, identifierPattern, INFRASTRUCTURE_POLICY_MAX_MATCH_VALUES);
+  return stringSet(
+    value,
+    label,
+    identifierPattern,
+    INFRASTRUCTURE_POLICY_MAX_MATCH_VALUES
+  );
 }
 
 function roleSet(value: unknown, label: string): readonly string[] {
-  return stringSet(value, label, rolePattern, INFRASTRUCTURE_POLICY_MAX_ROLES, true);
+  return stringSet(
+    value,
+    label,
+    rolePattern,
+    INFRASTRUCTURE_POLICY_MAX_ROLES,
+    true
+  );
 }
 
 function stringSet(
@@ -579,13 +868,20 @@ function stringSet(
   maximum: number,
   allowEmpty = false
 ): readonly string[] {
-  if (!Array.isArray(value) || (!allowEmpty && value.length === 0) || value.length > maximum) {
-    invalid(`${label} must contain ${allowEmpty ? 'zero' : 'one'} through ${maximum} values.`);
+  if (
+    !Array.isArray(value) ||
+    (!allowEmpty && value.length === 0) ||
+    value.length > maximum
+  ) {
+    invalid(
+      `${label} must contain ${allowEmpty ? 'zero' : 'one'} through ${maximum} values.`
+    );
   }
   const values = value.map((entry, index) =>
     patternString(entry, `${label}[${index}]`, pattern)
   );
-  if (new Set(values).size !== values.length) invalid(`${label} cannot contain duplicates.`);
+  if (new Set(values).size !== values.length)
+    invalid(`${label} cannot contain duplicates.`);
   return values;
 }
 
@@ -604,7 +900,8 @@ function enumSet<const T extends string>(
   const values = value.map((entry, index) =>
     enumValue(entry, allowed, `${label}[${index}]`)
   );
-  if (new Set(values).size !== values.length) invalid(`${label} cannot contain duplicates.`);
+  if (new Set(values).size !== values.length)
+    invalid(`${label} cannot contain duplicates.`);
   return values;
 }
 
@@ -614,9 +911,13 @@ function argumentList(value: unknown, label: string): readonly string[] {
     value.length === 0 ||
     value.length > INFRASTRUCTURE_POLICY_MAX_MATCH_VALUES
   ) {
-    invalid(`${label} must contain 1 through ${INFRASTRUCTURE_POLICY_MAX_MATCH_VALUES} arguments.`);
+    invalid(
+      `${label} must contain 1 through ${INFRASTRUCTURE_POLICY_MAX_MATCH_VALUES} arguments.`
+    );
   }
-  return value.map((entry, index) => boundedString(entry, `${label}[${index}]`, 4096));
+  return value.map((entry, index) =>
+    boundedString(entry, `${label}[${index}]`, 4096)
+  );
 }
 
 function enumValue<const T extends string>(
@@ -630,8 +931,17 @@ function enumValue<const T extends string>(
   return value as T;
 }
 
-function integer(value: unknown, minimum: number, maximum: number, label: string): number {
-  if (!Number.isSafeInteger(value) || (value as number) < minimum || (value as number) > maximum) {
+function integer(
+  value: unknown,
+  minimum: number,
+  maximum: number,
+  label: string
+): number {
+  if (
+    !Number.isSafeInteger(value) ||
+    (value as number) < minimum ||
+    (value as number) > maximum
+  ) {
     invalid(`${label} must be an integer from ${minimum} through ${maximum}.`);
   }
   return value as number;
@@ -649,7 +959,8 @@ function timestamp(value: unknown, label: string): string {
 }
 
 function decodeBase64Url(value: string, length: number, label: string): Buffer {
-  if (!/^[A-Za-z0-9_-]+$/.test(value)) signatureInvalid(`The ${label} is not canonical base64url.`);
+  if (!/^[A-Za-z0-9_-]+$/.test(value))
+    signatureInvalid(`The ${label} is not canonical base64url.`);
   const decoded = Buffer.from(value, 'base64url');
   if (decoded.length !== length || decoded.toString('base64url') !== value) {
     signatureInvalid(`The ${label} has an invalid length or encoding.`);
@@ -701,7 +1012,10 @@ class StrictJsonParser {
   private parseObject(depth: number): Record<string, unknown> {
     this.position += 1;
     this.skipWhitespace();
-    const object: Record<string, unknown> = Object.create(null) as Record<string, unknown>;
+    const object: Record<string, unknown> = Object.create(null) as Record<
+      string,
+      unknown
+    >;
     const keys = new Set<string>();
     if (this.source[this.position] === '}') {
       this.position += 1;
@@ -710,7 +1024,10 @@ class StrictJsonParser {
     while (true) {
       if (this.source[this.position] !== '"') this.fail();
       const key = this.parseString();
-      if (keys.has(key)) invalid(`The infrastructure policy contains duplicate JSON key "${key}".`);
+      if (keys.has(key))
+        invalid(
+          `The infrastructure policy contains duplicate JSON key "${key}".`
+        );
       keys.add(key);
       this.skipWhitespace();
       if (this.source[this.position] !== ':') this.fail();
@@ -759,7 +1076,9 @@ class StrictJsonParser {
       if (code === 0x22) {
         this.position += 1;
         try {
-          const value = JSON.parse(this.source.slice(start, this.position)) as string;
+          const value = JSON.parse(
+            this.source.slice(start, this.position)
+          ) as string;
           if (!isWellFormedUnicode(value)) this.fail();
           return value;
         } catch {
@@ -812,7 +1131,9 @@ class StrictJsonParser {
   }
 
   private fail(): never {
-    invalid(`The infrastructure policy contains invalid JSON near byte ${this.position}.`);
+    invalid(
+      `The infrastructure policy contains invalid JSON near byte ${this.position}.`
+    );
   }
 }
 

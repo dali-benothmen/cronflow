@@ -741,6 +741,16 @@ pub enum InfrastructurePolicyReasonCodeV1 {
   RequirementsUnsatisfied,
   EvaluationBudgetExhausted,
   InputUnsupported,
+  EmergencyDeny,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct InfrastructurePolicyEmergencyDenyV1 {
+  pub policy_id: String,
+  pub policy_version: String,
+  pub policy_digest: String,
+  pub matched_rule_ids: Vec<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -790,6 +800,8 @@ pub struct InfrastructurePolicyDecisionRecordV1 {
   pub reason_codes: Vec<InfrastructurePolicyReasonCodeV1>,
   pub requirements: Vec<InfrastructurePolicyRequirementResultV1>,
   pub explanation: String,
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub emergency_deny: Option<InfrastructurePolicyEmergencyDenyV1>,
   pub evaluated_at: DateTime<Utc>,
   /// Operational telemetry is returned to the caller but excluded from the
   /// canonical decision event so identical inputs serialize identically.
@@ -1042,6 +1054,7 @@ impl InfrastructurePolicyPreparedEvaluatorV1 {
       explanation:
         "The protected operation could not be normalized into a trusted policy descriptor."
           .to_string(),
+      emergency_deny: None,
       evaluated_at,
       evaluation_duration_micros: 0,
       evaluation_instructions: 0,
@@ -1126,11 +1139,48 @@ impl InfrastructurePolicyPreparedEvaluatorV1 {
       reason_codes,
       requirements,
       explanation,
+      emergency_deny: None,
       evaluated_at,
       evaluation_duration_micros: started.elapsed().as_micros(),
       evaluation_instructions: instructions,
     }
   }
+}
+
+/// Applies a separately prepared deny-only overlay without changing the
+/// admitted base policy identity.
+pub fn apply_emergency_deny_overlay(
+  mut base: InfrastructurePolicyDecisionRecordV1,
+  overlay: InfrastructurePolicyDecisionRecordV1,
+) -> InfrastructurePolicyDecisionRecordV1 {
+  if overlay.outcome != InfrastructurePolicyDecisionOutcomeV1::Deny {
+    return base;
+  }
+  base.outcome = InfrastructurePolicyDecisionOutcomeV1::Deny;
+  base
+    .reason_codes
+    .push(InfrastructurePolicyReasonCodeV1::EmergencyDeny);
+  base.reason_codes.sort();
+  base.reason_codes.dedup();
+  base.explanation =
+    "An operator emergency-deny overlay blocked this protected effect.".to_string();
+  base.emergency_deny = Some(InfrastructurePolicyEmergencyDenyV1 {
+    policy_id: overlay.policy_id,
+    policy_version: overlay.policy_version,
+    policy_digest: overlay.policy_digest,
+    matched_rule_ids: overlay.matched_rule_ids,
+  });
+  let seed = json!({
+    "basePolicyDigest": base.policy_digest,
+    "descriptorDigest": base.descriptor_digest,
+    "evaluatedAt": base.evaluated_at,
+    "emergencyDeny": base.emergency_deny,
+    "outcome": base.outcome,
+  });
+  base.decision_id = canonical_json(&seed)
+    .map(|encoded| format!("decision_{:x}", Sha256::digest(encoded)))
+    .unwrap_or_else(|_| "decision_unavailable".to_string());
+  base
 }
 
 struct EvaluationMeter {
