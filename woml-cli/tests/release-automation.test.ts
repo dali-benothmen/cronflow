@@ -49,6 +49,7 @@ describe('WOML release automation', () => {
       'compensation-correction',
       'documentation',
       'frontend',
+      'infrastructure-policies',
       'lock-authority',
       'package',
       'process-containment',

@@ -1,6 +1,6 @@
 # Infrastructure Policies v1: Boundary and Threat Model
 
-**Status:** Implemented through IP7
+**Status:** Complete — IP0 through IP8 implemented and release-gated
 
 **Contract:** `woml.infrastructure-policy` v1  
 
