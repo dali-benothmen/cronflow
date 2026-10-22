@@ -186,6 +186,7 @@ jobs:
           --test rich_plan_approval_model
           --test rich_plan_approval_authority
           --test rich_plan_approval_runtime
+          --test infrastructure_policy_authority
           --test retention
           --test webhook_runtime
           -- --test-threads=1

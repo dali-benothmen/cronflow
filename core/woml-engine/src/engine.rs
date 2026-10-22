@@ -1842,6 +1842,7 @@ pub(crate) fn validate_payload_against_definition(
     RunEventPayload::ManualRecoveryRequired(data) => {
       validate_correction_action(workflow, &data.saga_id, &data.action_id, data.action_kind)?;
     }
+    RunEventPayload::InfrastructurePolicyDecisionRecorded(_) => {}
   }
 
   Ok(())
@@ -2858,6 +2859,7 @@ pub(crate) fn validate_event_history_against_definition(
       | RunEventPayload::CorrectionRetryScheduled(_)
       | RunEventPayload::CorrectionInterrupted(_)
       | RunEventPayload::ManualRecoveryRequired(_)
+      | RunEventPayload::InfrastructurePolicyDecisionRecorded(_)
       | RunEventPayload::RunFinalized(_)
       | RunEventPayload::RunFailed(_) => {}
     }

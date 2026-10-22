@@ -282,6 +282,8 @@ pub struct RuntimeExecutionOptions {
   managed_locks_service: Option<Arc<crate::ManagedLocksService>>,
   managed_artifact_store: Option<Arc<crate::ManagedArtifactStore>>,
   artifact_policy: Option<Arc<crate::artifacts::PreparedArtifactPolicy>>,
+  infrastructure_policy: Option<Arc<crate::PreparedInfrastructurePolicyV1>>,
+  infrastructure_policy_required: bool,
   reviewer_authority: Option<Arc<ReviewerDirectoryAuthorityV1>>,
   policy_execution: Option<Arc<PolicyExecutionCoordinator>>,
   policy_execution_registry: PolicyExecutionRegistry,
@@ -347,6 +349,17 @@ impl std::fmt::Debug for RuntimeExecutionOptions {
       .field("resolved_secret_count", &self.resolved_secrets.len())
       .field("capability_registry", &"CapabilityRegistry")
       .field("runtime_module_count", &self.runtime_modules.len())
+      .field(
+        "infrastructure_policy_digest",
+        &self
+          .infrastructure_policy
+          .as_ref()
+          .map(|policy| &policy.digest),
+      )
+      .field(
+        "infrastructure_policy_required",
+        &self.infrastructure_policy_required,
+      )
       .field(
         "shared_script_hosts",
         &self.shared_script_hosts.as_ref().map(|_| "enabled"),
@@ -491,6 +504,8 @@ impl RuntimeExecutionOptions {
       managed_locks_service: Some(managed_locks_service),
       managed_artifact_store: None,
       artifact_policy: None,
+      infrastructure_policy: None,
+      infrastructure_policy_required: false,
       reviewer_authority: None,
       policy_execution: None,
       policy_execution_registry: Arc::new(tokio::sync::RwLock::new(HashMap::new())),
@@ -531,6 +546,20 @@ impl RuntimeExecutionOptions {
 
   pub fn with_signal_ingress_token(mut self, token: Option<String>) -> Self {
     self.signal_ingress_token = token.filter(|token| !token.is_empty());
+    self
+  }
+
+  pub fn with_infrastructure_policy(
+    mut self,
+    policy: crate::PreparedInfrastructurePolicyV1,
+  ) -> Self {
+    self.infrastructure_policy = Some(Arc::new(policy));
+    self.infrastructure_policy_required = true;
+    self
+  }
+
+  pub fn require_infrastructure_policy(mut self) -> Self {
+    self.infrastructure_policy_required = true;
     self
   }
 
@@ -1898,6 +1927,7 @@ async fn execute_workflow_durable_internal_unprofiled(
       payload: trigger,
       received_at: options.clock.now(),
     })?;
+    bind_run_infrastructure_policy(&mut store, &admission.run_id, &options)?;
     return execute_policy_run_durable(database_path, &admission.run_id, options, store).await;
   }
   store.recover_interrupted_runs()?;
@@ -1963,7 +1993,8 @@ async fn execute_admitted_trigger_run_durable_unprofiled(
   options: RuntimeExecutionOptions,
 ) -> Result<WorkflowRuntimeOutcome, RuntimeExecutionError> {
   let options = attach_durable_capability_authority(options, &database_path)?;
-  let store = DurableEventStore::open(database_path.clone())?;
+  let mut store = DurableEventStore::open(database_path.clone())?;
+  bind_run_infrastructure_policy(&mut store, run_id, &options)?;
   let binding = store.run_binding(run_id)?;
   let workflow = store.definition(&binding.definition_hash)?;
   validate_rich_approval_authority(&workflow, &options)?;
@@ -1983,6 +2014,7 @@ async fn resume_workflow_durable_internal(
 ) -> Result<WorkflowRuntimeOutcome, RuntimeExecutionError> {
   let options = attach_durable_capability_authority(options, &database_path)?;
   let mut store = DurableEventStore::open(database_path.clone())?;
+  bind_run_infrastructure_policy(&mut store, run_id, &options)?;
   let binding = store.run_binding(run_id)?;
   let workflow = store.definition(&binding.definition_hash)?;
   validate_rich_approval_authority(&workflow, &options)?;
@@ -2068,12 +2100,35 @@ fn attach_durable_capability_authority(
     .managed_locks_service
     .clone()
     .unwrap_or_else(|| Arc::new(crate::ManagedLocksService::default()));
-  options.capability_authority = Some(Arc::new(DurableCapabilityAuthority::new_with_locks(
-    Arc::clone(&options.capability_registry),
-    Arc::new(tokio::sync::Mutex::new(store)),
-    locks,
-  )));
+  options.capability_authority = Some(Arc::new(
+    DurableCapabilityAuthority::new_with_locks_and_infrastructure_policy(
+      Arc::clone(&options.capability_registry),
+      Arc::new(tokio::sync::Mutex::new(store)),
+      locks,
+      options.infrastructure_policy_required || options.infrastructure_policy.is_some(),
+    ),
+  ));
   Ok(options)
+}
+
+fn bind_run_infrastructure_policy(
+  store: &mut DurableEventStore,
+  run_id: &str,
+  options: &RuntimeExecutionOptions,
+) -> Result<(), RuntimeExecutionError> {
+  if let Some(policy) = options.infrastructure_policy.as_ref() {
+    store.bind_infrastructure_policy(run_id, policy, options.clock.now())?;
+    return Ok(());
+  }
+  if options.infrastructure_policy_required
+    && store.infrastructure_policy_binding(run_id)?.is_none()
+  {
+    return Err(RuntimeExecutionError::InvalidConfiguration(
+      "WOML_POLICY_REQUIRED: this runtime requires an infrastructure policy, but the run has no admitted policy bundle."
+        .to_string(),
+    ));
+  }
+  Ok(())
 }
 
 fn runtime_modules_from_store(
@@ -4478,6 +4533,14 @@ async fn execute_lifecycle_notification<E: RuntimeDagEngine>(
   lifecycle: &LifecycleBindingV1,
   options: &RuntimeExecutionOptions,
 ) -> Result<(), LifecycleFailure> {
+  if options.infrastructure_policy_required || options.infrastructure_policy.is_some() {
+    return Err(LifecycleFailure {
+      kind: LifecycleFailureKind::ProviderFailed,
+      code: "WOML_POLICY_INPUT_UNSUPPORTED".to_string(),
+      message: "Lifecycle notification delivery is blocked while Infrastructure Policy enforcement is active because this direct provider path has no reviewed pre-effect descriptor adapter."
+        .to_string(),
+    });
+  }
   let deliveries = lifecycle_notification_deliveries(action).map_err(|error| LifecycleFailure {
     kind: LifecycleFailureKind::ProviderFailed,
     code: "WOML_NOTIFICATION_REQUEST_INVALID".to_string(),

@@ -3946,7 +3946,7 @@ function backupInspection(value: unknown): RustBackupStoreInspection {
         'runtimeLeaseExpiresAt',
       ]
     ) ||
-    ![13, 14, 15, 16, 17, 18].includes(Number(value.storeVersion)) ||
+    ![13, 14, 15, 16, 17, 18, 19].includes(Number(value.storeVersion)) ||
     !Array.isArray(value.definitionHashes) ||
     value.definitionHashes.length < 1 ||
     value.definitionHashes.length > 10_000 ||

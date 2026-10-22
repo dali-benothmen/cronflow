@@ -155,11 +155,11 @@ fn prepare_running_store(mut store: DurableEventStore) -> DurableEventStore {
 }
 
 fn running_store() -> DurableEventStore {
-  prepare_running_store(DurableEventStore::open_in_memory().expect("Store v18"))
+  prepare_running_store(DurableEventStore::open_in_memory().expect("current durable store"))
 }
 
 fn running_store_at(path: &Path) -> DurableEventStore {
-  prepare_running_store(DurableEventStore::open(path).expect("Store v18"))
+  prepare_running_store(DurableEventStore::open(path).expect("current durable store"))
 }
 
 fn decision(
@@ -838,7 +838,7 @@ fn partial_quorum_survives_restart_and_releases_artifact_pins_on_settlement() {
 }
 
 #[test]
-fn store_v17_migrates_additively_to_v18_and_future_versions_fail_closed() {
+fn store_v17_migrates_additively_to_current_schema_and_future_versions_fail_closed() {
   let database = TemporaryDatabase::new("migration");
   drop(DurableEventStore::open(database.path()).unwrap());
   let connection = Connection::open(database.path()).unwrap();
@@ -869,6 +869,8 @@ fn store_v17_migrates_additively_to_v18_and_future_versions_fail_closed() {
     "woml_approval_reviews",
     "woml_approval_reviewer_decisions",
     "woml_approval_artifact_pins",
+    "woml_infrastructure_policy_bundles",
+    "woml_run_infrastructure_policies",
   ] {
     let exists: bool = connection
       .query_row(

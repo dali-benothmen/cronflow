@@ -13,7 +13,7 @@ use std::{
 };
 
 use chrono::{DateTime, Utc};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use serde_json_canonicalizer::to_vec as canonical_json;
 use sha2::{Digest, Sha256};
@@ -178,7 +178,7 @@ impl InfrastructurePolicyOperationDescriptorV1 {
   }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum InfrastructurePolicyCoverageV1 {
   Supported,
@@ -722,7 +722,7 @@ impl InfrastructurePolicyEvidenceAuthorityV1 {
   }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum InfrastructurePolicyDecisionOutcomeV1 {
   Allow,
@@ -730,7 +730,7 @@ pub enum InfrastructurePolicyDecisionOutcomeV1 {
   RequirementsUnsatisfied,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum InfrastructurePolicyReasonCodeV1 {
   ExplicitDeny,
@@ -743,14 +743,14 @@ pub enum InfrastructurePolicyReasonCodeV1 {
   InputUnsupported,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum InfrastructurePolicyRequirementStatusV1 {
   Satisfied,
   Unsatisfied,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct InfrastructurePolicyRequirementResultV1 {
   pub rule_id: String,
@@ -760,7 +760,7 @@ pub struct InfrastructurePolicyRequirementResultV1 {
   pub received: u32,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct InfrastructurePolicySafeOperationSummaryV1 {
   pub workflow_id: String,
@@ -774,7 +774,7 @@ pub struct InfrastructurePolicySafeOperationSummaryV1 {
   pub execution_mode: InfrastructurePolicyExecutionModeV1,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct InfrastructurePolicyDecisionRecordV1 {
   pub contract: String,
@@ -968,6 +968,84 @@ impl InfrastructurePolicyPreparedEvaluatorV1 {
       }],
       requirements,
     )
+  }
+
+  /// Creates the bounded denial record used when a protected operation cannot
+  /// be normalized into the frozen descriptor contract. Only engine-owned
+  /// identity and the handler's declared effect enter this record; raw input
+  /// is deliberately excluded.
+  #[allow(clippy::too_many_arguments)]
+  pub fn input_unsupported_decision(
+    &self,
+    run_id: &str,
+    workflow_id: &str,
+    definition_hash: &str,
+    node_id: &str,
+    attempt_number: u32,
+    invocation_id: &str,
+    operation_key: &str,
+    capability: &str,
+    operation: &str,
+    effect: CapabilityEffect,
+    execution_mode: InfrastructurePolicyExecutionModeV1,
+    evaluated_at: DateTime<Utc>,
+  ) -> InfrastructurePolicyDecisionRecordV1 {
+    let descriptor_seed = json!({
+      "runId": run_id,
+      "workflowId": workflow_id,
+      "definitionHash": definition_hash,
+      "nodeId": node_id,
+      "attemptNumber": attempt_number,
+      "invocationId": invocation_id,
+      "operationKey": operation_key,
+      "capability": capability,
+      "operation": operation,
+      "effect": effect_name(effect),
+      "environment": self.policy.bundle.environment,
+      "executionMode": execution_mode,
+      "normalization": "unsupported",
+    });
+    let descriptor_digest = canonical_json(&descriptor_seed)
+      .map(|encoded| format!("sha256:{:x}", Sha256::digest(encoded)))
+      .unwrap_or_else(|_| format!("sha256:{:x}", Sha256::digest(b"unsupported")));
+    let decision_seed = json!({
+      "policyDigest": self.policy.digest,
+      "descriptorDigest": descriptor_digest,
+      "evaluatedAt": evaluated_at,
+      "reasonCodes": [InfrastructurePolicyReasonCodeV1::InputUnsupported],
+      "outcome": InfrastructurePolicyDecisionOutcomeV1::Deny,
+    });
+    let decision_id = canonical_json(&decision_seed)
+      .map(|encoded| format!("decision_{:x}", Sha256::digest(encoded)))
+      .unwrap_or_else(|_| "decision_unavailable".to_string());
+    InfrastructurePolicyDecisionRecordV1 {
+      contract: INFRASTRUCTURE_POLICY_DECISION_CONTRACT.to_string(),
+      contract_version: INFRASTRUCTURE_POLICY_RUNTIME_CONTRACT_VERSION,
+      decision_id,
+      policy_id: self.policy.bundle.id.clone(),
+      policy_version: self.policy.bundle.version.clone(),
+      policy_digest: self.policy.digest.clone(),
+      descriptor_digest,
+      outcome: InfrastructurePolicyDecisionOutcomeV1::Deny,
+      matched_rule_ids: Vec::new(),
+      operation: InfrastructurePolicySafeOperationSummaryV1 {
+        workflow_id: workflow_id.to_string(),
+        capability: capability.to_string(),
+        operation: operation.to_string(),
+        effect: effect_name(effect),
+        target: None,
+        executable: None,
+        execution_mode,
+      },
+      reason_codes: vec![InfrastructurePolicyReasonCodeV1::InputUnsupported],
+      requirements: Vec::new(),
+      explanation:
+        "The protected operation could not be normalized into a trusted policy descriptor."
+          .to_string(),
+      evaluated_at,
+      evaluation_duration_micros: 0,
+      evaluation_instructions: 0,
+    }
   }
 
   fn default_for(&self, effect: InfrastructurePolicyEffectV1) -> InfrastructurePolicyDefaultV1 {

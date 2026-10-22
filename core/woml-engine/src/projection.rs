@@ -523,6 +523,7 @@ pub struct RunProjection {
   pub lifecycle_warnings: Vec<LifecycleWarning>,
   pub context: WorkflowContext,
   pub attempts: Vec<AttemptProjection>,
+  pub infrastructure_policy_decisions: Vec<crate::event::InfrastructurePolicyDecisionRecordedData>,
   pub operations: BTreeMap<OperationIdentity, OperationProjection>,
   pub pending_retries: BTreeMap<String, RetryScheduleProjection>,
   pub branch_selections: BTreeMap<String, String>,
@@ -1002,6 +1003,11 @@ fn apply_iteration_scoped_event(
       }
       lock.status = LockStatus::LeaseLost;
       lock.resolved_at = Some(data.detected_at);
+    }
+    RunEventPayload::InfrastructurePolicyDecisionRecorded(_) => {
+      return Err(FoldError::InvalidHistory(
+        "Infrastructure policy decisions cannot be iteration-scoped.".to_string(),
+      ));
     }
     RunEventPayload::OperationStarted(data) => {
       let active = execution.attempts.iter().any(|attempt| {
@@ -3131,6 +3137,21 @@ impl ProjectionFoldState {
           failure: data.failure.clone(),
           failed_at: event.occurred_at,
         };
+      }
+      RunEventPayload::InfrastructurePolicyDecisionRecorded(data) => {
+        require_operation_settlement(projection)?;
+        if projection
+          .infrastructure_policy_decisions
+          .iter()
+          .any(|existing| existing.decision.decision_id == data.decision.decision_id)
+        {
+          return Err(FoldError::InvalidHistory(
+            "Infrastructure policy decision identity was recorded more than once.".to_string(),
+          ));
+        }
+        projection
+          .infrastructure_policy_decisions
+          .push(data.clone());
       }
       RunEventPayload::OperationStarted(data) => {
         require_operation_runtime(projection)?;

@@ -176,9 +176,22 @@ A policy error must never be translated into an allow. Later enforcement maps fa
 
 Diagnostics expose safe rule and requirement summaries only. They never include credentials, unrestricted payloads, complete command output, artifact bodies, or private reviewer assertions.
 
-## Explicit IP0–IP3 Non-Goals
+## IP4/IP5 Runtime Authority
 
-- Central runtime enforcement (planned for IP4)
+The durable Rust capability authority is the mandatory pre-effect enforcement point when a run has an admitted infrastructure policy. It validates the registered handler, builds the trusted descriptor, evaluates the exact run-pinned bundle, records a bounded decision, and only then records `OperationStarted` and dispatches the handler.
+
+- `deny` and `requirements_unsatisfied` decisions never invoke the handler.
+- An infrastructure `allow` never overrides Process Policy, Artifact Policy, target restrictions, lock fencing, credential scope, cancellation, or another lower authority.
+- Each run is immutably bound to the policy ID, version, SHA-256 digest, canonical bytes, and signature status stored in durable store v19.
+- Recovery reloads those exact bytes and verifies their canonical digest. A same-named replacement cannot be substituted for an admitted bundle.
+- Decision events contain only stable descriptor digests, safe operation summaries, matched rule IDs, bounded requirement results, and bounded explanations.
+- Native `fetch` waits for Rust admission and is rejected before network I/O while enforcement is active. Authors use `services.http.request()` until a reviewed native-fetch descriptor adapter exists.
+- Direct custom-provider and lifecycle-notification paths without a reviewed adapter fail closed while enforcement is active.
+
+Programmatic runtimes select a prepared bundle with `RuntimeExecutionOptions::with_infrastructure_policy`. `require_infrastructure_policy` provides a fail-closed production posture while still allowing recovery to use a policy already pinned to the run.
+
+## Explicit IP0–IP5 Non-Goals
+
 - Automatic approval creation
 - Vendor-specific Terraform, Kubernetes, or cloud-plan parsing
 - Remote policy distribution

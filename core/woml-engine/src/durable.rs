@@ -54,19 +54,21 @@ use crate::workflow_calls::{
 };
 use crate::{
   fold_events, run_event_schema_version_for_model, AttemptFailure, AttemptFailureKind,
-  CompiledWorkflowDefinition, FoldError, ModelValidationError, RunEvent, RunEventPayload,
-  RunProjection, RunStatus, RUN_EVENT_SCHEMA_VERSION_V1, RUN_EVENT_SCHEMA_VERSION_V11,
-  RUN_EVENT_SCHEMA_VERSION_V12, RUN_EVENT_SCHEMA_VERSION_V13, RUN_EVENT_SCHEMA_VERSION_V14,
-  RUN_EVENT_SCHEMA_VERSION_V2, RUN_EVENT_SCHEMA_VERSION_V3, RUN_EVENT_SCHEMA_VERSION_V4,
-  RUN_EVENT_SCHEMA_VERSION_V5, RUN_EVENT_SCHEMA_VERSION_V6, RUN_EVENT_SCHEMA_VERSION_V7,
-  RUN_EVENT_SCHEMA_VERSION_V8, RUN_EVENT_SCHEMA_VERSION_V9,
+  CompiledWorkflowDefinition, FoldError, InfrastructurePolicyBundleV1,
+  InfrastructurePolicySignatureStatusV1, InfrastructurePolicyTrustV1, ModelValidationError,
+  PreparedInfrastructurePolicyV1, RunEvent, RunEventPayload, RunProjection, RunStatus,
+  RUN_EVENT_SCHEMA_VERSION_V1, RUN_EVENT_SCHEMA_VERSION_V11, RUN_EVENT_SCHEMA_VERSION_V12,
+  RUN_EVENT_SCHEMA_VERSION_V13, RUN_EVENT_SCHEMA_VERSION_V14, RUN_EVENT_SCHEMA_VERSION_V2,
+  RUN_EVENT_SCHEMA_VERSION_V3, RUN_EVENT_SCHEMA_VERSION_V4, RUN_EVENT_SCHEMA_VERSION_V5,
+  RUN_EVENT_SCHEMA_VERSION_V6, RUN_EVENT_SCHEMA_VERSION_V7, RUN_EVENT_SCHEMA_VERSION_V8,
+  RUN_EVENT_SCHEMA_VERSION_V9,
 };
 use crate::{
   verify_bound_rich_approval_review, BoundRichApprovalReview, ReviewPayloadV1,
   ReviewerDirectoryAuthorityV1, ReviewerDirectoryError, ReviewerIdentityClaimV1,
 };
 
-pub const DURABLE_STORE_SCHEMA_VERSION: u32 = 18;
+pub const DURABLE_STORE_SCHEMA_VERSION: u32 = 19;
 const STORE_SCHEMA_VERSION_V1: &str = "1";
 const STORE_SCHEMA_VERSION_V2: &str = "2";
 const STORE_SCHEMA_VERSION_V3: &str = "3";
@@ -85,7 +87,56 @@ const STORE_SCHEMA_VERSION_V15: &str = "15";
 const STORE_SCHEMA_VERSION_V16: &str = "16";
 const STORE_SCHEMA_VERSION_V17: &str = "17";
 const STORE_SCHEMA_VERSION_V18: &str = "18";
+const STORE_SCHEMA_VERSION_V19: &str = "19";
 const DEFAULT_APPROVAL_CREDENTIAL_LIFETIME_HOURS: i64 = 24;
+
+const CREATE_INFRASTRUCTURE_POLICY_SCHEMA_V19: &str = r#"
+CREATE TABLE IF NOT EXISTS woml_infrastructure_policy_bundles (
+  policy_digest TEXT PRIMARY KEY,
+  policy_id TEXT NOT NULL,
+  policy_version TEXT NOT NULL,
+  environment TEXT NOT NULL,
+  canonical_payload BLOB NOT NULL,
+  signature_status TEXT NOT NULL CHECK (signature_status IN ('unsigned', 'verified')),
+  signing_key_id TEXT,
+  created_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS woml_run_infrastructure_policies (
+  run_id TEXT PRIMARY KEY,
+  policy_digest TEXT NOT NULL,
+  admitted_at TEXT NOT NULL,
+  FOREIGN KEY (run_id) REFERENCES woml_runs(run_id),
+  FOREIGN KEY (policy_digest) REFERENCES woml_infrastructure_policy_bundles(policy_digest)
+);
+
+CREATE INDEX IF NOT EXISTS woml_run_infrastructure_policies_digest
+  ON woml_run_infrastructure_policies(policy_digest, run_id);
+
+CREATE TRIGGER IF NOT EXISTS woml_infrastructure_policy_bundles_no_update
+BEFORE UPDATE ON woml_infrastructure_policy_bundles
+BEGIN
+  SELECT RAISE(ABORT, 'WOML infrastructure policy bundles are immutable');
+END;
+
+CREATE TRIGGER IF NOT EXISTS woml_infrastructure_policy_bundles_no_delete
+BEFORE DELETE ON woml_infrastructure_policy_bundles
+BEGIN
+  SELECT RAISE(ABORT, 'WOML infrastructure policy bundles are retention-managed');
+END;
+
+CREATE TRIGGER IF NOT EXISTS woml_run_infrastructure_policies_no_update
+BEFORE UPDATE ON woml_run_infrastructure_policies
+BEGIN
+  SELECT RAISE(ABORT, 'WOML run infrastructure policy bindings are immutable');
+END;
+
+CREATE TRIGGER IF NOT EXISTS woml_run_infrastructure_policies_no_delete
+BEFORE DELETE ON woml_run_infrastructure_policies
+BEGIN
+  SELECT RAISE(ABORT, 'WOML run infrastructure policy bindings are retention-managed');
+END;
+"#;
 
 const CREATE_RUN_SUMMARY_SCHEMA_V11: &str = r#"
 CREATE TABLE IF NOT EXISTS woml_run_summaries (
@@ -1104,6 +1155,20 @@ pub struct RecoveryReport {
   pub recovered_runs: usize,
   pub interrupted_attempts: usize,
   pub resumable_runs: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct InfrastructurePolicyRunBindingV1 {
+  pub run_id: String,
+  pub policy_id: String,
+  pub policy_version: String,
+  pub policy_digest: String,
+  pub canonical_bundle_reference: String,
+  pub signature_status: InfrastructurePolicySignatureStatusV1,
+  #[serde(skip_serializing_if = "Option::is_none")]
+  pub signing_key_id: Option<String>,
+  pub admitted_at: DateTime<Utc>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -2906,6 +2971,23 @@ fn migrate_store_v17_to_v18(connection: &mut Connection) -> Result<(), DurableSt
   Ok(())
 }
 
+fn migrate_store_v18_to_v19(connection: &mut Connection) -> Result<(), DurableStoreError> {
+  let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+  transaction.execute_batch(CREATE_INFRASTRUCTURE_POLICY_SCHEMA_V19)?;
+  validate_store_v19_schema(&transaction)?;
+  let changed = transaction.execute(
+    "UPDATE woml_store_metadata SET value = ?1 WHERE key = 'schema_version' AND value = ?2",
+    [STORE_SCHEMA_VERSION_V19, STORE_SCHEMA_VERSION_V18],
+  )?;
+  if changed != 1 {
+    return Err(DurableStoreError::Contract(
+      "Store v18-to-v19 migration could not update the schema version atomically.".to_string(),
+    ));
+  }
+  transaction.commit()?;
+  Ok(())
+}
+
 fn validate_store_v2_schema(connection: &Connection) -> Result<(), DurableStoreError> {
   for (object_type, name) in [
     ("table", "woml_approval_tokens"),
@@ -3663,6 +3745,68 @@ fn validate_store_v18_schema(connection: &Connection) -> Result<(), DurableStore
   Ok(())
 }
 
+fn validate_store_v19_schema(connection: &Connection) -> Result<(), DurableStoreError> {
+  validate_store_v18_schema(connection)?;
+  for (name, expected_columns) in [
+    (
+      "woml_infrastructure_policy_bundles",
+      &[
+        "policy_digest",
+        "policy_id",
+        "policy_version",
+        "environment",
+        "canonical_payload",
+        "signature_status",
+        "signing_key_id",
+        "created_at",
+      ][..],
+    ),
+    (
+      "woml_run_infrastructure_policies",
+      &["run_id", "policy_digest", "admitted_at"][..],
+    ),
+  ] {
+    let exists: bool = connection.query_row(
+      "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?1)",
+      [name],
+      |row| row.get(0),
+    )?;
+    if !exists {
+      return Err(DurableStoreError::Contract(format!(
+        "Store v19 is missing required table {name:?}."
+      )));
+    }
+    let mut statement = connection.prepare(&format!("PRAGMA table_info({name})"))?;
+    let columns = statement
+      .query_map([], |row| row.get::<_, String>(1))?
+      .collect::<Result<Vec<_>, _>>()?;
+    if columns != expected_columns {
+      return Err(DurableStoreError::Contract(format!(
+        "Store v19 {name} columns do not match the frozen schema: expected {expected_columns:?}, found {columns:?}."
+      )));
+    }
+  }
+  for (object_type, name) in [
+    ("index", "woml_run_infrastructure_policies_digest"),
+    ("trigger", "woml_infrastructure_policy_bundles_no_update"),
+    ("trigger", "woml_infrastructure_policy_bundles_no_delete"),
+    ("trigger", "woml_run_infrastructure_policies_no_update"),
+    ("trigger", "woml_run_infrastructure_policies_no_delete"),
+  ] {
+    let exists: bool = connection.query_row(
+      "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type = ?1 AND name = ?2)",
+      [object_type, name],
+      |row| row.get(0),
+    )?;
+    if !exists {
+      return Err(DurableStoreError::Contract(format!(
+        "Store v19 is missing required {object_type} {name:?}."
+      )));
+    }
+  }
+  Ok(())
+}
+
 fn runtime_policy_indexes_need_rebuild(connection: &Connection) -> Result<bool, DurableStoreError> {
   let count = |sql: &str| -> Result<i64, DurableStoreError> {
     Ok(connection.query_row(sql, [], |row| row.get(0))?)
@@ -3718,7 +3862,7 @@ impl DurableEventStore {
       [],
       |row| row.get(0),
     )?;
-    if version != STORE_SCHEMA_VERSION_V18 {
+    if version != STORE_SCHEMA_VERSION_V19 {
       return Err(DurableStoreError::UnsupportedStoreVersion(version));
     }
     if let Ok(metadata) = std::fs::metadata(path) {
@@ -3739,6 +3883,227 @@ impl DurableEventStore {
     Self::initialize(connection)
   }
 
+  pub fn bind_infrastructure_policy(
+    &mut self,
+    run_id: &str,
+    policy: &PreparedInfrastructurePolicyV1,
+    admitted_at: DateTime<Utc>,
+  ) -> Result<InfrastructurePolicyRunBindingV1, DurableStoreError> {
+    let transaction = self
+      .connection
+      .transaction_with_behavior(TransactionBehavior::Immediate)?;
+    ensure_run_exists(&transaction, run_id)?;
+    let signature_status = match policy.signature_status {
+      InfrastructurePolicySignatureStatusV1::Unsigned => "unsigned",
+      InfrastructurePolicySignatureStatusV1::Verified => "verified",
+    };
+    transaction.execute(
+      "INSERT OR IGNORE INTO woml_infrastructure_policy_bundles(
+         policy_digest, policy_id, policy_version, environment, canonical_payload,
+         signature_status, signing_key_id, created_at
+       ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+      params![
+        policy.digest,
+        policy.bundle.id,
+        policy.bundle.version,
+        policy.bundle.environment,
+        policy.canonical_payload,
+        signature_status,
+        policy.signing_key_id,
+        admitted_at.to_rfc3339(),
+      ],
+    )?;
+    let stored: (String, String, String, Vec<u8>, String, Option<String>) = transaction.query_row(
+      "SELECT policy_id, policy_version, environment, canonical_payload,
+              signature_status, signing_key_id
+       FROM woml_infrastructure_policy_bundles WHERE policy_digest = ?1",
+      [&policy.digest],
+      |row| {
+        Ok((
+          row.get(0)?,
+          row.get(1)?,
+          row.get(2)?,
+          row.get(3)?,
+          row.get(4)?,
+          row.get(5)?,
+        ))
+      },
+    )?;
+    if stored.0 != policy.bundle.id
+      || stored.1 != policy.bundle.version
+      || stored.2 != policy.bundle.environment
+      || stored.3 != policy.canonical_payload
+      || stored.4 != signature_status
+      || stored.5 != policy.signing_key_id
+    {
+      return Err(DurableStoreError::Contract(
+        "WOML_POLICY_INVALID: the stored policy digest is bound to different bytes or identity."
+          .to_string(),
+      ));
+    }
+    transaction.execute(
+      "INSERT OR IGNORE INTO woml_run_infrastructure_policies(run_id, policy_digest, admitted_at)
+       VALUES (?1, ?2, ?3)",
+      params![run_id, policy.digest, admitted_at.to_rfc3339()],
+    )?;
+    let (bound_digest, bound_at): (String, String) = transaction.query_row(
+      "SELECT policy_digest, admitted_at FROM woml_run_infrastructure_policies WHERE run_id = ?1",
+      [run_id],
+      |row| Ok((row.get(0)?, row.get(1)?)),
+    )?;
+    if bound_digest != policy.digest {
+      return Err(DurableStoreError::Contract(
+        "WOML_POLICY_INVALID: the run is already pinned to a different infrastructure policy."
+          .to_string(),
+      ));
+    }
+    transaction.commit()?;
+    Ok(InfrastructurePolicyRunBindingV1 {
+      run_id: run_id.to_string(),
+      policy_id: policy.bundle.id.clone(),
+      policy_version: policy.bundle.version.clone(),
+      policy_digest: policy.digest.clone(),
+      canonical_bundle_reference: format!("policy:{}", policy.digest),
+      signature_status: policy.signature_status,
+      signing_key_id: policy.signing_key_id.clone(),
+      admitted_at: parse_timestamp(&bound_at)?,
+    })
+  }
+
+  pub fn infrastructure_policy_binding(
+    &self,
+    run_id: &str,
+  ) -> Result<Option<InfrastructurePolicyRunBindingV1>, DurableStoreError> {
+    let row = self
+      .connection
+      .query_row(
+        "SELECT bundles.policy_id, bundles.policy_version, bindings.policy_digest,
+                bundles.signature_status, bundles.signing_key_id, bindings.admitted_at
+         FROM woml_run_infrastructure_policies AS bindings
+         JOIN woml_infrastructure_policy_bundles AS bundles
+           ON bundles.policy_digest = bindings.policy_digest
+         WHERE bindings.run_id = ?1",
+        [run_id],
+        |row| {
+          Ok((
+            row.get::<_, String>(0)?,
+            row.get::<_, String>(1)?,
+            row.get::<_, String>(2)?,
+            row.get::<_, String>(3)?,
+            row.get::<_, Option<String>>(4)?,
+            row.get::<_, String>(5)?,
+          ))
+        },
+      )
+      .optional()?;
+    let Some((policy_id, policy_version, digest, status, signing_key_id, admitted_at)) = row else {
+      return Ok(None);
+    };
+    let signature_status = match status.as_str() {
+      "unsigned" => InfrastructurePolicySignatureStatusV1::Unsigned,
+      "verified" => InfrastructurePolicySignatureStatusV1::Verified,
+      _ => {
+        return Err(DurableStoreError::Contract(
+          "WOML_POLICY_INVALID: admitted policy signature status is invalid.".to_string(),
+        ))
+      }
+    };
+    Ok(Some(InfrastructurePolicyRunBindingV1 {
+      run_id: run_id.to_string(),
+      policy_id,
+      policy_version,
+      canonical_bundle_reference: format!("policy:{digest}"),
+      policy_digest: digest,
+      signature_status,
+      signing_key_id,
+      admitted_at: parse_timestamp(&admitted_at)?,
+    }))
+  }
+
+  pub fn infrastructure_policy_for_run(
+    &self,
+    run_id: &str,
+  ) -> Result<Option<PreparedInfrastructurePolicyV1>, DurableStoreError> {
+    let bound_digest = self
+      .connection
+      .query_row(
+        "SELECT policy_digest FROM woml_run_infrastructure_policies WHERE run_id = ?1",
+        [run_id],
+        |row| row.get::<_, String>(0),
+      )
+      .optional()?;
+    let Some(bound_digest) = bound_digest else {
+      return Ok(None);
+    };
+    let stored = self
+      .connection
+      .query_row(
+        "SELECT policy_id, policy_version, environment, policy_digest,
+                canonical_payload, signature_status, signing_key_id
+         FROM woml_infrastructure_policy_bundles WHERE policy_digest = ?1",
+        [&bound_digest],
+        |row| {
+          Ok((
+            row.get::<_, String>(0)?,
+            row.get::<_, String>(1)?,
+            row.get::<_, String>(2)?,
+            row.get::<_, String>(3)?,
+            row.get::<_, Vec<u8>>(4)?,
+            row.get::<_, String>(5)?,
+            row.get::<_, Option<String>>(6)?,
+          ))
+        },
+      )
+      .optional()?;
+    let Some((policy_id, policy_version, environment, digest, canonical_payload, status, key_id)) =
+      stored
+    else {
+      return Err(DurableStoreError::Contract(
+        "WOML_POLICY_UNAVAILABLE: admitted canonical policy bytes are missing.".to_string(),
+      ));
+    };
+    if digest != bound_digest {
+      return Err(DurableStoreError::Contract(
+        "WOML_POLICY_INVALID: admitted policy binding does not match stored bytes.".to_string(),
+      ));
+    }
+    let bundle: InfrastructurePolicyBundleV1 =
+      serde_json::from_slice(&canonical_payload).map_err(|_| {
+        DurableStoreError::Contract(
+          "WOML_POLICY_INVALID: admitted policy bytes are malformed.".to_string(),
+        )
+      })?;
+    let mut prepared =
+      crate::prepare_infrastructure_policy(bundle, &InfrastructurePolicyTrustV1::default())
+        .map_err(|_| {
+          DurableStoreError::Contract(
+            "WOML_POLICY_INVALID: admitted policy bytes failed canonical validation.".to_string(),
+          )
+        })?;
+    if prepared.digest != digest
+      || prepared.canonical_payload != canonical_payload
+      || prepared.bundle.id != policy_id
+      || prepared.bundle.version != policy_version
+      || prepared.bundle.environment != environment
+    {
+      return Err(DurableStoreError::Contract(
+        "WOML_POLICY_INVALID: admitted policy identity does not match its canonical bytes."
+          .to_string(),
+      ));
+    }
+    prepared.signature_status = match status.as_str() {
+      "unsigned" if key_id.is_none() => InfrastructurePolicySignatureStatusV1::Unsigned,
+      "verified" if key_id.is_some() => InfrastructurePolicySignatureStatusV1::Verified,
+      _ => {
+        return Err(DurableStoreError::Contract(
+          "WOML_POLICY_INVALID: admitted policy signature status is contradictory.".to_string(),
+        ))
+      }
+    };
+    prepared.signing_key_id = key_id;
+    Ok(Some(prepared))
+  }
+
   fn initialize(mut connection: Connection) -> Result<Self, DurableStoreError> {
     connection.busy_timeout(Duration::from_secs(5))?;
     connection.execute_batch("PRAGMA foreign_keys = ON;")?;
@@ -3751,6 +4116,7 @@ impl DurableEventStore {
       )
       .optional()?;
     match version.as_deref() {
+      Some(STORE_SCHEMA_VERSION_V19) => validate_store_v19_schema(&connection)?,
       Some(STORE_SCHEMA_VERSION_V18) => validate_store_v18_schema(&connection)?,
       Some(STORE_SCHEMA_VERSION_V17) => validate_store_v17_schema(&connection)?,
       Some(STORE_SCHEMA_VERSION_V16) => validate_store_v16_schema(&connection)?,
@@ -3914,7 +4280,15 @@ impl DurableEventStore {
     if current_version == STORE_SCHEMA_VERSION_V17 {
       migrate_store_v17_to_v18(&mut connection)?;
     }
-    validate_store_v18_schema(&connection)?;
+    let current_version: String = connection.query_row(
+      "SELECT value FROM woml_store_metadata WHERE key = 'schema_version'",
+      [],
+      |row| row.get(0),
+    )?;
+    if current_version == STORE_SCHEMA_VERSION_V18 {
+      migrate_store_v18_to_v19(&mut connection)?;
+    }
+    validate_store_v19_schema(&connection)?;
     {
       let recovery = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
       rebuild_correction_indexes(&recovery)?;
@@ -4213,7 +4587,25 @@ impl DurableEventStore {
         "The durable WOML store failed its integrity audit: {result}."
       )));
     }
-    validate_store_v16_schema(&self.connection)
+    validate_store_v19_schema(&self.connection)?;
+    let mut statement = self
+      .connection
+      .prepare("SELECT run_id FROM woml_run_infrastructure_policies ORDER BY run_id")?;
+    let run_ids = statement
+      .query_map([], |row| row.get::<_, String>(0))?
+      .collect::<Result<Vec<_>, _>>()?;
+    drop(statement);
+    for run_id in run_ids {
+      self
+        .infrastructure_policy_for_run(&run_id)?
+        .ok_or_else(|| {
+          DurableStoreError::Contract(
+            "WOML_POLICY_UNAVAILABLE: an admitted run lost its canonical policy bundle."
+              .to_string(),
+          )
+        })?;
+    }
+    Ok(())
   }
 
   pub fn runtime_owner(&self) -> Result<Option<RuntimeOwnerLease>, DurableStoreError> {

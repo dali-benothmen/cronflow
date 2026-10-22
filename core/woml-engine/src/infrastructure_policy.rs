@@ -173,7 +173,8 @@ pub struct InfrastructurePolicyTrustV1 {
   pub require_signature: bool,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum InfrastructurePolicySignatureStatusV1 {
   Unsigned,
   Verified,
