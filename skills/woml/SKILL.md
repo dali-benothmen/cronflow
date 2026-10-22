@@ -52,6 +52,7 @@ Read only the references needed for the request:
 - Local JS/TS modules use named exports and appear as `services.<moduleName>`. Pass `context`, `attempt`, and secret values from the calling script because modules receive only `services` automatically.
 - Prefer `services.http.request()` for managed HTTP behavior; native `fetch()` remains available when Fetch compatibility or streaming matters.
 - Use `services.process.run()` for local tools. Keep executable and arguments separate, require an explicit operator grant, set bounded timeout/output, and never invent a shell option.
+- Infrastructure Policy is operator authority, not workflow source. Never invent, weaken, or remove `--policy`, signature trust, evidence requirements, or an emergency deny. Treat `woml policy explain` as advisory; only the Rust pre-effect decision authorizes dispatch.
 - Use `<for-each>` when every item needs durable attempts, bounded concurrency, recovery, or inspection. Use an ordinary JavaScript loop for small, pure in-step transformations.
 - Do not invent elements, attributes, service methods, context fields, or provider configuration. Validate unfamiliar surfaces against the project's current WOML documentation.
 

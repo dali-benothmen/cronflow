@@ -38,6 +38,7 @@ or schema documents to write and run a workflow.
 | JavaScript/TypeScript modules | [Modules](woml-modules.md) |
 | Reusable steps/providers | [Reusable definitions](woml-reusable-definitions.md) |
 | Runtime policies | [Runtime policies](woml-runtime-policies.md) |
+| Operator authorization of protected effects | [Infrastructure Policies](infrastructure-policies-v1.md) |
 | Communication adapters | [Communication providers](woml-communication-providers.md) |
 
 ## Operate WOML
@@ -67,6 +68,7 @@ Provider-specific setup is available for [Telegram](telegram.md),
 - [Support](../SUPPORT.md)
 - [WOML 1.0.0 release notes](release/v1.0.0-release-notes.md)
 - [Process v1 release notes](release/process-v1-release-notes.md)
+- [Infrastructure Policies v1 release notes](release/infrastructure-policies-v1-release-notes.md)
 - [Release runbook](woml-release.md)
 - [Provider extension direction](provider-extension-architecture.md)
 

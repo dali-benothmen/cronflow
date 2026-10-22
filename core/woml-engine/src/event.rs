@@ -5,6 +5,7 @@ use thiserror::Error;
 
 use crate::{
   capability::{validate_safe_metadata, CapabilityFailure},
+  infrastructure_policy_runtime::InfrastructurePolicyDecisionRecordV1,
   RUN_EVENT_SCHEMA_VERSION_V1, RUN_EVENT_SCHEMA_VERSION_V10, RUN_EVENT_SCHEMA_VERSION_V11,
   RUN_EVENT_SCHEMA_VERSION_V12, RUN_EVENT_SCHEMA_VERSION_V13, RUN_EVENT_SCHEMA_VERSION_V14,
   RUN_EVENT_SCHEMA_VERSION_V15, RUN_EVENT_SCHEMA_VERSION_V16, RUN_EVENT_SCHEMA_VERSION_V17,
@@ -58,6 +59,7 @@ pub enum RunEventPayload {
   NotificationMessageUpdateAttemptStarted(NotificationMessageUpdateAttemptStartedData),
   NotificationMessageUpdated(NotificationMessageUpdatedData),
   NotificationMessageUpdateFailed(NotificationMessageUpdateFailedData),
+  InfrastructurePolicyDecisionRecorded(InfrastructurePolicyDecisionRecordedData),
   OperationStarted(OperationStartedData),
   OperationSucceeded(OperationSucceededData),
   OperationFailed(OperationFailedData),
@@ -109,6 +111,15 @@ pub enum RunEventPayload {
   RunFinalized(RunFinalizedData),
   RunSucceeded(RunSucceededData),
   RunFailed(RunFailedData),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct InfrastructurePolicyDecisionRecordedData {
+  pub invocation_id: String,
+  pub call_id: String,
+  pub operation_key: String,
+  pub decision: InfrastructurePolicyDecisionRecordV1,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -2737,6 +2748,36 @@ impl RunEvent {
         {
           return Err(EventValidationError::Invalid(
             "notification_message_update_failed has an invalid retry/finality contract."
+              .to_string(),
+          ));
+        }
+      }
+      RunEventPayload::InfrastructurePolicyDecisionRecorded(data) => {
+        if !valid_id(&data.invocation_id)
+          || !valid_id(&data.call_id)
+          || !valid_sha256(&data.operation_key)
+          || !data.decision.decision_id.starts_with("decision_")
+          || data.decision.decision_id.len() != 73
+          || !valid_sha256(&data.decision.policy_digest)
+          || !valid_sha256(&data.decision.descriptor_digest)
+          || data.decision.matched_rule_ids.len() > 1024
+          || data.decision.requirements.len() > 4096
+          || data.decision.explanation.len() > 1024
+          || data
+            .decision
+            .emergency_deny
+            .as_ref()
+            .is_some_and(|overlay| {
+              overlay.policy_id.is_empty()
+                || overlay.policy_version.is_empty()
+                || !valid_sha256(&overlay.policy_digest)
+                || overlay.matched_rule_ids.is_empty()
+                || overlay.matched_rule_ids.len() > 1024
+            })
+          || serde_json::to_vec(&data.decision).map_or(true, |encoded| encoded.len() > 262_144)
+        {
+          return Err(EventValidationError::Invalid(
+            "infrastructure_policy_decision_recorded exceeds its safe durable contract."
               .to_string(),
           ));
         }

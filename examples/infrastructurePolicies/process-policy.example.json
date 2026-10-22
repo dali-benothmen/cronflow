@@ -1,0 +1,26 @@
+{
+  "contract": "woml.process-policy",
+  "contractVersion": 1,
+  "enabled": true,
+  "modes": {
+    "foreground": true,
+    "background": true
+  },
+  "projectRoot": "../..",
+  "executables": [
+    {
+      "alias": "terraform",
+      "path": "/replace/with/the/absolute/path/to/terraform"
+    }
+  ],
+  "workingDirectories": ["."],
+  "environment": {
+    "inherit": [],
+    "allow": []
+  },
+  "limits": {
+    "maxTimeoutMs": 1200000,
+    "maxOutputBytes": 262144,
+    "maxConcurrent": 2
+  }
+}

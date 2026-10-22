@@ -1,0 +1,9 @@
+{
+  "contract": "woml.infrastructure-policy-identity",
+  "contractVersion": 1,
+  "policyId": "production",
+  "policyVersion": "2026-10-22.1",
+  "digest": "sha256:cb0f6aacd9f1765961d1619124c59104023d510d3e4b0ea9b6ac92a9a8c71724",
+  "signingKeyId": "release-2026",
+  "publicKey": "gkQQH3VpFqCELfEmlLX7lNTuggZByh4yCs4dqqXiKg4"
+}

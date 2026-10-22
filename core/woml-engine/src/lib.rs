@@ -20,6 +20,8 @@ pub mod event;
 pub mod events_service;
 pub mod host;
 pub mod http;
+pub mod infrastructure_policy;
+pub mod infrastructure_policy_runtime;
 pub mod interval;
 pub mod locks;
 pub mod model;
@@ -98,8 +100,9 @@ pub use durable::{
   CorrectionRecoveryStatusV1, CorrectionSagaInspectionV1, DurableDagEngine, DurableEngineError,
   DurableEventStore, DurableStoreError, DurableWaitRecordV1, ExternalSignalAdmissionOutcome,
   ExternalSignalAdmissionRequest, ExternalSignalAdmissionStatus, ExternalSignalResolution,
-  ForkRecoveryBranchV1, ForkRecoveryWorkV1, InspectedBusinessOutcome, InspectedForEachStatusV6,
-  InspectedForkJoinModeV4, InspectedForkStatusV4, InspectedLockStatusV1, InspectedReusableKindV5,
+  ForkRecoveryBranchV1, ForkRecoveryWorkV1, InfrastructurePolicyRunBindingV1,
+  InspectedBusinessOutcome, InspectedForEachStatusV6, InspectedForkJoinModeV4,
+  InspectedForkStatusV4, InspectedLockStatusV1, InspectedReusableKindV5,
   InspectedReusableLifecycleStatusV5, InspectedReusableStatusV5, InspectedWaitStatusV1,
   InspectedWaitV1, InternalEventAdmissionOutcome, InternalEventAdmissionRequest, IntervalCursor,
   IntervalCursorRegistration, IntervalCursorRegistrationOutcome, IssuedApprovalToken,
@@ -149,20 +152,20 @@ pub use event::{
   CorrectionRetryScheduledData, CorrectiveActionKind, DurableWaitKind, DurableWaitTimeoutBehavior,
   DurableWaitWinner, ExternalSignalReceivedData, FailureSizeDetails, FinalLifecycleStatus,
   ForkBranchOutcome, ForkBranchSettledData, ForkJoinOutcome, ForkJoinSettledData, ForkOpenedData,
-  JsonValueType, LifecycleActionFailedData, LifecycleActionIdentityData, LifecycleFailure,
-  LifecycleFailureKind, LifecycleHookCompletedData, LifecycleHookCompletionStatus,
-  LifecycleHookRequestedData, LifecycleSubject, LifecycleSubjectKind, LifecycleWarning,
-  LockAcquireTimedOutData, LockAcquiredData, LockAcquisitionCancelledData, LockLeaseLostData,
-  LockReleasedData, LockWaitRegisteredData, ManualRecoveryRequiredData,
-  NotificationDecisionAcceptedData, NotificationDeliveryAttemptStartedData,
-  NotificationDeliveryFailedData, NotificationDeliveryRequestedData,
-  NotificationDeliverySucceededData, NotificationMessageUpdateAttemptStartedData,
-  NotificationMessageUpdateFailedData, NotificationMessageUpdateRequestedData,
-  NotificationMessageUpdatedData, NotificationResolution, NotificationRunFailure,
-  NotificationSafeFailure, OperationExecutionMode, OperationFailedData, OperationStartedData,
-  OperationSucceededData, ParallelFailure, ParallelFailurePolicy, ParallelGroupCompletedData,
-  ParallelGroupOutcome, ParallelGroupStartedData, ProviderMessageIdentity,
-  ReusableLifecycleActionFailedData, ReusableLifecycleActionStartedData,
+  InfrastructurePolicyDecisionRecordedData, JsonValueType, LifecycleActionFailedData,
+  LifecycleActionIdentityData, LifecycleFailure, LifecycleFailureKind, LifecycleHookCompletedData,
+  LifecycleHookCompletionStatus, LifecycleHookRequestedData, LifecycleSubject,
+  LifecycleSubjectKind, LifecycleWarning, LockAcquireTimedOutData, LockAcquiredData,
+  LockAcquisitionCancelledData, LockLeaseLostData, LockReleasedData, LockWaitRegisteredData,
+  ManualRecoveryRequiredData, NotificationDecisionAcceptedData,
+  NotificationDeliveryAttemptStartedData, NotificationDeliveryFailedData,
+  NotificationDeliveryRequestedData, NotificationDeliverySucceededData,
+  NotificationMessageUpdateAttemptStartedData, NotificationMessageUpdateFailedData,
+  NotificationMessageUpdateRequestedData, NotificationMessageUpdatedData, NotificationResolution,
+  NotificationRunFailure, NotificationSafeFailure, OperationExecutionMode, OperationFailedData,
+  OperationStartedData, OperationSucceededData, ParallelFailure, ParallelFailurePolicy,
+  ParallelGroupCompletedData, ParallelGroupOutcome, ParallelGroupStartedData,
+  ProviderMessageIdentity, ReusableLifecycleActionFailedData, ReusableLifecycleActionStartedData,
   ReusableLifecycleActionSucceededData, ReusableLifecycleCompletedData, ReusableLifecycleHook,
   ReusableLifecycleOutcome, ReusableLifecycleRequestedData, RichApprovalResolutionReason,
   RunAdmissionQueue, RunAdmissionTrigger, RunAdmittedData, RunCancellationRequestedData, RunEvent,
@@ -181,6 +184,28 @@ pub use host::{
   ScriptHostClient, ScriptHostClientError, ScriptHostModuleArtifact, ScriptHostProcessOptions,
 };
 pub use http::ManagedHttpHandler;
+pub use infrastructure_policy::{
+  parse_infrastructure_policy, prepare_emergency_deny_overlay, prepare_infrastructure_policy,
+  InfrastructurePolicyBundleV1, InfrastructurePolicyDecisionV1, InfrastructurePolicyDefaultV1,
+  InfrastructurePolicyEffectV1, InfrastructurePolicyError, InfrastructurePolicyExecutionModeV1,
+  InfrastructurePolicyRequirementsV1, InfrastructurePolicyRuleMatchV1, InfrastructurePolicyRuleV1,
+  InfrastructurePolicySignatureStatusV1, InfrastructurePolicySignatureV1,
+  InfrastructurePolicyTrustV1, PreparedInfrastructurePolicyV1, INFRASTRUCTURE_POLICY_CONTRACT,
+  INFRASTRUCTURE_POLICY_CONTRACT_VERSION, INFRASTRUCTURE_POLICY_MAX_BYTES,
+  INFRASTRUCTURE_POLICY_MAX_RULES,
+};
+pub use infrastructure_policy_runtime::{
+  apply_emergency_deny_overlay, InfrastructurePolicyDecisionOutcomeV1,
+  InfrastructurePolicyDecisionRecordV1, InfrastructurePolicyDescriptorContextV1,
+  InfrastructurePolicyEmergencyDenyV1, InfrastructurePolicyEvaluationBudgetV1,
+  InfrastructurePolicyEvaluatorCacheV1, InfrastructurePolicyEvidenceAuthorityV1,
+  InfrastructurePolicyEvidenceKindV1, InfrastructurePolicyEvidenceReferenceV1,
+  InfrastructurePolicyOperationDescriptorV1, InfrastructurePolicyOperationMetadataV1,
+  InfrastructurePolicyPreparedEvaluatorV1, InfrastructurePolicyReasonCodeV1,
+  InfrastructurePolicyRequirementResultV1, InfrastructurePolicyRequirementStatusV1,
+  INFRASTRUCTURE_POLICY_DECISION_CONTRACT, INFRASTRUCTURE_POLICY_DESCRIPTOR_CONTRACT,
+  INFRASTRUCTURE_POLICY_EVIDENCE_CONTRACT,
+};
 pub use interval::{
   IntervalError, IntervalProgress, IntervalProgressReason, IntervalProgressReporter, WomlInterval,
   INTERVAL_PROGRESS_CONTRACT, INTERVAL_PROGRESS_CONTRACT_VERSION, MAX_INTERVAL_MS, MIN_INTERVAL_MS,

@@ -1,0 +1,36 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://woml.dev/schemas/infrastructure-policy-run-inspection/v1",
+  "title": "WOML Infrastructure Policy Run Inspection v1",
+  "description": "Optional bounded Infrastructure Policy section attached to safe run inspection.",
+  "x-status": "infrastructure-policies-ip8-frozen",
+  "x-forbiddenFields": ["payload", "input", "arguments", "credentials", "secret", "token", "operationKey", "artifactBody", "providerActorId"],
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["profile", "binding", "decisions", "totalDecisions", "truncated"],
+  "properties": {
+    "profile": { "const": "woml.infrastructure-policy-run-inspection/v1" },
+    "binding": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["runId", "policyId", "policyVersion", "policyDigest", "canonicalBundleReference", "signatureStatus", "admittedAt"],
+      "properties": {
+        "runId": { "type": "string", "minLength": 1, "maxLength": 320 },
+        "policyId": { "type": "string", "minLength": 1, "maxLength": 128 },
+        "policyVersion": { "type": "string", "minLength": 1, "maxLength": 128 },
+        "policyDigest": { "type": "string", "pattern": "^sha256:[a-f0-9]{64}$" },
+        "canonicalBundleReference": { "type": "string", "minLength": 1, "maxLength": 256 },
+        "signatureStatus": { "enum": ["unsigned", "verified"] },
+        "signingKeyId": { "type": "string", "minLength": 1, "maxLength": 128 },
+        "admittedAt": { "type": "string", "format": "date-time" }
+      }
+    },
+    "decisions": {
+      "type": "array",
+      "maxItems": 100,
+      "items": { "$ref": "https://woml.dev/schemas/infrastructure-policy-decision/v1" }
+    },
+    "totalDecisions": { "type": "integer", "minimum": 0 },
+    "truncated": { "type": "boolean" }
+  }
+}

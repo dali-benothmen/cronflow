@@ -27,8 +27,16 @@ use tokio::{
 use uuid::Uuid;
 
 use crate::{
-  DurableEventStore, DurableStoreError, OperationExecutionMode, OperationFailedData,
-  OperationStartedData, OperationSucceededData, RunEventPayload,
+  infrastructure_policy_runtime::{
+    adapt_infrastructure_policy_metadata, apply_emergency_deny_overlay,
+    InfrastructurePolicyDecisionOutcomeV1, InfrastructurePolicyDescriptorContextV1,
+    InfrastructurePolicyEvaluatorCacheV1, InfrastructurePolicyEvidenceAuthorityV1,
+    InfrastructurePolicyEvidenceKindV1, InfrastructurePolicyEvidenceReferenceV1,
+    InfrastructurePolicyOperationDescriptorV1, InfrastructurePolicyOperationMetadataV1,
+  },
+  DurableEventStore, DurableStoreError, InfrastructurePolicyDecisionRecordedData,
+  InfrastructurePolicyExecutionModeV1, OperationExecutionMode, OperationFailedData,
+  OperationStartedData, OperationSucceededData, PreparedInfrastructurePolicyV1, RunEventPayload,
 };
 
 pub const CAPABILITY_CALL_CONTRACT: &str = "woml.capability-call";
@@ -318,6 +326,16 @@ pub trait CapabilityHandler: Send + Sync + 'static {
     request: &CapabilityCallRequest,
   ) -> Result<Map<String, Value>, CapabilityFailure> {
     Ok(self.safe_metadata(&request.input))
+  }
+
+  /// Produces bounded policy-only facts after the request has passed the
+  /// registered handler's normal validation. Policy facts are deliberately
+  /// separate from presentation and durable operation metadata.
+  fn infrastructure_policy_metadata(
+    &self,
+    request: &CapabilityCallRequest,
+  ) -> Result<InfrastructurePolicyOperationMetadataV1, CapabilityFailure> {
+    adapt_infrastructure_policy_metadata(&self.descriptor(), request)
   }
 
   fn safe_result_metadata(&self, _result: &Value) -> Map<String, Value> {
@@ -664,10 +682,127 @@ fn operation_with_iteration_scope(
   })
 }
 
+fn infrastructure_policy_execution_mode(
+  projection: &crate::RunProjection,
+  node_id: &str,
+  attempt: u32,
+) -> InfrastructurePolicyExecutionModeV1 {
+  for saga in projection.sagas.values() {
+    if let Some(action) = saga.actions.get(node_id) {
+      if action.active_attempt == Some(attempt) {
+        if saga.phase == crate::projection::SagaPhase::ManualRecovery {
+          return InfrastructurePolicyExecutionModeV1::Recovery;
+        }
+        return match action.action_kind {
+          crate::CorrectiveActionKind::Compensation => {
+            InfrastructurePolicyExecutionModeV1::Compensation
+          }
+          crate::CorrectiveActionKind::Cleanup => InfrastructurePolicyExecutionModeV1::Cleanup,
+        };
+      }
+    }
+  }
+  InfrastructurePolicyExecutionModeV1::Normal
+}
+
+fn infrastructure_policy_evidence(
+  store: &DurableEventStore,
+  artifact_store: Option<&Arc<crate::ManagedArtifactStore>>,
+  run_id: &str,
+  now: chrono::DateTime<Utc>,
+) -> Result<(Option<String>, Vec<InfrastructurePolicyEvidenceReferenceV1>), DurableStoreError> {
+  let snapshot = store.infrastructure_policy_evidence_snapshot(run_id, now)?;
+  let authority = InfrastructurePolicyEvidenceAuthorityV1::engine();
+  let mut review_digests = std::collections::BTreeSet::new();
+  let mut evidence = Vec::new();
+  for approval in snapshot.approvals {
+    review_digests.insert(approval.review_digest.clone());
+    let identity = format!(
+      "{}\0{}\0{}",
+      approval.request_id, approval.review_digest, approval.principal_id
+    );
+    if let Ok(reference) = authority.issue(
+      InfrastructurePolicyEvidenceKindV1::Approval,
+      format!("approval_{:x}", Sha256::digest(identity.as_bytes())),
+      "woml.rich-approval-authority/v1".to_string(),
+      approval.decided_at,
+      None,
+      run_id.to_string(),
+      None,
+      None,
+      Some(approval.review_digest),
+      Some(approval.principal_id),
+      approval.roles,
+      true,
+      None,
+    ) {
+      evidence.push(reference);
+    }
+  }
+  if let Some(artifact_store) = artifact_store {
+    for artifact in snapshot.artifacts {
+      if artifact_store
+        .verify_policy_evidence(run_id, &artifact.artifact_id, &artifact.sha256)
+        .is_err()
+      {
+        continue;
+      }
+      review_digests.insert(artifact.review_digest.clone());
+      if let Ok(reference) = authority.issue(
+        InfrastructurePolicyEvidenceKindV1::Artifact,
+        artifact.artifact_id,
+        "woml.artifact-store/v1".to_string(),
+        now,
+        None,
+        run_id.to_string(),
+        None,
+        None,
+        Some(artifact.review_digest),
+        None,
+        std::collections::BTreeSet::new(),
+        true,
+        None,
+      ) {
+        evidence.push(reference);
+      }
+    }
+  }
+  for lock in snapshot.locks {
+    let identity = format!("{}\0{}\0{}", lock.key, lock.lease_id, lock.fencing_token);
+    if let Ok(reference) = authority.issue(
+      InfrastructurePolicyEvidenceKindV1::Lock,
+      format!("lock_{:x}", Sha256::digest(identity.as_bytes())),
+      "woml.lock-authority/v1".to_string(),
+      lock.acquired_at,
+      Some(lock.expires_at),
+      run_id.to_string(),
+      None,
+      None,
+      None,
+      None,
+      std::collections::BTreeSet::new(),
+      true,
+      Some(lock.key),
+    ) {
+      evidence.push(reference);
+    }
+  }
+  let review_digest = if review_digests.len() == 1 {
+    review_digests.into_iter().next()
+  } else {
+    None
+  };
+  Ok((review_digest, evidence))
+}
+
 pub struct DurableCapabilityAuthority {
   registry: Arc<CapabilityRegistry>,
   store: Arc<AsyncMutex<DurableEventStore>>,
   locks: Arc<crate::ManagedLocksService>,
+  infrastructure_policy_required: bool,
+  infrastructure_policy_evaluators: Arc<InfrastructurePolicyEvaluatorCacheV1>,
+  artifact_store: Option<Arc<crate::ManagedArtifactStore>>,
+  emergency_deny_overlay: Option<Arc<PreparedInfrastructurePolicyV1>>,
 }
 
 impl DurableCapabilityAuthority {
@@ -676,6 +811,10 @@ impl DurableCapabilityAuthority {
       registry,
       store,
       locks: Arc::new(crate::ManagedLocksService::default()),
+      infrastructure_policy_required: false,
+      infrastructure_policy_evaluators: Arc::new(InfrastructurePolicyEvaluatorCacheV1::default()),
+      artifact_store: None,
+      emergency_deny_overlay: None,
     }
   }
 
@@ -688,6 +827,45 @@ impl DurableCapabilityAuthority {
       registry,
       store,
       locks,
+      infrastructure_policy_required: false,
+      infrastructure_policy_evaluators: Arc::new(InfrastructurePolicyEvaluatorCacheV1::default()),
+      artifact_store: None,
+      emergency_deny_overlay: None,
+    }
+  }
+
+  pub fn new_with_locks_and_infrastructure_policy(
+    registry: Arc<CapabilityRegistry>,
+    store: Arc<AsyncMutex<DurableEventStore>>,
+    locks: Arc<crate::ManagedLocksService>,
+    infrastructure_policy_required: bool,
+  ) -> Self {
+    Self::new_with_infrastructure_policy_authorities(
+      registry,
+      store,
+      locks,
+      infrastructure_policy_required,
+      None,
+      None,
+    )
+  }
+
+  pub fn new_with_infrastructure_policy_authorities(
+    registry: Arc<CapabilityRegistry>,
+    store: Arc<AsyncMutex<DurableEventStore>>,
+    locks: Arc<crate::ManagedLocksService>,
+    infrastructure_policy_required: bool,
+    artifact_store: Option<Arc<crate::ManagedArtifactStore>>,
+    emergency_deny_overlay: Option<Arc<PreparedInfrastructurePolicyV1>>,
+  ) -> Self {
+    Self {
+      registry,
+      store,
+      locks,
+      infrastructure_policy_required,
+      infrastructure_policy_evaluators: Arc::new(InfrastructurePolicyEvaluatorCacheV1::default()),
+      artifact_store,
+      emergency_deny_overlay,
     }
   }
 
@@ -711,7 +889,7 @@ impl DurableCapabilityAuthority {
     request: CapabilityCallRequest,
     cancellation: CapabilityCancellationToken,
   ) -> Result<CapabilityCallResult, DurableCapabilityAuthorityError> {
-    let (workflow_scope, iteration_scope) = {
+    let (workflow_scope, definition_hash, iteration_scope, policy_execution_mode) = {
       let mut store = self.store.lock().await;
       let projection = store.projection(&request.run_id)?;
       let binding = store.run_binding(&request.run_id)?;
@@ -777,7 +955,14 @@ impl DurableCapabilityAuthority {
           ),
         ));
       }
-      (binding.workflow_id, iteration_scope)
+      let policy_execution_mode =
+        infrastructure_policy_execution_mode(&projection, &request.node_id, request.attempt_number);
+      (
+        binding.workflow_id,
+        binding.definition_hash,
+        iteration_scope,
+        policy_execution_mode,
+      )
     };
     match self.locks.managed_effect_is_current(&request.invocation_id) {
       Ok(true) => {}
@@ -809,6 +994,141 @@ impl DurableCapabilityAuthority {
         )))
       }
     };
+    let policy_decision = {
+      let mut store = self.store.lock().await;
+      let admitted_policy = match store.infrastructure_policy_for_run(&request.run_id) {
+        Ok(policy) => policy,
+        Err(error) => {
+          return Ok(failed_result(
+            &request,
+            Instant::now(),
+            failure(
+              CapabilityFailureKind::ServiceRejected,
+              "WOML_POLICY_UNAVAILABLE",
+              format!("The admitted infrastructure policy is unavailable: {error}"),
+              false,
+              false,
+            ),
+          ));
+        }
+      };
+      if admitted_policy.is_none() && self.infrastructure_policy_required {
+        return Ok(failed_result(
+          &request,
+          Instant::now(),
+          failure(
+            CapabilityFailureKind::ServiceRejected,
+            "WOML_POLICY_REQUIRED",
+            "This runtime requires an admitted infrastructure policy before protected effects may start.",
+            false,
+            false,
+          ),
+        ));
+      }
+      if let Some(policy) = admitted_policy {
+        let evaluated_at = Utc::now();
+        let (review_digest, evidence) = match infrastructure_policy_evidence(
+          &store,
+          self.artifact_store.as_ref(),
+          &request.run_id,
+          evaluated_at,
+        ) {
+          Ok(evidence) => evidence,
+          Err(error) => {
+            return Ok(failed_result(
+              &request,
+              Instant::now(),
+              failure(
+                CapabilityFailureKind::ServiceRejected,
+                "WOML_POLICY_DECISION_UNAVAILABLE",
+                format!("Trusted infrastructure-policy evidence is unavailable: {error}"),
+                false,
+                false,
+              ),
+            ));
+          }
+        };
+        let descriptor = match self.registry.infrastructure_policy_descriptor(
+          &request,
+          InfrastructurePolicyDescriptorContextV1 {
+            workflow_id: workflow_scope.clone(),
+            definition_hash: definition_hash.clone(),
+            environment: policy.bundle.environment.clone(),
+            effective_target: None,
+            execution_mode: policy_execution_mode,
+            review_digest,
+          },
+        ) {
+          Ok(descriptor) => descriptor,
+          Err(error) => {
+            let effect = self
+              .registry
+              .descriptor(&request.capability, &request.operation)
+              .map_or(CapabilityEffect::UnsafeWrite, |descriptor| {
+                descriptor.effect
+              });
+            let evaluator = self.infrastructure_policy_evaluators.prepare(policy);
+            let decision = evaluator.input_unsupported_decision(
+              &request.run_id,
+              &workflow_scope,
+              &definition_hash,
+              &request.node_id,
+              request.attempt_number,
+              &request.invocation_id,
+              &request.identity.operation_key,
+              &request.capability,
+              &request.operation,
+              effect,
+              policy_execution_mode,
+              evaluated_at,
+            );
+            store.append_payload(
+              request.run_id.clone(),
+              generated_event_id(),
+              evaluated_at,
+              RunEventPayload::InfrastructurePolicyDecisionRecorded(
+                InfrastructurePolicyDecisionRecordedData {
+                  invocation_id: request.invocation_id.clone(),
+                  call_id: request.call_id.clone(),
+                  operation_key: request.identity.operation_key.clone(),
+                  decision,
+                },
+              ),
+            )?;
+            return Ok(failed_result(&request, Instant::now(), error));
+          }
+        };
+        let evaluator = self.infrastructure_policy_evaluators.prepare(policy);
+        let base = evaluator.evaluate(&descriptor, &evidence, evaluated_at);
+        Some(
+          if let Some(overlay) = self.emergency_deny_overlay.as_ref() {
+            let overlay = self
+              .infrastructure_policy_evaluators
+              .prepare(overlay.as_ref().clone());
+            let overlay_decision = overlay.evaluate(&descriptor, &[], evaluated_at);
+            apply_emergency_deny_overlay(base, overlay_decision)
+          } else {
+            base
+          },
+        )
+      } else {
+        None
+      }
+    };
+    if cancellation.is_cancelled() {
+      return Ok(CapabilityCallResult::Cancelled(failed_fields(
+        &request,
+        Instant::now(),
+        "cancelled",
+        failure(
+          CapabilityFailureKind::Cancelled,
+          "WOML_CAPABILITY_CANCELLED",
+          "The capability call was cancelled before policy-authorized dispatch.",
+          false,
+          false,
+        ),
+      )));
+    }
     {
       let mut store = self.store.lock().await;
       let payload = RunEventPayload::OperationStarted(OperationStartedData {
@@ -822,6 +1142,45 @@ impl DurableCapabilityAuthority {
         execution_mode: OperationExecutionMode::Managed,
         metadata: metadata.clone(),
       });
+      if let Some(decision) = policy_decision.as_ref() {
+        store.append_payload(
+          request.run_id.clone(),
+          generated_event_id(),
+          decision.evaluated_at,
+          RunEventPayload::InfrastructurePolicyDecisionRecorded(
+            InfrastructurePolicyDecisionRecordedData {
+              invocation_id: request.invocation_id.clone(),
+              call_id: request.call_id.clone(),
+              operation_key: request.identity.operation_key.clone(),
+              decision: decision.clone(),
+            },
+          ),
+        )?;
+        if decision.outcome != InfrastructurePolicyDecisionOutcomeV1::Allow {
+          let (code, message) = match decision.outcome {
+            InfrastructurePolicyDecisionOutcomeV1::Deny => (
+              "WOML_POLICY_DENIED",
+              "The admitted infrastructure policy denied this protected effect.",
+            ),
+            InfrastructurePolicyDecisionOutcomeV1::RequirementsUnsatisfied => (
+              "WOML_POLICY_REQUIREMENTS_UNSATISFIED",
+              "Trusted evidence required by the infrastructure policy is missing or insufficient.",
+            ),
+            InfrastructurePolicyDecisionOutcomeV1::Allow => unreachable!(),
+          };
+          return Ok(failed_result(
+            &request,
+            Instant::now(),
+            failure(
+              CapabilityFailureKind::ServiceRejected,
+              code,
+              message,
+              false,
+              false,
+            ),
+          ));
+        }
+      }
       if let Some(scope) = iteration_scope.clone() {
         store.append_payload_scoped(
           request.run_id.clone(),
@@ -983,6 +1342,66 @@ impl DurableCapabilityAuthority {
         request_body_bytes,
         ..
       } => {
+        let operation_key = derive_operation_key(
+          &identity.step_idempotency_key,
+          &format!("native-fetch.{request_id}"),
+        );
+        {
+          let mut store = self.store.lock().await;
+          if self.infrastructure_policy_required
+            || store
+              .infrastructure_policy_binding(&identity.run_id)?
+              .is_some()
+          {
+            if let Some(policy) = store.infrastructure_policy_for_run(&identity.run_id)? {
+              let binding = store.run_binding(&identity.run_id)?;
+              let projection = store.projection(&identity.run_id)?;
+              let execution_mode = infrastructure_policy_execution_mode(
+                &projection,
+                &identity.node_id,
+                identity.attempt_number,
+              );
+              let evaluated_at = Utc::now();
+              let decision = self
+                .infrastructure_policy_evaluators
+                .prepare(policy)
+                .input_unsupported_decision(
+                  &identity.run_id,
+                  &binding.workflow_id,
+                  &binding.definition_hash,
+                  &identity.node_id,
+                  identity.attempt_number,
+                  &identity.invocation_id,
+                  &operation_key,
+                  "http",
+                  "fetch",
+                  CapabilityEffect::UnsafeWrite,
+                  execution_mode,
+                  evaluated_at,
+                );
+              store.append_payload(
+                identity.run_id.clone(),
+                generated_event_id(),
+                evaluated_at,
+                RunEventPayload::InfrastructurePolicyDecisionRecorded(
+                  InfrastructurePolicyDecisionRecordedData {
+                    invocation_id: identity.invocation_id.clone(),
+                    call_id: request_id.clone(),
+                    operation_key: operation_key.clone(),
+                    decision,
+                  },
+                ),
+              )?;
+            }
+            return Err(
+              DurableStoreError::Contract(
+                "WOML_POLICY_INPUT_UNSUPPORTED: native fetch is blocked before network I/O while Infrastructure Policy enforcement is active; use services.http.request()."
+                  .to_string(),
+              )
+              .into(),
+            );
+          }
+        }
         let iteration_scope = {
           let store = self.store.lock().await;
           let projection = store.projection(&identity.run_id)?;
@@ -1039,10 +1458,6 @@ impl DurableCapabilityAuthority {
           metadata.insert("requestBodyBytes".to_string(), Value::from(bytes));
         }
         validate_safe_metadata(&metadata).map_err(DurableStoreError::Contract)?;
-        let operation_key = derive_operation_key(
-          &identity.step_idempotency_key,
-          &format!("native-fetch.{request_id}"),
-        );
         let payload = RunEventPayload::OperationStarted(OperationStartedData {
           node_id: identity.node_id.clone(),
           attempt_number: identity.attempt_number,
@@ -1354,6 +1769,35 @@ impl CapabilityRegistry {
       )
     })?;
     Ok(metadata)
+  }
+
+  /// Builds a trusted operation descriptor after both the generic capability
+  /// contract and the concrete registered handler have accepted the request.
+  pub fn infrastructure_policy_descriptor(
+    &self,
+    request: &CapabilityCallRequest,
+    context: InfrastructurePolicyDescriptorContextV1,
+  ) -> Result<InfrastructurePolicyOperationDescriptorV1, CapabilityFailure> {
+    request.validate()?;
+    let input_bytes = serialized_bytes(&request.input);
+    if input_bytes > request.limits.input_bytes {
+      return Err(failure_with_size(
+        CapabilityFailureKind::InputTooLarge,
+        "WOML_CAPABILITY_INPUT_TOO_LARGE",
+        "The capability input exceeds its configured byte limit.",
+        input_bytes,
+        request.limits.input_bytes,
+      ));
+    }
+    let handler = self.lookup_and_validate(request)?;
+    let metadata = handler.infrastructure_policy_metadata(request)?;
+    InfrastructurePolicyOperationDescriptorV1::build(
+      request,
+      &handler.descriptor(),
+      handler.effect(&request.input),
+      context,
+      metadata,
+    )
   }
 
   pub async fn execute(

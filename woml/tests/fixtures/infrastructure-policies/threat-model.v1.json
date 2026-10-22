@@ -1,0 +1,34 @@
+{
+  "profile": "woml.infrastructure-policy-threat-model/v1",
+  "phase": "IP0",
+  "trustedAuthorities": [
+    "rust-runtime",
+    "validated-policy-bundle",
+    "runtime-configuration",
+    "durable-approval-authority",
+    "durable-artifact-authority",
+    "durable-lock-authority"
+  ],
+  "untrustedSources": [
+    "trigger-payload",
+    "workflow-script",
+    "local-module",
+    "ai-output",
+    "provider-callback",
+    "process-output",
+    "remote-response",
+    "script-authored-artifact-metadata"
+  ],
+  "invariants": [
+    "untrusted input cannot select the environment",
+    "untrusted input cannot change the effective target",
+    "untrusted input cannot assert reviewer identity or role",
+    "untrusted input cannot forge approval quorum",
+    "untrusted input cannot assert artifact integrity",
+    "untrusted input cannot assert lease ownership or fencing",
+    "an infrastructure allow cannot expand capability-specific authority",
+    "a policy parse, signature, adapter, or decision failure cannot become allow",
+    "a signed bundle cannot trust its own signing key",
+    "an emergency overlay can deny but cannot allow"
+  ]
+}

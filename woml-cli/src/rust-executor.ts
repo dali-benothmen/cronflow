@@ -22,6 +22,7 @@ import {
 import { profileAsync, profileSync } from './performance-profiler';
 import type { ProcessRuntimeAuthorityV1 } from './process-policy';
 import type { ArtifactRuntimeAuthorityV1 } from './artifact-policy';
+import type { InfrastructurePolicyRuntimeAuthorityV1 } from './infrastructure-policy';
 
 export interface ReviewerDirectoryV1 {
   readonly profile: 'woml.reviewer-directory/v1';
@@ -44,7 +45,8 @@ export interface ReviewerRuntimeAuthorityV1 {
 export type RuntimeCapabilitiesV1 = Partial<
   ProcessRuntimeAuthorityV1 &
     ArtifactRuntimeAuthorityV1 &
-    ReviewerRuntimeAuthorityV1
+    ReviewerRuntimeAuthorityV1 &
+    InfrastructurePolicyRuntimeAuthorityV1
 >;
 
 export interface RustRunEvent {
@@ -558,7 +560,7 @@ export interface RustRuntimeObservationV1 {
 }
 
 export interface RustBackupStoreInspection {
-  readonly storeVersion: 13 | 14 | 15 | 16 | 17 | 18;
+  readonly storeVersion: 13 | 14 | 15 | 16 | 17 | 18 | 19;
   readonly definitionHashes: readonly string[];
   readonly deploymentId?: string;
   readonly activationId?: string;
@@ -724,6 +726,22 @@ export interface RustRunInspectionV2 {
     readonly waitingFor?: 'concurrency' | 'rate_limit';
     readonly eligibleAt?: string;
     readonly timeoutAt?: string;
+  };
+  readonly infrastructurePolicy?: {
+    readonly profile: 'woml.infrastructure-policy-run-inspection/v1';
+    readonly binding: {
+      readonly runId: string;
+      readonly policyId: string;
+      readonly policyVersion: string;
+      readonly policyDigest: string;
+      readonly canonicalBundleReference: string;
+      readonly signatureStatus: 'unsigned' | 'verified';
+      readonly signingKeyId?: string;
+      readonly admittedAt: string;
+    };
+    readonly decisions: readonly Record<string, unknown>[];
+    readonly totalDecisions: number;
+    readonly truncated: boolean;
   };
   readonly forks?: Record<string, unknown>;
   readonly reusableDefinitions?: {
@@ -3946,7 +3964,7 @@ function backupInspection(value: unknown): RustBackupStoreInspection {
         'runtimeLeaseExpiresAt',
       ]
     ) ||
-    ![13, 14, 15, 16, 17, 18].includes(Number(value.storeVersion)) ||
+    ![13, 14, 15, 16, 17, 18, 19].includes(Number(value.storeVersion)) ||
     !Array.isArray(value.definitionHashes) ||
     value.definitionHashes.length < 1 ||
     value.definitionHashes.length > 10_000 ||
@@ -4936,63 +4954,84 @@ export function inspectRunV2WithRust(
       typeof candidate.truncated !== 'boolean' ||
       !Array.isArray(candidate.items) ||
       candidate.items.length > 100
-    ) return false;
-    const valid = candidate.items.every(item =>
-      record(item) &&
-      exactKeys(
-        item,
-        [
-          'approvalId', 'requestId', 'status', 'reviewDigest', 'review',
-          'required', 'received', 'requiredRoles', 'representedRoles',
-          'directoryVersion', 'requestedAt', 'decisions', 'totalDecisions',
-          'decisionsTruncated',
-        ],
-        ['deadline', 'resolvedAt']
-      ) &&
-      typeof item.approvalId === 'string' &&
-      typeof item.requestId === 'string' &&
-      typeof item.status === 'string' &&
-      /^sha256:[a-f0-9]{64}$/.test(String(item.reviewDigest)) &&
-      record(item.review) &&
-      Number.isSafeInteger(item.required) &&
-      Number(item.required) >= 1 &&
-      Number(item.required) <= 20 &&
-      Number.isSafeInteger(item.received) &&
-      Number(item.received) >= 0 &&
-      Number(item.received) <= Number(item.required) &&
-      Array.isArray(item.requiredRoles) &&
-      item.requiredRoles.length <= 16 &&
-      item.requiredRoles.every(role => typeof role === 'string') &&
-      Array.isArray(item.representedRoles) &&
-      item.representedRoles.length <= 16 &&
-      item.representedRoles.every(role => typeof role === 'string') &&
-      typeof item.directoryVersion === 'string' &&
-      dateTime(item.requestedAt) &&
-      (item.deadline === undefined || dateTime(item.deadline)) &&
-      (item.resolvedAt === undefined || dateTime(item.resolvedAt)) &&
-      Array.isArray(item.decisions) &&
-      item.decisions.length <= 100 &&
-      item.decisions.every(decision =>
-        record(decision) &&
-        exactKeys(decision, [
-          'principalId', 'decision', 'provider', 'providerAccountId',
-          'roles', 'decidedAt',
-        ]) &&
-        typeof decision.principalId === 'string' &&
-        ['approved', 'rejected'].includes(String(decision.decision)) &&
-        typeof decision.provider === 'string' &&
-        typeof decision.providerAccountId === 'string' &&
-        Array.isArray(decision.roles) &&
-        decision.roles.every(role => typeof role === 'string') &&
-        dateTime(decision.decidedAt)
-      ) &&
-      Number.isSafeInteger(item.totalDecisions) &&
-      Number(item.totalDecisions) >= item.decisions.length &&
-      typeof item.decisionsTruncated === 'boolean'
+    )
+      return false;
+    const valid = candidate.items.every(
+      item =>
+        record(item) &&
+        exactKeys(
+          item,
+          [
+            'approvalId',
+            'requestId',
+            'status',
+            'reviewDigest',
+            'review',
+            'required',
+            'received',
+            'requiredRoles',
+            'representedRoles',
+            'directoryVersion',
+            'requestedAt',
+            'decisions',
+            'totalDecisions',
+            'decisionsTruncated',
+          ],
+          ['deadline', 'resolvedAt']
+        ) &&
+        typeof item.approvalId === 'string' &&
+        typeof item.requestId === 'string' &&
+        typeof item.status === 'string' &&
+        /^sha256:[a-f0-9]{64}$/.test(String(item.reviewDigest)) &&
+        record(item.review) &&
+        Number.isSafeInteger(item.required) &&
+        Number(item.required) >= 1 &&
+        Number(item.required) <= 20 &&
+        Number.isSafeInteger(item.received) &&
+        Number(item.received) >= 0 &&
+        Number(item.received) <= Number(item.required) &&
+        Array.isArray(item.requiredRoles) &&
+        item.requiredRoles.length <= 16 &&
+        item.requiredRoles.every(role => typeof role === 'string') &&
+        Array.isArray(item.representedRoles) &&
+        item.representedRoles.length <= 16 &&
+        item.representedRoles.every(role => typeof role === 'string') &&
+        typeof item.directoryVersion === 'string' &&
+        dateTime(item.requestedAt) &&
+        (item.deadline === undefined || dateTime(item.deadline)) &&
+        (item.resolvedAt === undefined || dateTime(item.resolvedAt)) &&
+        Array.isArray(item.decisions) &&
+        item.decisions.length <= 100 &&
+        item.decisions.every(
+          decision =>
+            record(decision) &&
+            exactKeys(decision, [
+              'principalId',
+              'decision',
+              'provider',
+              'providerAccountId',
+              'roles',
+              'decidedAt',
+            ]) &&
+            typeof decision.principalId === 'string' &&
+            ['approved', 'rejected'].includes(String(decision.decision)) &&
+            typeof decision.provider === 'string' &&
+            typeof decision.providerAccountId === 'string' &&
+            Array.isArray(decision.roles) &&
+            decision.roles.every(role => typeof role === 'string') &&
+            dateTime(decision.decidedAt)
+        ) &&
+        Number.isSafeInteger(item.totalDecisions) &&
+        Number(item.totalDecisions) >= item.decisions.length &&
+        typeof item.decisionsTruncated === 'boolean'
     );
-    return valid && Number(candidate.pending) === candidate.items.filter(
-      item => record(item) && item.status === 'pending'
-    ).length;
+    return (
+      valid &&
+      Number(candidate.pending) ===
+        candidate.items.filter(
+          item => record(item) && item.status === 'pending'
+        ).length
+    );
   };
   if (
     !record(value) ||
@@ -5009,7 +5048,14 @@ export function inspectRunV2WithRust(
         'warnings',
         'cancellation',
       ],
-      ['policy', 'forks', 'reusableDefinitions', 'forEach', 'approvals']
+      [
+        'policy',
+        'infrastructurePolicy',
+        'forks',
+        'reusableDefinitions',
+        'forEach',
+        'approvals',
+      ]
     ) ||
     ![
       'woml.run-inspection/v2',
@@ -5061,6 +5107,39 @@ export function inspectRunV2WithRust(
           !dateTime(value.policy.timeoutAt)))) ||
     (value.profile === 'woml.run-inspection/v2' &&
       value.policy !== undefined) ||
+    (value.infrastructurePolicy !== undefined &&
+      (!record(value.infrastructurePolicy) ||
+        !exactKeys(value.infrastructurePolicy, [
+          'profile',
+          'binding',
+          'decisions',
+          'totalDecisions',
+          'truncated',
+        ]) ||
+        value.infrastructurePolicy.profile !==
+          'woml.infrastructure-policy-run-inspection/v1' ||
+        !record(value.infrastructurePolicy.binding) ||
+        !exactKeys(
+          value.infrastructurePolicy.binding,
+          [
+            'runId',
+            'policyId',
+            'policyVersion',
+            'policyDigest',
+            'canonicalBundleReference',
+            'signatureStatus',
+            'admittedAt',
+          ],
+          ['signingKeyId']
+        ) ||
+        typeof value.infrastructurePolicy.binding.policyId !== 'string' ||
+        typeof value.infrastructurePolicy.binding.policyVersion !== 'string' ||
+        typeof value.infrastructurePolicy.binding.policyDigest !== 'string' ||
+        !dateTime(value.infrastructurePolicy.binding.admittedAt) ||
+        !Array.isArray(value.infrastructurePolicy.decisions) ||
+        value.infrastructurePolicy.decisions.length > 100 ||
+        !Number.isSafeInteger(value.infrastructurePolicy.totalDecisions) ||
+        typeof value.infrastructurePolicy.truncated !== 'boolean')) ||
     ([
       'woml.run-inspection/v4',
       'woml.run-inspection/v5',
@@ -5068,20 +5147,30 @@ export function inspectRunV2WithRust(
       'woml.run-inspection/v11',
     ].includes(String(value.profile)) &&
       !record(value.forks)) ||
-    (['woml.run-inspection/v5', 'woml.run-inspection/v6', 'woml.run-inspection/v11'].includes(
-      String(value.profile)
-    ) &&
+    ([
+      'woml.run-inspection/v5',
+      'woml.run-inspection/v6',
+      'woml.run-inspection/v11',
+    ].includes(String(value.profile)) &&
       !reusableDefinitions(value.reusableDefinitions)) ||
-    (!['woml.run-inspection/v5', 'woml.run-inspection/v6', 'woml.run-inspection/v11'].includes(
+    (![
+      'woml.run-inspection/v5',
+      'woml.run-inspection/v6',
+      'woml.run-inspection/v11',
+    ].includes(String(value.profile)) &&
+      value.reusableDefinitions !== undefined) ||
+    (['woml.run-inspection/v6', 'woml.run-inspection/v11'].includes(
       String(value.profile)
     ) &&
-      value.reusableDefinitions !== undefined) ||
-    (['woml.run-inspection/v6', 'woml.run-inspection/v11'].includes(String(value.profile)) &&
       !forEach(value.forEach)) ||
-    (!['woml.run-inspection/v6', 'woml.run-inspection/v11'].includes(String(value.profile)) &&
+    (!['woml.run-inspection/v6', 'woml.run-inspection/v11'].includes(
+      String(value.profile)
+    ) &&
       value.forEach !== undefined) ||
-    (value.profile === 'woml.run-inspection/v11' && !approvals(value.approvals)) ||
-    (value.profile !== 'woml.run-inspection/v11' && value.approvals !== undefined)
+    (value.profile === 'woml.run-inspection/v11' &&
+      !approvals(value.approvals)) ||
+    (value.profile !== 'woml.run-inspection/v11' &&
+      value.approvals !== undefined)
   ) {
     throw new Error('The native core returned invalid run-inspection data.');
   }

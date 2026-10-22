@@ -253,7 +253,7 @@ function decodeManifest(value: unknown): BackupManifestV1 {
     item.deploymentId.length < 1 ||
     item.deploymentId.length > 320 ||
     !isDigest(item.activationId) ||
-    ![13, 14, 15, 16, 17, 18].includes(Number(item.storeVersion)) ||
+    ![13, 14, 15, 16, 17, 18, 19].includes(Number(item.storeVersion)) ||
     database === null ||
     typeof database !== 'object' ||
     Array.isArray(database) ||
@@ -612,8 +612,10 @@ export async function restoreProductionBackup(
       }
       throw error;
     }
+    // Rust owns the current durable-store version and verifies that restore
+    // preparation migrated the database to it before returning this inventory.
+    // Do not duplicate that evolving version number in the CLI.
     if (
-      prepared.storeVersion !== 18 ||
       JSON.stringify(prepared.definitionHashes) !== JSON.stringify(manifest.definitionHashes)
     ) {
       throw new ProductionBackupError(

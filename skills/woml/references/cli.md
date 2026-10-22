@@ -20,11 +20,27 @@ Parses, validates, and compiles all selected workflow/dependency surfaces withou
 
 Use this after an agent creates or edits WOML. `--json` is appropriate for tooling.
 
+When an operator supplies Infrastructure Policy authority, preserve it:
+
+```bash
+woml check <workflow.woml> --policy <name|path> \
+  [--policy-trust <path>] [--require-policy-signature]
+woml policy check <name|path> [--trust <path>] [--require-signature] [--json]
+woml policy explain <workflow.woml> --policy <name|path> \
+  [--step <stepId>] [--trust <path>] [--require-signature] [--json]
+```
+
+`policy explain` is advisory and must report runtime-dependent actions as
+unknown rather than authorized. Named policies live under `.woml/policies/`.
+Trust or signature requirements without a selected policy fail closed.
+
 ## Activate workflows
 
 ```bash
 woml run <workflow.woml|directory>... \
   [--config <path>] [--process-policy <path>|--allow-process <aliases>] \
+  [--policy <name|path>] [--emergency-deny <name|path>] \
+  [--policy-trust <path>] [--require-policy-signature] \
   [--artifact-policy <path>] [--reviewer-directory <path>] \
   [--host <address>] [--port <port>] \
   [--state <path>] [--trigger <manualTriggerId>] [--resume <runId>] \
@@ -47,12 +63,18 @@ woml run <workflow.woml|directory>... \
 - `--reviewer-directory <path>` supplies canonical reviewer principals,
   provider identities, and roles for Rich Plan Approvals. Do not place reviewer
   role claims in workflow source.
+- `--policy <name|path>` activates one immutable operator-owned Infrastructure
+  Policy for new runs. `--emergency-deny` may only remove authority from it.
+- Never remove `--policy-trust` or `--require-policy-signature` from an
+  operator-provided production command.
 - `--verbose`, color, and JSON flags affect presentation, not workflow semantics.
 
 ## One-shot integration execution
 
 ```bash
 woml test <workflow.woml> [--process-policy <path>|--allow-process <aliases>] \
+  [--policy <name|path>] [--emergency-deny <name|path>] \
+  [--policy-trust <path>] [--require-policy-signature] \
   [--state <path>] \
   [--trigger <manualTriggerId>] [--resume <runId>] \
   [--approval-port <port>]

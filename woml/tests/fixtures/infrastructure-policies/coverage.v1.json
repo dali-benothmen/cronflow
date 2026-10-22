@@ -1,0 +1,22 @@
+{
+  "profile": "woml.infrastructure-policy-coverage/v1",
+  "phase": "IP0",
+  "paths": [
+    { "path": "services.process.run", "class": "unsafe-write", "adapter": "required", "posture": "protect" },
+    { "path": "services.http.request", "class": "dynamic", "adapter": "required", "posture": "protect" },
+    { "path": "fetch", "class": "dynamic", "adapter": "required", "posture": "protect-or-block" },
+    { "path": "services.db", "class": "dynamic", "adapter": "required", "posture": "protect" },
+    { "path": "services.storage", "class": "dynamic", "adapter": "required", "posture": "protect" },
+    { "path": "services.cache", "class": "dynamic", "adapter": "required", "posture": "protect-when-authoritative" },
+    { "path": "services.events.emit", "class": "idempotent-write", "adapter": "required", "posture": "protect" },
+    { "path": "services.workflows.call", "class": "idempotent-write", "adapter": "required", "posture": "protect" },
+    { "path": "services.workflows.start", "class": "idempotent-write", "adapter": "required", "posture": "protect" },
+    { "path": "services.artifacts", "class": "dynamic", "adapter": "required", "posture": "protect" },
+    { "path": "services.locks", "class": "dynamic", "adapter": "required", "posture": "protect" },
+    { "path": "notification-providers", "class": "idempotent-write", "adapter": "required", "posture": "protect" },
+    { "path": "custom-providers", "class": "unsafe-write", "adapter": "required", "posture": "deny-without-adapter" },
+    { "path": "compensation-cleanup", "class": "unsafe-write", "adapter": "required", "posture": "dedicated-rules" },
+    { "path": "raw-process-api", "class": "unsupported", "adapter": "none", "posture": "unavailable" },
+    { "path": "uninstrumented-network-api", "class": "unsupported", "adapter": "none", "posture": "unavailable" }
+  ]
+}

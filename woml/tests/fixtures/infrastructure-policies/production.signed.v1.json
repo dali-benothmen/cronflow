@@ -1,0 +1,63 @@
+{
+  "contract": "woml.infrastructure-policy",
+  "contractVersion": 1,
+  "id": "production",
+  "version": "2026-10-22.1",
+  "environment": "production",
+  "defaults": {
+    "read": "deny",
+    "idempotent-write": "deny",
+    "unsafe-write": "deny"
+  },
+  "rules": [
+    {
+      "id": "reviewed-terraform-apply",
+      "description": "Allow only a reviewed Terraform apply while the deployment lock is valid.",
+      "match": {
+        "capabilities": ["process"],
+        "operations": ["run"],
+        "effects": ["unsafe-write"],
+        "workflows": ["deploy-payments"],
+        "targets": ["production-runner"],
+        "executables": ["terraform"],
+        "argumentPrefix": ["apply"],
+        "executionModes": ["normal"]
+      },
+      "decision": "allow",
+      "requires": {
+        "approval": {
+          "minimum": 2,
+          "roles": ["production-owner"],
+          "bindReviewDigest": true,
+          "maxAgeMs": 3600000
+        },
+        "artifacts": {
+          "minimum": 1,
+          "verifiedIntegrity": true,
+          "bindReviewDigest": true
+        },
+        "lock": {
+          "key": "production:payments",
+          "minimumRemainingMs": 30000
+        },
+        "validBetween": {
+          "notBefore": "2026-10-22T00:00:00Z",
+          "notAfter": "2027-10-22T00:00:00Z"
+        }
+      }
+    },
+    {
+      "id": "deny-unadapted-custom-providers",
+      "match": {
+        "capabilities": ["custom-provider"],
+        "effects": ["unsafe-write"]
+      },
+      "decision": "deny"
+    }
+  ],
+  "signature": {
+    "algorithm": "ed25519",
+    "keyId": "release-2026",
+    "value": "_JHWkA5ZcGalWMqkNOJyohMUmda5enO76rYfiR8yZ0LC13iNEexvYfPYvNIeuGzV6Ix1rPrkS8fA7ybXrgxCBw"
+  }
+}

@@ -1,0 +1,19 @@
+{
+  "profile": "woml.infrastructure-policy-performance-budgets/v1",
+  "authority": "in-process-rust",
+  "budgets": {
+    "maximumPolicyBytes": 1048576,
+    "maximumRules": 1024,
+    "maximumEvaluationInstructions": 250000,
+    "smallPolicyEvaluationMicros": 100000,
+    "maximumPolicyEvaluationMicros": 100000,
+    "maximumDecisionBytes": 65536,
+    "preparedCacheEntries": 128,
+    "maximumInspectionDecisions": 100
+  },
+  "notes": [
+    "Evaluation is an in-process Rust call with no network or script-host round trip.",
+    "The evaluator fails closed when its instruction or wall-clock budget is exhausted.",
+    "CI ceilings are intentionally portable across Linux, macOS, and Windows debug builds."
+  ]
+}

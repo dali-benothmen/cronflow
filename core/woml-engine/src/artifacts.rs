@@ -1556,6 +1556,49 @@ impl ManagedArtifactStore {
       .verify(&artifact.reference.sha256, artifact.reference.size)?;
     Ok(artifact.reference)
   }
+
+  /// Revalidates an artifact pinned by the durable rich-approval authority.
+  /// The caller supplies only the immutable ID and digest stored in the pin;
+  /// every remaining field, run grant, retention state, and backend byte
+  /// digest is recovered and checked by the trusted artifact store.
+  pub(crate) fn verify_policy_evidence(
+    &self,
+    run_id: &str,
+    artifact_id: &str,
+    expected_sha256: &str,
+  ) -> Result<ArtifactReferenceV1, CapabilityFailure> {
+    let store = self.configured()?;
+    let connection = store.connection()?;
+    validate_schema(&connection)?;
+    let supplied = connection
+      .query_row(
+        "SELECT artifact_id, name, size, sha256, content_type
+         FROM woml_artifacts WHERE artifact_id = ?1",
+        [artifact_id],
+        |row| {
+          Ok(ArtifactReferenceV1 {
+            contract: ARTIFACT_REFERENCE_CONTRACT.to_string(),
+            contract_version: ARTIFACT_REFERENCE_CONTRACT_VERSION,
+            id: row.get(0)?,
+            name: row.get(1)?,
+            size: row.get(2)?,
+            sha256: row.get(3)?,
+            content_type: row.get(4)?,
+          })
+        },
+      )
+      .optional()
+      .map_err(|_| backend_unavailable())?
+      .ok_or_else(artifact_not_found)?;
+    if supplied.sha256 != expected_sha256 {
+      return Err(artifact_access_denied());
+    }
+    let artifact = store.authorize_reference(run_id, &supplied)?;
+    store
+      .backend
+      .verify(&artifact.reference.sha256, artifact.reference.size)?;
+    Ok(artifact.reference)
+  }
 }
 
 struct ArtifactStore {

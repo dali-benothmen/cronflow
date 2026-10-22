@@ -1,0 +1,97 @@
+{
+  "contract": "woml.infrastructure-policy",
+  "contractVersion": 1,
+  "id": "reviewed-production",
+  "version": "1",
+  "environment": "production",
+  "defaults": {
+    "read": "deny",
+    "idempotent-write": "deny",
+    "unsafe-write": "deny"
+  },
+  "rules": [
+    {
+      "id": "manage-reviewed-artifacts",
+      "description": "Let this workflow preserve and materialize artifacts within the separate Artifact Policy boundary.",
+      "match": {
+        "capabilities": ["artifacts"],
+        "operations": ["put", "head", "materialize"],
+        "workflows": ["reviewed-terraform-release"],
+        "executionModes": ["normal", "compensation"]
+      },
+      "decision": "allow"
+    },
+    {
+      "id": "own-deployment-lease",
+      "description": "Let this workflow acquire, verify, and release only its runtime-managed lock authority.",
+      "match": {
+        "capabilities": ["locks"],
+        "operations": ["acquire", "assert-current", "release"],
+        "workflows": ["reviewed-terraform-release"]
+      },
+      "decision": "allow"
+    },
+    {
+      "id": "create-terraform-plan",
+      "description": "Permit this workflow to create plans without granting apply authority.",
+      "match": {
+        "capabilities": ["process"],
+        "operations": ["run"],
+        "workflows": ["reviewed-terraform-release"],
+        "executables": ["terraform"],
+        "argumentPrefix": ["plan"],
+        "executionModes": ["normal"]
+      },
+      "decision": "allow"
+    },
+    {
+      "id": "apply-reviewed-plan",
+      "description": "Apply only after two bound reviewers, two verified artifacts, and the deployment lease exist.",
+      "match": {
+        "capabilities": ["process"],
+        "operations": ["run"],
+        "effects": ["unsafe-write"],
+        "workflows": ["reviewed-terraform-release"],
+        "executables": ["terraform"],
+        "argumentPrefix": ["apply"],
+        "executionModes": ["normal", "compensation"]
+      },
+      "decision": "allow",
+      "requires": {
+        "approval": {
+          "minimum": 2,
+          "roles": ["production-owner", "security-owner"],
+          "bindReviewDigest": true,
+          "maxAgeMs": 3600000
+        },
+        "artifacts": {
+          "minimum": 2,
+          "verifiedIntegrity": true,
+          "bindReviewDigest": true
+        },
+        "lock": {
+          "key": "production/terraform",
+          "minimumRemainingMs": 30000
+        }
+      }
+    },
+    {
+      "id": "verify-reviewed-release",
+      "match": {
+        "capabilities": ["process"],
+        "operations": ["run"],
+        "workflows": ["reviewed-terraform-release"],
+        "executables": ["terraform"],
+        "argumentPrefix": ["show"],
+        "executionModes": ["normal"]
+      },
+      "decision": "allow",
+      "requires": {
+        "lock": {
+          "key": "production/terraform",
+          "minimumRemainingMs": 30000
+        }
+      }
+    }
+  ]
+}

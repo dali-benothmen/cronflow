@@ -209,16 +209,17 @@ fn future_store_versions_fail_closed() {
   let database = TemporaryDatabase::new("future");
   drop(DurableEventStore::open(database.path()).unwrap());
   let connection = Connection::open(database.path()).unwrap();
+  let future_version = (DURABLE_STORE_SCHEMA_VERSION + 1).to_string();
   connection
     .execute(
-      "UPDATE woml_store_metadata SET value = '19' WHERE key = 'schema_version'",
-      [],
+      "UPDATE woml_store_metadata SET value = ?1 WHERE key = 'schema_version'",
+      [&future_version],
     )
     .unwrap();
   drop(connection);
   assert!(matches!(
     DurableEventStore::open(database.path()),
-    Err(DurableStoreError::UnsupportedStoreVersion(version)) if version == "19"
+    Err(DurableStoreError::UnsupportedStoreVersion(version)) if version == future_version
   ));
 }
 
