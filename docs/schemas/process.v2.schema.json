@@ -1,0 +1,80 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://woml.dev/schemas/process/v2",
+  "title": "WOML Process v2",
+  "description": "Process v1 plus one top-level stream flag and bounded result stream metadata. Process v1 remains accepted unchanged.",
+  "oneOf": [
+    { "$ref": "#/$defs/request" },
+    { "$ref": "#/$defs/result" }
+  ],
+  "$defs": {
+    "alias": { "type": "string", "pattern": "^[a-zA-Z0-9][a-zA-Z0-9._-]{0,127}$" },
+    "environment": {
+      "type": "object",
+      "maxProperties": 128,
+      "propertyNames": { "pattern": "^[A-Za-z_][A-Za-z0-9_]{0,127}$" },
+      "additionalProperties": { "type": "string", "maxLength": 32768, "pattern": "^[^\\u0000]*$" }
+    },
+    "output": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["stdout", "stderr", "maxBytes"],
+      "properties": {
+        "stdout": { "enum": ["capture", "discard"] },
+        "stderr": { "enum": ["capture", "discard"] },
+        "maxBytes": { "type": "integer", "minimum": 1, "maximum": 262144 }
+      }
+    },
+    "request": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["contract", "contractVersion", "kind", "executable", "args", "cwd", "env", "timeoutMs", "acceptExitCodes", "output", "stream"],
+      "properties": {
+        "contract": { "const": "woml.process" },
+        "contractVersion": { "const": 2 },
+        "kind": { "const": "request" },
+        "executable": { "$ref": "#/$defs/alias" },
+        "args": { "type": "array", "maxItems": 256, "items": { "type": "string", "maxLength": 32768, "pattern": "^[^\\u0000]*$" } },
+        "cwd": { "type": "string", "minLength": 1, "maxLength": 4096, "pattern": "^(?!.*\\u0000)(?![A-Za-z]:[\\\\/])(?![\\\\/])(?!.*(?:^|[\\\\/])\\.\\.(?:[\\\\/]|$)).+$" },
+        "env": { "$ref": "#/$defs/environment" },
+        "timeoutMs": { "type": "integer", "minimum": 1, "maximum": 86400000 },
+        "acceptExitCodes": { "type": "array", "minItems": 1, "maxItems": 32, "uniqueItems": true, "items": { "type": "integer", "minimum": 0, "maximum": 255 } },
+        "output": { "$ref": "#/$defs/output" },
+        "stream": { "type": "boolean" }
+      }
+    },
+    "result": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["contract", "contractVersion", "kind", "exitCode", "signal", "stdout", "stderr", "stdoutBytes", "stderrBytes", "stdoutTruncated", "stderrTruncated", "durationMs", "streamed", "streamStartSequence", "streamEndSequence", "streamTruncated", "streamArtifact"],
+      "properties": {
+        "contract": { "const": "woml.process" },
+        "contractVersion": { "const": 2 },
+        "kind": { "const": "result" },
+        "exitCode": { "type": ["integer", "null"], "minimum": 0, "maximum": 255 },
+        "signal": { "type": ["string", "null"], "minLength": 1, "maxLength": 128 },
+        "stdout": { "type": "string" },
+        "stderr": { "type": "string" },
+        "stdoutBytes": { "type": "integer", "minimum": 0, "maximum": 9007199254740991 },
+        "stderrBytes": { "type": "integer", "minimum": 0, "maximum": 9007199254740991 },
+        "stdoutTruncated": { "type": "boolean" },
+        "stderrTruncated": { "type": "boolean" },
+        "durationMs": { "type": "number", "minimum": 0 },
+        "streamed": { "type": "boolean" },
+        "streamStartSequence": { "type": ["integer", "null"], "minimum": 1, "maximum": 9007199254740991 },
+        "streamEndSequence": { "type": ["integer", "null"], "minimum": 1, "maximum": 9007199254740991 },
+        "streamTruncated": { "type": "boolean" },
+        "streamArtifact": {
+          "oneOf": [
+            { "$ref": "https://woml.dev/schemas/artifact-reference/v1" },
+            { "type": "null" }
+          ]
+        }
+      },
+      "anyOf": [
+        { "properties": { "exitCode": { "type": "integer" } }, "required": ["exitCode"] },
+        { "properties": { "signal": { "type": "string" } }, "required": ["signal"] }
+      ]
+    }
+  }
+}

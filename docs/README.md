@@ -48,6 +48,7 @@ or schema documents to write and run a workflow.
 | Runtime configuration and ownership | [Production runtime](woml-production-runtime.md) |
 | VPS, Docker, proxy, and Kubernetes | [Production deployment](woml-production-deployment.md) |
 | Logs, metrics, and terminal inspection | [Observability](woml-observability.md) |
+| Streaming output contracts and cursor semantics | [Streaming Output and Progress v1](protocols/streaming-output-and-progress-v1.md) |
 | Recovery behavior | [Recovery](woml-recovery.md) |
 | Backup and restore | [Backup and restore](woml-backup-and-restore.md) |
 | Retention and pruning | [Retention and maintenance](woml-retention-and-maintenance.md) |

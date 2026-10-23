@@ -1,0 +1,36 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://woml.dev/schemas/operational-page/v1",
+  "title": "WOML Operational Page v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["profile", "deploymentId", "requestedAfter", "nextAfter", "latestSequence", "hasMore", "records"],
+  "properties": {
+    "profile": { "const": "woml.operational-page/v1" },
+    "deploymentId": { "type": "string", "minLength": 1, "maxLength": 320 },
+    "runId": { "type": "string", "minLength": 1, "maxLength": 320 },
+    "requestedAfter": { "type": "integer", "minimum": 0, "maximum": 9007199254740991 },
+    "nextAfter": { "type": "integer", "minimum": 0, "maximum": 9007199254740991 },
+    "earliestAvailable": { "type": "integer", "minimum": 1, "maximum": 9007199254740991 },
+    "latestSequence": { "type": "integer", "minimum": 0, "maximum": 9007199254740991 },
+    "hasMore": { "type": "boolean" },
+    "gap": { "$ref": "#/$defs/gap" },
+    "records": {
+      "type": "array",
+      "maxItems": 1000,
+      "items": { "$ref": "https://woml.dev/schemas/operational-record/v1" }
+    }
+  },
+  "$defs": {
+    "gap": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["requestedAfter", "prunedThrough"],
+      "properties": {
+        "requestedAfter": { "type": "integer", "minimum": 0, "maximum": 9007199254740991 },
+        "prunedThrough": { "type": "integer", "minimum": 1, "maximum": 9007199254740991 },
+        "earliestAvailable": { "type": "integer", "minimum": 1, "maximum": 9007199254740991 }
+      }
+    }
+  }
+}

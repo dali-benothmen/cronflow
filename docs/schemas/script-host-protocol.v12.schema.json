@@ -1,0 +1,61 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://woml.dev/schemas/script-host-protocol/v12",
+  "title": "WOML Script Host Operational Frames v12",
+  "description": "Strict Script Host v12 script_log, progress_report, and progress_ack extensions. Existing control-message bodies retain their v11 meaning with protocolVersion 12.",
+  "oneOf": [
+    { "$ref": "#/$defs/scriptLog" },
+    { "$ref": "#/$defs/progressReport" },
+    { "$ref": "#/$defs/progressAck" }
+  ],
+  "$defs": {
+    "id": { "type": "string", "minLength": 1, "maxLength": 320, "pattern": "^\\S+$" },
+    "sequence": { "type": "integer", "minimum": 1, "maximum": 9007199254740991 },
+    "scriptLog": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["protocol", "protocolVersion", "messageType", "requestId", "frameSequence", "level", "text"],
+      "properties": {
+        "protocol": { "const": "woml.script-host" },
+        "protocolVersion": { "const": 12 },
+        "messageType": { "const": "script_log" },
+        "requestId": { "$ref": "#/$defs/id" },
+        "frameSequence": { "$ref": "#/$defs/sequence" },
+        "level": { "enum": ["debug", "info", "warn", "error"] },
+        "text": { "type": "string", "maxLength": 4096, "pattern": "^[^\\u0000]*$" }
+      }
+    },
+    "progressReport": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["protocol", "protocolVersion", "messageType", "requestId", "frameSequence", "progressId"],
+      "properties": {
+        "protocol": { "const": "woml.script-host" },
+        "protocolVersion": { "const": 12 },
+        "messageType": { "const": "progress_report" },
+        "requestId": { "$ref": "#/$defs/id" },
+        "frameSequence": { "$ref": "#/$defs/sequence" },
+        "progressId": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^\\S+$" },
+        "current": { "type": "number", "minimum": 0, "maximum": 9007199254740991 },
+        "total": { "type": "number", "exclusiveMinimum": 0, "maximum": 9007199254740991 },
+        "unit": { "type": "string", "minLength": 1, "maxLength": 32 },
+        "message": { "type": "string", "minLength": 1, "maxLength": 512, "pattern": "^[^\\u0000]*$" }
+      },
+      "anyOf": [{ "required": ["current"] }, { "required": ["message"] }],
+      "dependentRequired": { "unit": ["current"] }
+    },
+    "progressAck": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["protocol", "protocolVersion", "messageType", "requestId", "frameSequence", "accepted"],
+      "properties": {
+        "protocol": { "const": "woml.script-host" },
+        "protocolVersion": { "const": 12 },
+        "messageType": { "const": "progress_ack" },
+        "requestId": { "$ref": "#/$defs/id" },
+        "frameSequence": { "$ref": "#/$defs/sequence" },
+        "accepted": { "const": true }
+      }
+    }
+  }
+}

@@ -1,0 +1,25 @@
+{
+  "profile": "woml.streaming-output-threat-model/v1",
+  "invariants": [
+    "redact-before-persist",
+    "redact-across-chunk-boundaries",
+    "escape-terminal-control-sequences",
+    "rust-assigns-execution-identity",
+    "run-scoped-cursors-never-widen-access",
+    "reject-symlinks-reparse-points-and-hardlinks",
+    "producers-never-wait-for-slow-subscribers",
+    "coalesce-napi-wakeups",
+    "output-replay-never-replays-workflow-work",
+    "protect-active-runs-from-retention",
+    "never-index-or-measure-record-bodies",
+    "surface-truncation-and-gaps-explicitly"
+  ],
+  "untrustedSources": [
+    "workflow-javascript",
+    "child-process-output",
+    "imported-modules",
+    "provider-payloads",
+    "ai-output",
+    "cursor-input"
+  ]
+}

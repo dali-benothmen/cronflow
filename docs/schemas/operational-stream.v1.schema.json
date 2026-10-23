@@ -1,0 +1,73 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://woml.dev/schemas/operational-stream/v1",
+  "title": "WOML Operational Stream v1",
+  "oneOf": [
+    { "$ref": "#/$defs/record" },
+    { "$ref": "#/$defs/gap" },
+    { "$ref": "#/$defs/heartbeat" },
+    { "$ref": "#/$defs/closed" }
+  ],
+  "$defs": {
+    "base": {
+      "type": "object",
+      "required": ["profile", "event", "cursor"],
+      "properties": {
+        "profile": { "const": "woml.operational-stream/v1" },
+        "event": { "enum": ["record", "gap", "heartbeat", "closed"] },
+        "cursor": { "type": "integer", "minimum": 0, "maximum": 9007199254740991 }
+      }
+    },
+    "record": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["profile", "event", "cursor", "record"],
+      "properties": {
+        "profile": { "const": "woml.operational-stream/v1" },
+        "event": { "const": "record" },
+        "cursor": { "type": "integer", "minimum": 1, "maximum": 9007199254740991 },
+        "record": { "$ref": "https://woml.dev/schemas/operational-record/v1" }
+      }
+    },
+    "gap": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["profile", "event", "cursor", "gap"],
+      "properties": {
+        "profile": { "const": "woml.operational-stream/v1" },
+        "event": { "const": "gap" },
+        "cursor": { "type": "integer", "minimum": 0, "maximum": 9007199254740991 },
+        "gap": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["requestedAfter", "prunedThrough"],
+          "properties": {
+            "requestedAfter": { "type": "integer", "minimum": 0, "maximum": 9007199254740991 },
+            "prunedThrough": { "type": "integer", "minimum": 1, "maximum": 9007199254740991 },
+            "earliestAvailable": { "type": "integer", "minimum": 1, "maximum": 9007199254740991 }
+          }
+        }
+      }
+    },
+    "heartbeat": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["profile", "event", "cursor"],
+      "properties": {
+        "profile": { "const": "woml.operational-stream/v1" },
+        "event": { "const": "heartbeat" },
+        "cursor": { "type": "integer", "minimum": 0, "maximum": 9007199254740991 }
+      }
+    },
+    "closed": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["profile", "event", "cursor"],
+      "properties": {
+        "profile": { "const": "woml.operational-stream/v1" },
+        "event": { "const": "closed" },
+        "cursor": { "type": "integer", "minimum": 0, "maximum": 9007199254740991 }
+      }
+    }
+  }
+}

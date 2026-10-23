@@ -1,0 +1,100 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://woml.dev/schemas/operational-record/v1",
+  "title": "WOML Operational Record v1",
+  "description": "A flat, bounded, redacted, non-authoritative record assigned by the Rust runtime.",
+  "oneOf": [
+    { "allOf": [{ "$ref": "#/$defs/base" }, { "$ref": "#/$defs/output" }], "unevaluatedProperties": false },
+    { "allOf": [{ "$ref": "#/$defs/base" }, { "$ref": "#/$defs/progress" }], "unevaluatedProperties": false },
+    { "allOf": [{ "$ref": "#/$defs/base" }, { "$ref": "#/$defs/truncated" }], "unevaluatedProperties": false },
+    { "allOf": [{ "$ref": "#/$defs/base" }, { "$ref": "#/$defs/artifact" }], "unevaluatedProperties": false },
+    { "allOf": [{ "$ref": "#/$defs/base" }, { "$ref": "#/$defs/closed" }], "unevaluatedProperties": false },
+    { "allOf": [{ "$ref": "#/$defs/base" }, { "$ref": "#/$defs/gap" }], "unevaluatedProperties": false }
+  ],
+  "$defs": {
+    "id": { "type": "string", "minLength": 1, "maxLength": 320, "pattern": "^\\S+$" },
+    "base": {
+      "type": "object",
+      "required": ["profile", "deploymentId", "sequence", "occurredAt", "workflowId", "runId", "kind"],
+      "properties": {
+        "profile": { "const": "woml.operational-record/v1" },
+        "deploymentId": { "$ref": "#/$defs/id" },
+        "sequence": { "type": "integer", "minimum": 1, "maximum": 9007199254740991 },
+        "occurredAt": { "type": "string", "format": "date-time" },
+        "workflowId": { "$ref": "#/$defs/id" },
+        "runId": { "$ref": "#/$defs/id" },
+        "nodeId": { "$ref": "#/$defs/id" },
+        "attempt": { "type": "integer", "minimum": 1, "maximum": 4294967295 },
+        "invocationId": { "$ref": "#/$defs/id" },
+        "kind": { "enum": ["output", "progress", "truncated", "artifact", "closed", "gap"] }
+      }
+    },
+    "source": { "enum": ["stdout", "stderr", "script", "runtime"] },
+    "output": {
+      "type": "object",
+      "required": ["kind", "source", "text", "byteCount"],
+      "properties": {
+        "kind": { "const": "output" },
+        "source": { "$ref": "#/$defs/source" },
+        "text": { "type": "string", "maxLength": 16384, "pattern": "^[^\\u0000]*$" },
+        "byteCount": { "type": "integer", "minimum": 0, "maximum": 16384 }
+      }
+    },
+    "progress": {
+      "type": "object",
+      "required": ["kind", "progressId", "status"],
+      "properties": {
+        "kind": { "const": "progress" },
+        "progressId": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^\\S+$" },
+        "current": { "type": "number", "minimum": 0, "maximum": 9007199254740991 },
+        "total": { "type": "number", "exclusiveMinimum": 0, "maximum": 9007199254740991 },
+        "unit": { "type": "string", "minLength": 1, "maxLength": 32 },
+        "message": { "type": "string", "minLength": 1, "maxLength": 512, "pattern": "^[^\\u0000]*$" },
+        "status": { "enum": ["active", "closed"] }
+      },
+      "anyOf": [{ "required": ["current"] }, { "required": ["message"] }],
+      "dependentRequired": { "unit": ["current"] }
+    },
+    "truncated": {
+      "type": "object",
+      "required": ["kind", "source", "droppedBytes", "reason"],
+      "properties": {
+        "kind": { "const": "truncated" },
+        "source": { "$ref": "#/$defs/source" },
+        "droppedBytes": { "type": "integer", "minimum": 1, "maximum": 9007199254740991 },
+        "reason": { "type": "string", "minLength": 1, "maxLength": 128 }
+      }
+    },
+    "artifact": {
+      "type": "object",
+      "required": ["kind", "artifactId", "name", "size", "sha256", "contentType"],
+      "properties": {
+        "kind": { "const": "artifact" },
+        "artifactId": { "$ref": "#/$defs/id" },
+        "name": { "type": "string", "minLength": 1, "maxLength": 256 },
+        "size": { "type": "integer", "minimum": 0, "maximum": 9007199254740991 },
+        "sha256": { "type": "string", "pattern": "^[a-f0-9]{64}$" },
+        "contentType": { "type": "string", "minLength": 1, "maxLength": 255 }
+      }
+    },
+    "closed": {
+      "type": "object",
+      "required": ["kind", "status"],
+      "properties": {
+        "kind": { "const": "closed" },
+        "status": { "enum": ["succeeded", "failed", "cancelled", "timed_out", "interrupted"] },
+        "reasonCode": { "type": "string", "pattern": "^WOML_[A-Z0-9_]+$", "maxLength": 128 }
+      }
+    },
+    "gap": {
+      "type": "object",
+      "required": ["kind", "requestedAfter", "prunedThrough"],
+      "properties": {
+        "kind": { "const": "gap" },
+        "requestedAfter": { "type": "integer", "minimum": 0, "maximum": 9007199254740991 },
+        "prunedThrough": { "type": "integer", "minimum": 1, "maximum": 9007199254740991 },
+        "earliestAvailable": { "type": "integer", "minimum": 1, "maximum": 9007199254740991 }
+      }
+    }
+  }
+}
