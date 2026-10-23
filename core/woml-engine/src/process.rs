@@ -2102,7 +2102,7 @@ mod tests {
 
   #[test]
   fn fixture_child() {
-    if std::env::var("WOML_PROCESS_FIXTURE").as_deref() != Ok("1") {
+    if std::env::var("WOML_PROCESS_FIXTURE").as_deref() != Ok("woml-process-fixture-active") {
       return;
     }
     if let Ok(role) = std::env::var("WOML_PROCESS_FIXTURE_TREE") {
@@ -2112,7 +2112,7 @@ mod tests {
         std::process::Command::new(std::env::current_exe().expect("fixture executable"))
           .args(["--exact", "process::tests::fixture_child", "--nocapture"])
           .env_clear()
-          .env("WOML_PROCESS_FIXTURE", "1")
+          .env("WOML_PROCESS_FIXTURE", "woml-process-fixture-active")
           .env("WOML_PROCESS_FIXTURE_TREE", "grandchild")
           .env("WOML_PROCESS_FIXTURE_HEARTBEAT", &heartbeat)
           .stdin(Stdio::null())
@@ -2134,7 +2134,7 @@ mod tests {
         std::thread::sleep(Duration::from_millis(10));
       }
     }
-    if std::env::var("WOML_PROCESS_FIXTURE_CWD").as_deref() == Ok("1") {
+    if std::env::var("WOML_PROCESS_FIXTURE_CWD").as_deref() == Ok("report-current-directory") {
       print!(
         "{}",
         std::env::current_dir()
@@ -2173,7 +2173,7 @@ mod tests {
       .execute(
         request(
           json!({
-            "WOML_PROCESS_FIXTURE": "1",
+            "WOML_PROCESS_FIXTURE": "woml-process-fixture-active",
             "WOML_PROCESS_FIXTURE_TEXT": "abcdefghijklmnopqrstuvwxyz"
           }),
           10,
@@ -2209,7 +2209,7 @@ mod tests {
       .expect("configure output store");
     let mut input = request(
       json!({
-        "WOML_PROCESS_FIXTURE": "1",
+        "WOML_PROCESS_FIXTURE": "woml-process-fixture-active",
         "WOML_PROCESS_FIXTURE_TEXT": "before-stream-secret-42-after"
       }),
       128,
@@ -2285,7 +2285,7 @@ mod tests {
       .execute(
         request(
           json!({
-            "WOML_PROCESS_FIXTURE": "1",
+            "WOML_PROCESS_FIXTURE": "woml-process-fixture-active",
             "WOML_PROCESS_FIXTURE_PRINT_ENV": "PATH"
           }),
           1_024,
@@ -2312,7 +2312,7 @@ mod tests {
       .execute(
         request(
           json!({
-            "WOML_PROCESS_FIXTURE": "1",
+            "WOML_PROCESS_FIXTURE": "woml-process-fixture-active",
             "WOML_PROCESS_FIXTURE_ENV_NAME": "HOME"
           }),
           128,
@@ -2335,7 +2335,7 @@ mod tests {
       .execute(
         request(
           json!({
-            "WOML_PROCESS_FIXTURE": "1",
+            "WOML_PROCESS_FIXTURE": "woml-process-fixture-active",
             "WOML_PROCESS_FIXTURE_ENV_NAME": "PATH"
           }),
           128,
@@ -2359,7 +2359,7 @@ mod tests {
       .execute(
         request(
           json!({
-            "WOML_PROCESS_FIXTURE": "1",
+            "WOML_PROCESS_FIXTURE": "woml-process-fixture-active",
             "WOML_PROCESS_FIXTURE_TEXT": "approved-binary-ran",
             "PATH": "/definitely/not/the/operator/path"
           }),
@@ -2385,8 +2385,8 @@ mod tests {
       .execute(
         request(
           json!({
-            "WOML_PROCESS_FIXTURE": "1",
-            "WOML_PROCESS_FIXTURE_CWD": "1"
+            "WOML_PROCESS_FIXTURE": "woml-process-fixture-active",
+            "WOML_PROCESS_FIXTURE_CWD": "report-current-directory"
           }),
           512,
           vec![0],
@@ -2563,7 +2563,7 @@ mod tests {
       .execute(
         request(
           json!({
-            "WOML_PROCESS_FIXTURE": "1",
+            "WOML_PROCESS_FIXTURE": "woml-process-fixture-active",
             "WOML_PROCESS_FIXTURE_TEXT": "sensitive output",
             "WOML_PROCESS_FIXTURE_EXIT": "7"
           }),
@@ -2599,7 +2599,11 @@ mod tests {
   fn runtime_policy_caps_the_effective_process_timeout() {
     let handler =
       ManagedProcessHandler::new(policy(), ProcessRuntimeMode::Foreground).expect("valid policy");
-    let mut input = request(json!({ "WOML_PROCESS_FIXTURE": "1" }), 128, vec![0]);
+    let mut input = request(
+      json!({ "WOML_PROCESS_FIXTURE": "woml-process-fixture-active" }),
+      128,
+      vec![0],
+    );
     input["timeoutMs"] = json!(10_000);
     let authorized = handler
       .parse_and_authorize(&input)
@@ -2609,7 +2613,11 @@ mod tests {
 
   #[test]
   fn process_versions_keep_v1_exact_and_accept_the_explicit_v2_shape() {
-    let v1 = request(json!({ "WOML_PROCESS_FIXTURE": "1" }), 128, vec![0]);
+    let v1 = request(
+      json!({ "WOML_PROCESS_FIXTURE": "woml-process-fixture-active" }),
+      128,
+      vec![0],
+    );
     assert_eq!(
       parse_request(&v1)
         .expect("exact Process v1")
@@ -2681,7 +2689,7 @@ mod tests {
       ManagedProcessHandler::new(policy(), ProcessRuntimeMode::Foreground).expect("valid policy");
     let input = request(
       json!({
-        "WOML_PROCESS_FIXTURE": "1",
+        "WOML_PROCESS_FIXTURE": "woml-process-fixture-active",
         "WOML_PROCESS_FIXTURE_TEXT": "never-persist-this-secret"
       }),
       128,
@@ -2710,7 +2718,7 @@ mod tests {
   fn tree_request(path: &Path, timeout_ms: u64) -> Value {
     let mut value = request(
       json!({
-        "WOML_PROCESS_FIXTURE": "1",
+        "WOML_PROCESS_FIXTURE": "woml-process-fixture-active",
         "WOML_PROCESS_FIXTURE_TREE": "parent",
         "WOML_PROCESS_FIXTURE_HEARTBEAT": path.to_string_lossy()
       }),
@@ -2797,7 +2805,11 @@ mod tests {
     assert!(heartbeat.exists(), "first process did not start");
     let error = handler
       .execute(
-        request(json!({ "WOML_PROCESS_FIXTURE": "1" }), 128, vec![0]),
+        request(
+          json!({ "WOML_PROCESS_FIXTURE": "woml-process-fixture-active" }),
+          128,
+          vec![0],
+        ),
         CapabilityCancellationToken::default(),
       )
       .await

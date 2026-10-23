@@ -902,8 +902,26 @@ fn store_v15_migrates_to_the_current_store_and_future_versions_fail_closed() {
   ));
 }
 
-#[tokio::test]
-async fn two_durable_runs_execute_one_protected_body_at_a_time() {
+#[test]
+fn two_durable_runs_execute_one_protected_body_at_a_time() {
+  // Windows test threads have a smaller stack; keep this deliberately large
+  // concurrent runtime future on an explicitly bounded test-only stack.
+  std::thread::Builder::new()
+    .name("woml-lock-concurrency-test".to_string())
+    .stack_size(8 * 1024 * 1024)
+    .spawn(|| {
+      tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("lock test runtime")
+        .block_on(two_durable_runs_execute_one_protected_body_at_a_time_inner())
+    })
+    .expect("spawn lock concurrency test")
+    .join()
+    .expect("lock concurrency test joins");
+}
+
+async fn two_durable_runs_execute_one_protected_body_at_a_time_inner() {
   let Some(first_host) = host_options() else {
     return;
   };

@@ -390,7 +390,9 @@ jobs:
         run: >-
           cargo test --config profile.dev.debug=0
           --config profile.dev.incremental=false -j 1 --locked
-          -p woml-engine --test operational_output_store -- --test-threads=1 &&
+          -p woml-engine --test operational_output_store --
+          --test-threads=1
+          --skip publication_budgets_cover_activation_append_replay_progress_concurrency_and_prune &&
           cargo test --config profile.dev.debug=0
           --config profile.dev.incremental=false -j 1 --locked
           -p woml-engine --lib

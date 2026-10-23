@@ -11,7 +11,6 @@ import {
 const packageRoot = resolve(import.meta.dir, '..');
 const projectRoot = resolve(packageRoot, '..');
 const cliPath = join(packageRoot, 'dist', 'cli.js');
-const workflowPath = join(projectRoot, 'examples', 'webhookWorkflow.woml');
 const scriptPath = Bun.which('script');
 const packagedTest = scriptPath === null || process.platform === 'win32' ? test.skip : test;
 const directories: string[] = [];
@@ -72,6 +71,7 @@ describe('packaged background workflow log following', () => {
     directories.push(directory);
     const statePath = join(directory, 'data', 'state.sqlite');
     const configPath = join(directory, 'runtime.json');
+    const workflowPath = join(directory, 'background-streaming.woml');
     const publicPort = await availablePort();
     const adminPort = await availablePort();
     await mkdir(join(directory, 'logs'), { recursive: true });
@@ -87,6 +87,29 @@ describe('packaged background workflow log following', () => {
         observability: { health: true, metrics: true },
         retention: { enabled: false },
       })
+    );
+    await writeFile(
+      workflowPath,
+      `<woml>
+  <workflow id="webhook-demo" name="Webhook Demo" version="1.0.0">
+    <triggers>
+      <webhook id="newOrder" path="/webhooks/orders" method="POST" auth="none">
+        <schema>{
+          "type": "object",
+          "required": ["orderId"],
+          "properties": { "orderId": { "type": "string" } },
+          "additionalProperties": false
+        }</schema>
+      </webhook>
+    </triggers>
+    <steps>
+      <step id="captureOrder" name="Capture order"><script>
+        console.log("Received order " + context.payload.orderId);
+        return { message: "Received order " + context.payload.orderId };
+      </script></step>
+    </steps>
+  </workflow>
+</woml>`
     );
 
     const started = Bun.spawnSync(
@@ -124,13 +147,13 @@ describe('packaged background workflow log following', () => {
       }, 'the first terminal run');
 
       const runJson = Bun.spawnSync(
-        [cliPath, first.runId, '--logs', '--config', configPath, '--json'],
+        [cliPath, 'get', first.runId, '--state', statePath, '--json'],
         { cwd: projectRoot, stdout: 'pipe', stderr: 'pipe' }
       );
       expect(runJson.exitCode, runJson.stderr.toString()).toBe(0);
       const runRecord = JSON.parse(runJson.stdout.toString());
       expect(runRecord).toMatchObject({
-        profile: 'woml.run-presentation/v1',
+        profile: 'woml.run-inspection/v7',
         runId: first.runId,
         status: 'succeeded',
       });
@@ -179,8 +202,8 @@ describe('packaged background workflow log following', () => {
         () =>
           followerStdout.includes(second.runId) &&
           followerStdout.includes('Received order order-logs-second') &&
-          followerStdout.includes('RUN COMPLETED'),
-        'the live second run presentation',
+          followerStdout.includes('stream succeeded'),
+        'the live second run output stream',
         () => `${followerStdout}\n${followerStderr}`
       );
 
