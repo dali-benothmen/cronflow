@@ -19,6 +19,7 @@ const entrypoints = [
   'notification-provider-host.ts',
   'custom-notification-provider-host.ts',
   'custom-notification-provider-worker.ts',
+  'opentelemetry-sdk.ts',
 ].map(path => resolve(sourceRoot, path));
 
 async function assertOutput(path: string): Promise<void> {

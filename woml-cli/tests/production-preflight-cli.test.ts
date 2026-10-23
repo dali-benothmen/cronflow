@@ -85,7 +85,7 @@ describe('Runtime Configuration and production preflight', () => {
     const directory = await mkdtemp(join(tmpdir(), 'woml-pro1-invalid-'));
     try {
       for (const [value, message] of [
-        [{ schemaVersion: 2 }, 'schemaVersion must be 1'],
+        [{ schemaVersion: 3 }, 'schemaVersion must be 1 or 2'],
         [{ schemaVersion: 1, secret: 'no' }, 'unknown field'],
         [{ schemaVersion: 1, workers: 0 }, 'workers must be an integer'],
         [{ schemaVersion: 1, admin: { host: '0.0.0.0' } }, 'admin.host must be a loopback'],
@@ -136,6 +136,52 @@ describe('Runtime Configuration and production preflight', () => {
       expect(report.workflows[1].requiredSecrets).toEqual(['ORDER_TOKEN']);
       expect(await Bun.file(join(directory, 'data/state.sqlite')).exists()).toBe(false);
     } finally { await rm(directory, { recursive: true, force: true }); }
+  });
+
+  test('emits the additive production preflight v2 contract for telemetry configuration', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'woml-otel-preflight-'));
+    try {
+      const source = join(directory, 'worker.woml');
+      const config = join(directory, 'runtime.json');
+      await Bun.write(
+        source,
+        workflow('worker', '<manual id="start" />')
+      );
+      await Bun.write(
+        config,
+        JSON.stringify({
+          schemaVersion: 2,
+          deploymentName: 'otel-preflight',
+          observability: { openTelemetry: { enabled: false } },
+        })
+      );
+
+      const checked = await invoke([
+        'check',
+        source,
+        '--config',
+        config,
+        '--json',
+      ]);
+      expect(checked.exitCode).toBe(0);
+      expect(checked.stderr).toBe('');
+      expect(JSON.parse(checked.stdout)).toMatchObject({
+        profile: 'woml.production-preflight/v2',
+        status: 'passed',
+        configuration: {
+          profile: 'woml.runtime-configuration/v2',
+          schemaVersion: 2,
+          observability: {
+            openTelemetry: {
+              enabled: false,
+              protocol: 'http/protobuf',
+            },
+          },
+        },
+      });
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
   });
 
   test('reports every missing required secret and rejects cross-workflow route conflicts', async () => {

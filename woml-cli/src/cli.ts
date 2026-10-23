@@ -194,9 +194,14 @@ import {
 import {
   preflightRuntimeConfiguration,
   resolveRuntimeConfiguration,
-  type ResolvedRuntimeConfigurationV1,
+  type ResolvedOpenTelemetryConfigurationV1,
+  type ResolvedRuntimeConfiguration,
   type RuntimePreflightV1,
 } from './runtime-config';
+import {
+  OpenTelemetryRuntime,
+  type OpenTelemetrySdkLoader,
+} from './opentelemetry-runtime';
 import {
   readRuntimeDescriptor,
   removeRuntimeDescriptor,
@@ -415,6 +420,7 @@ interface RunArguments {
   readonly logFormat: 'text' | 'json';
   readonly observabilityHealth: boolean;
   readonly observabilityMetrics: boolean;
+  readonly openTelemetry?: ResolvedOpenTelemetryConfigurationV1;
   readonly retention?: AutomaticRetentionConfiguration;
   readonly verbose: boolean;
   readonly json: boolean;
@@ -816,6 +822,9 @@ async function resolveRunArgumentsConfiguration(
     logFormat: configuration.logging.format,
     observabilityHealth: configuration.observability.health,
     observabilityMetrics: configuration.observability.metrics,
+    ...(configuration.schemaVersion === 2
+      ? { openTelemetry: configuration.observability.openTelemetry }
+      : {}),
     ...(configuration.retention === undefined
       ? {}
       : { retention: configuration.retention }),
@@ -3707,10 +3716,12 @@ function validateDeploymentRoutes(
   }
 }
 
-interface ProductionPreflightReportV1 {
-  readonly profile: 'woml.production-preflight/v1';
+interface ProductionPreflightReport {
+  readonly profile:
+    | 'woml.production-preflight/v1'
+    | 'woml.production-preflight/v2';
   readonly status: 'passed';
-  readonly configuration?: ResolvedRuntimeConfigurationV1;
+  readonly configuration?: ResolvedRuntimeConfiguration;
   readonly environment?: RuntimePreflightV1;
   readonly secretProvider?: string;
   readonly infrastructurePolicy?: {
@@ -3788,7 +3799,7 @@ async function runDeploymentCheckCommand(
       await refreshEditorTypes(source.filePath, source.runtimeModules, io);
     }
 
-    let configuration: ResolvedRuntimeConfigurationV1 | undefined;
+    let configuration: ResolvedRuntimeConfiguration | undefined;
     let environment: RuntimePreflightV1 | undefined;
     let secretProvider: string | undefined;
     if (parsed.configPath !== undefined) {
@@ -3804,8 +3815,11 @@ async function runDeploymentCheckCommand(
       );
     }
 
-    const report: ProductionPreflightReportV1 = {
-      profile: 'woml.production-preflight/v1',
+    const report: ProductionPreflightReport = {
+      profile:
+        configuration?.schemaVersion === 2
+          ? 'woml.production-preflight/v2'
+          : 'woml.production-preflight/v1',
       status: 'passed',
       ...(configuration === undefined ? {} : { configuration }),
       ...(environment === undefined ? {} : { environment }),
@@ -5725,6 +5739,7 @@ async function activateWorkflows(
   let discordTransport: SharedDiscordTransport | undefined;
   let runtimeControl: RuntimeControlHandle | undefined;
   let observability: RuntimeObservability | undefined;
+  let openTelemetryRuntime: OpenTelemetryRuntime | undefined;
   let operationalOutput: RuntimeOperationalOutput | undefined;
   let foregroundOutputCursor = 0;
   let foregroundOutputDrain = Promise.resolve();
@@ -6200,6 +6215,36 @@ async function activateWorkflows(
           pendingObservabilityProgress.length = 0;
         }
       );
+      if (args.openTelemetry !== undefined) {
+        openTelemetryRuntime = await OpenTelemetryRuntime.start(
+          args.openTelemetry,
+          {
+            runtimeInstanceId: runtime.runtimeId,
+            deploymentId: currentDeploymentId,
+            runtimeVersion: WOML_CLI_VERSION,
+            ...(dependencies.loadOpenTelemetrySdk === undefined
+              ? {}
+              : { loadSdk: dependencies.loadOpenTelemetrySdk }),
+            onHealth: health => {
+              const status =
+                health.state === 'healthy'
+                  ? 'ready'
+                  : health.state === 'degraded'
+                    ? 'degraded'
+                    : health.state === 'starting' ||
+                        health.state === 'flushing'
+                      ? 'unready'
+                      : 'stopped';
+              observability?.setComponent(
+                'opentelemetry',
+                'provider',
+                status,
+                health.lastErrorCode
+              );
+            },
+          }
+        );
+      }
       runtimeControl = await profileAsync(
         'runtime',
         'runtime.start_control',
@@ -6717,6 +6762,7 @@ async function activateWorkflows(
     await telegramTransport?.close().catch(() => {});
     await discordTransport?.close().catch(() => {});
     await runtimeStop;
+    await openTelemetryRuntime?.shutdown().catch(() => {});
     observability?.setLifecycle('stopped');
     if (descriptorPath !== undefined && runtimeControl !== undefined) {
       await removeRuntimeDescriptor(
@@ -6748,6 +6794,7 @@ export interface CliDependencies {
   readonly inspectorTerminal?: InspectorTerminal;
   readonly createManualInput?: () => ManualLineInput;
   readonly waitForLogDetach?: () => Promise<void>;
+  readonly loadOpenTelemetrySdk?: OpenTelemetrySdkLoader;
   readonly onRuntimeReady?: (info: {
     readonly runtimeInstanceId: string;
     readonly descriptorPath: string;

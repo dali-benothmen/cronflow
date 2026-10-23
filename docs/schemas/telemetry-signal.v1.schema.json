@@ -1,0 +1,48 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://woml.dev/schemas/telemetry-signal/v1",
+  "title": "WOML Telemetry Signal v1",
+  "x-status": "opentelemetry-export-ote0-frozen",
+  "description": "A bounded, value-free operational fact emitted after an authoritative runtime transition.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["profile", "signalId", "kind", "occurredAt", "runtimeInstanceId", "deploymentId", "status", "attributes"],
+  "properties": {
+    "profile": { "const": "woml.telemetry-signal/v1" },
+    "signalId": { "$ref": "#/$defs/id" },
+    "kind": { "enum": ["runtime", "run", "attempt", "retry", "wait", "approval", "lock", "capability", "workflow_call", "compensation", "cleanup", "recovery"] },
+    "occurredAt": { "type": "string", "format": "date-time" },
+    "startedAt": { "type": "string", "format": "date-time" },
+    "endedAt": { "type": "string", "format": "date-time" },
+    "runtimeInstanceId": { "$ref": "#/$defs/id" },
+    "deploymentId": { "$ref": "#/$defs/id" },
+    "workflowId": { "$ref": "#/$defs/id" },
+    "runId": { "$ref": "#/$defs/id" },
+    "nodeId": { "$ref": "#/$defs/id" },
+    "attempt": { "type": "integer", "minimum": 1, "maximum": 1000000 },
+    "invocationId": { "$ref": "#/$defs/id" },
+    "status": { "enum": ["admitted", "started", "succeeded", "failed", "cancelled", "timed_out", "waiting", "resolved", "released", "degraded", "stopped"] },
+    "code": { "type": "string", "pattern": "^WOML_[A-Z0-9_]+$", "maxLength": 128 },
+    "durationMs": { "type": "number", "minimum": 0, "maximum": 315576000000, "multipleOf": 0.001 },
+    "attributes": {
+      "type": "object",
+      "additionalProperties": false,
+      "maxProperties": 16,
+      "properties": {
+        "trigger.type": { "$ref": "#/$defs/value" },
+        "handler.category": { "$ref": "#/$defs/value" },
+        "node.kind": { "$ref": "#/$defs/value" },
+        "capability.category": { "$ref": "#/$defs/value" },
+        "corrective.phase": { "$ref": "#/$defs/value" },
+        "wait.kind": { "$ref": "#/$defs/value" },
+        "lock.outcome": { "$ref": "#/$defs/value" },
+        "retry.scheduled": { "type": "boolean" },
+        "recovered": { "type": "boolean" }
+      }
+    }
+  },
+  "$defs": {
+    "id": { "type": "string", "minLength": 1, "maxLength": 320, "pattern": "^[^\\u0000-\\u001f\\u007f]+$" },
+    "value": { "type": "string", "minLength": 1, "maxLength": 64, "pattern": "^[a-z0-9._/-]+$" }
+  }
+}

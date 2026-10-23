@@ -2,9 +2,23 @@ import { constants } from 'node:fs';
 import { access, stat, statfs } from 'node:fs/promises';
 import { dirname, resolve } from 'node:path';
 
-export const RUNTIME_CONFIG_PROFILE = 'woml.runtime-configuration/v1';
+export const RUNTIME_CONFIG_PROFILE_V1 = 'woml.runtime-configuration/v1';
+export const RUNTIME_CONFIG_PROFILE_V2 = 'woml.runtime-configuration/v2';
+// Kept for source compatibility with callers that consume the frozen v1 name.
+export const RUNTIME_CONFIG_PROFILE = RUNTIME_CONFIG_PROFILE_V1;
 export const RUNTIME_CONFIG_MAX_BYTES = 64 * 1024;
 export const RUNTIME_MIN_FREE_BYTES = 64 * 1024 * 1024;
+
+export const OPEN_TELEMETRY_CONFIGURATION_PROFILE =
+  'woml.opentelemetry-configuration/v1';
+export const OPEN_TELEMETRY_DEFAULT_ENDPOINT = 'http://127.0.0.1:4318';
+export const OPEN_TELEMETRY_DEFAULT_QUEUE_SIZE = 2_048;
+export const OPEN_TELEMETRY_MAX_QUEUE_SIZE = 65_536;
+export const OPEN_TELEMETRY_DEFAULT_BATCH_SIZE = 512;
+export const OPEN_TELEMETRY_MAX_BATCH_SIZE = 1_024;
+export const OPEN_TELEMETRY_DEFAULT_EXPORT_INTERVAL_MS = 10_000;
+export const OPEN_TELEMETRY_DEFAULT_EXPORT_TIMEOUT_MS = 5_000;
+export const OPEN_TELEMETRY_DEFAULT_SHUTDOWN_TIMEOUT_MS = 5_000;
 
 const hostPattern = /^(?:localhost|(?:[a-zA-Z0-9](?:[a-zA-Z0-9.-]{0,251}[a-zA-Z0-9])?)|(?:\d{1,3}\.){3}\d{1,3}|[0-9a-fA-F:]+)$/;
 const deploymentPattern = /^[a-z][a-z0-9]*(?:[._-][a-z0-9]+)*$/;
@@ -44,6 +58,33 @@ export interface RuntimeConfigurationV1 {
   };
 }
 
+export interface OpenTelemetryConfigurationV1 {
+  readonly enabled?: boolean;
+  readonly protocol?: 'http/protobuf';
+  readonly traces?: boolean;
+  readonly metrics?: boolean;
+  readonly logs?: boolean;
+  readonly samplingRatio?: number;
+  readonly exportIntervalMs?: number;
+  readonly exportTimeoutMs?: number;
+  readonly shutdownTimeoutMs?: number;
+  readonly maxQueueSize?: number;
+  readonly maxExportBatchSize?: number;
+  readonly propagation?: boolean;
+}
+
+export interface RuntimeConfigurationV2
+  extends Omit<RuntimeConfigurationV1, 'schemaVersion' | 'observability'> {
+  readonly schemaVersion: 2;
+  readonly observability?: {
+    readonly health?: boolean;
+    readonly metrics?: boolean;
+    readonly openTelemetry?: OpenTelemetryConfigurationV1;
+  };
+}
+
+export type RuntimeConfiguration = RuntimeConfigurationV1 | RuntimeConfigurationV2;
+
 export interface RuntimeConfigurationOverrides {
   readonly deploymentName?: string;
   readonly statePath?: string;
@@ -59,7 +100,7 @@ export interface RuntimeConfigurationOverrides {
 }
 
 export interface ResolvedRuntimeConfigurationV1 {
-  readonly profile: typeof RUNTIME_CONFIG_PROFILE;
+  readonly profile: typeof RUNTIME_CONFIG_PROFILE_V1;
   readonly schemaVersion: 1;
   readonly configPath?: string;
   readonly deploymentName: string;
@@ -96,6 +137,85 @@ export interface ResolvedRuntimeConfigurationV1 {
     >
   >;
 }
+
+export type OpenTelemetryConfigurationSource =
+  | 'environment'
+  | 'config'
+  | 'default';
+
+export interface ResolvedOpenTelemetryConfigurationV1 {
+  readonly profile: typeof OPEN_TELEMETRY_CONFIGURATION_PROFILE;
+  readonly enabled: boolean;
+  readonly protocol: 'http/protobuf';
+  readonly serviceName: string;
+  readonly resourceAttributes: Readonly<Record<string, string>>;
+  readonly signals: {
+    readonly traces: boolean;
+    readonly metrics: boolean;
+    readonly logs: boolean;
+  };
+  readonly endpoints: {
+    readonly traces: string;
+    readonly metrics: string;
+    readonly logs: string;
+  };
+  readonly headerNames: {
+    readonly common: readonly string[];
+    readonly traces: readonly string[];
+    readonly metrics: readonly string[];
+    readonly logs: readonly string[];
+  };
+  readonly sampler:
+    | { readonly name: 'always_on' | 'always_off' }
+    | {
+        readonly name: 'parentbased_traceidratio';
+        readonly ratio: number;
+      };
+  readonly exportIntervalMs: number;
+  readonly exportTimeoutMs: number;
+  readonly shutdownTimeoutMs: number;
+  readonly maxQueueSize: number;
+  readonly maxExportBatchSize: number;
+  readonly propagation: boolean;
+  readonly sources: {
+    readonly enabled: OpenTelemetryConfigurationSource;
+    readonly serviceName: OpenTelemetryConfigurationSource;
+    readonly resourceAttributes: OpenTelemetryConfigurationSource;
+    readonly traces: OpenTelemetryConfigurationSource;
+    readonly metrics: OpenTelemetryConfigurationSource;
+    readonly logs: OpenTelemetryConfigurationSource;
+    readonly sampler: OpenTelemetryConfigurationSource;
+    readonly endpoints: {
+      readonly traces: OpenTelemetryConfigurationSource;
+      readonly metrics: OpenTelemetryConfigurationSource;
+      readonly logs: OpenTelemetryConfigurationSource;
+    };
+  };
+}
+
+export interface OpenTelemetrySecretsV1 {
+  readonly headers: {
+    readonly common: Readonly<Record<string, string>>;
+    readonly traces: Readonly<Record<string, string>>;
+    readonly metrics: Readonly<Record<string, string>>;
+    readonly logs: Readonly<Record<string, string>>;
+  };
+}
+
+export interface ResolvedRuntimeConfigurationV2
+  extends Omit<ResolvedRuntimeConfigurationV1, 'profile' | 'schemaVersion' | 'observability'> {
+  readonly profile: typeof RUNTIME_CONFIG_PROFILE_V2;
+  readonly schemaVersion: 2;
+  readonly observability: {
+    readonly health: boolean;
+    readonly metrics: boolean;
+    readonly openTelemetry: ResolvedOpenTelemetryConfigurationV1;
+  };
+}
+
+export type ResolvedRuntimeConfiguration =
+  | ResolvedRuntimeConfigurationV1
+  | ResolvedRuntimeConfigurationV2;
 
 export interface RuntimePreflightV1 {
   readonly profile: 'woml.runtime-preflight/v1';
@@ -169,6 +289,24 @@ function optionalInteger(
   return value as number;
 }
 
+function optionalNumber(
+  value: unknown,
+  subject: string,
+  minimum: number,
+  maximum: number
+): number | undefined {
+  if (value === undefined) return undefined;
+  if (
+    typeof value !== 'number' ||
+    !Number.isFinite(value) ||
+    value < minimum ||
+    value > maximum
+  ) {
+    throw invalid(`${subject} must be a finite number from ${minimum} through ${maximum}.`);
+  }
+  return value;
+}
+
 function optionalBoolean(value: unknown, subject: string): boolean | undefined {
   if (value === undefined) return undefined;
   if (typeof value !== 'boolean') throw invalid(`${subject} must be true or false.`);
@@ -195,16 +333,154 @@ function host(value: unknown, subject: string): string | undefined {
   return parsed;
 }
 
-function parseConfiguration(value: unknown): RuntimeConfigurationV1 {
+function parseOpenTelemetryConfiguration(
+  value: unknown
+): OpenTelemetryConfigurationV1 {
+  const telemetry = object(value, 'observability.openTelemetry');
+  only(
+    telemetry,
+    [
+      'enabled',
+      'protocol',
+      'traces',
+      'metrics',
+      'logs',
+      'samplingRatio',
+      'exportIntervalMs',
+      'exportTimeoutMs',
+      'shutdownTimeoutMs',
+      'maxQueueSize',
+      'maxExportBatchSize',
+      'propagation',
+    ],
+    'observability.openTelemetry'
+  );
+  const maxQueueSize = optionalInteger(
+    telemetry.maxQueueSize,
+    'observability.openTelemetry.maxQueueSize',
+    128,
+    OPEN_TELEMETRY_MAX_QUEUE_SIZE
+  );
+  const maxExportBatchSize = optionalInteger(
+    telemetry.maxExportBatchSize,
+    'observability.openTelemetry.maxExportBatchSize',
+    1,
+    OPEN_TELEMETRY_MAX_BATCH_SIZE
+  );
+  if (
+    maxQueueSize !== undefined &&
+    maxExportBatchSize !== undefined &&
+    maxExportBatchSize > maxQueueSize
+  ) {
+    throw invalid(
+      'observability.openTelemetry.maxExportBatchSize cannot exceed maxQueueSize.'
+    );
+  }
+  return {
+    ...(telemetry.enabled === undefined
+      ? {}
+      : {
+          enabled: optionalBoolean(
+            telemetry.enabled,
+            'observability.openTelemetry.enabled'
+          )!,
+        }),
+    ...(telemetry.protocol === undefined
+      ? {}
+      : {
+          protocol: enumValue(
+            telemetry.protocol,
+            'observability.openTelemetry.protocol',
+            ['http/protobuf'] as const
+          )!,
+        }),
+    ...(telemetry.traces === undefined
+      ? {}
+      : {
+          traces: optionalBoolean(
+            telemetry.traces,
+            'observability.openTelemetry.traces'
+          )!,
+        }),
+    ...(telemetry.metrics === undefined
+      ? {}
+      : {
+          metrics: optionalBoolean(
+            telemetry.metrics,
+            'observability.openTelemetry.metrics'
+          )!,
+        }),
+    ...(telemetry.logs === undefined
+      ? {}
+      : {
+          logs: optionalBoolean(
+            telemetry.logs,
+            'observability.openTelemetry.logs'
+          )!,
+        }),
+    ...(telemetry.samplingRatio === undefined
+      ? {}
+      : {
+          samplingRatio: optionalNumber(
+            telemetry.samplingRatio,
+            'observability.openTelemetry.samplingRatio',
+            0,
+            1
+          )!,
+        }),
+    ...(telemetry.exportIntervalMs === undefined
+      ? {}
+      : {
+          exportIntervalMs: optionalInteger(
+            telemetry.exportIntervalMs,
+            'observability.openTelemetry.exportIntervalMs',
+            1_000,
+            300_000
+          )!,
+        }),
+    ...(telemetry.exportTimeoutMs === undefined
+      ? {}
+      : {
+          exportTimeoutMs: optionalInteger(
+            telemetry.exportTimeoutMs,
+            'observability.openTelemetry.exportTimeoutMs',
+            100,
+            30_000
+          )!,
+        }),
+    ...(telemetry.shutdownTimeoutMs === undefined
+      ? {}
+      : {
+          shutdownTimeoutMs: optionalInteger(
+            telemetry.shutdownTimeoutMs,
+            'observability.openTelemetry.shutdownTimeoutMs',
+            100,
+            30_000
+          )!,
+        }),
+    ...(maxQueueSize === undefined ? {} : { maxQueueSize }),
+    ...(maxExportBatchSize === undefined ? {} : { maxExportBatchSize }),
+    ...(telemetry.propagation === undefined
+      ? {}
+      : {
+          propagation: optionalBoolean(
+            telemetry.propagation,
+            'observability.openTelemetry.propagation'
+          )!,
+        }),
+  };
+}
+
+function parseConfiguration(value: unknown): RuntimeConfiguration {
   const root = object(value, 'runtime configuration');
   only(root, [
     'schemaVersion', 'deploymentName', 'statePath', 'public', 'admin', 'logging',
     'workers', 'shutdownTimeoutMs', 'observability', 'retention', 'backup',
   ], 'runtime configuration');
-  if (root.schemaVersion !== 1) {
+  if (root.schemaVersion !== 1 && root.schemaVersion !== 2) {
     throw new RuntimeConfigurationError(
       'WOML_RUNTIME_CONFIG_UNSUPPORTED',
-      'runtime configuration schemaVersion must be 1.'
+      'runtime configuration schemaVersion must be 1 or 2.'
     );
   }
   const deploymentName = optionalString(root.deploymentName, 'deploymentName', 128);
@@ -219,7 +495,19 @@ function parseConfiguration(value: unknown): RuntimeConfigurationV1 {
   const logging = root.logging === undefined ? undefined : object(root.logging, 'logging');
   if (logging !== undefined) only(logging, ['format', 'level', 'directory'], 'logging');
   const observability = root.observability === undefined ? undefined : object(root.observability, 'observability');
-  if (observability !== undefined) only(observability, ['health', 'metrics'], 'observability');
+  if (observability !== undefined) {
+    only(
+      observability,
+      root.schemaVersion === 1
+        ? ['health', 'metrics']
+        : ['health', 'metrics', 'openTelemetry'],
+      'observability'
+    );
+  }
+  const openTelemetry =
+    observability?.openTelemetry === undefined
+      ? undefined
+      : parseOpenTelemetryConfiguration(observability.openTelemetry);
   const retention = root.retention === undefined ? undefined : object(root.retention, 'retention');
   if (retention !== undefined) {
     only(retention, ['enabled', 'succeededAfterDays', 'failedAfterDays', 'cancelledAfterDays', 'maintenanceHourUtc'], 'retention');
@@ -231,8 +519,7 @@ function parseConfiguration(value: unknown): RuntimeConfigurationV1 {
     if (backup.directory === undefined) throw invalid('backup.directory is required when backup is configured.');
   }
 
-  return {
-    schemaVersion: 1,
+  const parsed = {
     ...(deploymentName === undefined ? {} : { deploymentName }),
     ...(root.statePath === undefined ? {} : { statePath: optionalString(root.statePath, 'statePath')! }),
     ...(publicConfig === undefined ? {} : { public: {
@@ -253,6 +540,7 @@ function parseConfiguration(value: unknown): RuntimeConfigurationV1 {
     ...(observability === undefined ? {} : { observability: {
       ...(observability.health === undefined ? {} : { health: optionalBoolean(observability.health, 'observability.health')! }),
       ...(observability.metrics === undefined ? {} : { metrics: optionalBoolean(observability.metrics, 'observability.metrics')! }),
+      ...(openTelemetry === undefined ? {} : { openTelemetry }),
     } }),
     ...(retention === undefined ? {} : { retention: {
       enabled: retention.enabled as boolean,
@@ -265,6 +553,9 @@ function parseConfiguration(value: unknown): RuntimeConfigurationV1 {
       ...(backup.directory === undefined ? {} : { directory: optionalString(backup.directory, 'backup.directory')! }),
     } }),
   };
+  return root.schemaVersion === 1
+    ? { schemaVersion: 1, ...parsed } as RuntimeConfigurationV1
+    : { schemaVersion: 2, ...parsed } as RuntimeConfigurationV2;
 }
 
 function envInteger(environment: Readonly<Record<string, string | undefined>>, name: string, minimum: number, maximum: number): number | undefined {
@@ -272,6 +563,418 @@ function envInteger(environment: Readonly<Record<string, string | undefined>>, n
   if (raw === undefined) return undefined;
   if (!/^\d+$/.test(raw)) throw invalid(`${name} must be an integer from ${minimum} through ${maximum}.`);
   return optionalInteger(Number(raw), name, minimum, maximum);
+}
+
+function environmentBoolean(
+  environment: Readonly<Record<string, string | undefined>>,
+  name: string
+): boolean | undefined {
+  const raw = environment[name];
+  if (raw === undefined) return undefined;
+  if (raw.toLowerCase() === 'true') return true;
+  if (raw.toLowerCase() === 'false') return false;
+  throw invalid(`${name} must be true or false.`);
+}
+
+function openTelemetryEndpoint(
+  raw: string | undefined,
+  subject: string
+): string | undefined {
+  if (raw === undefined) return undefined;
+  if (raw.length === 0 || raw.length > 2_048 || raw.includes('\0')) {
+    throw invalid(`${subject} must be a non-empty URL no longer than 2048 characters.`);
+  }
+  let parsed: URL;
+  try {
+    parsed = new URL(raw);
+  } catch {
+    throw invalid(`${subject} must be a valid absolute HTTP or HTTPS URL.`);
+  }
+  if (
+    (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') ||
+    parsed.hostname.length === 0 ||
+    parsed.username.length > 0 ||
+    parsed.password.length > 0 ||
+    parsed.search.length > 0 ||
+    parsed.hash.length > 0
+  ) {
+    throw invalid(
+      `${subject} must be an absolute HTTP or HTTPS URL without credentials, query, or fragment.`
+    );
+  }
+  return parsed.toString();
+}
+
+function signalEndpoint(base: string, signal: 'traces' | 'metrics' | 'logs'): string {
+  const normalized = base.endsWith('/') ? base : `${base}/`;
+  return new URL(`v1/${signal}`, normalized).toString();
+}
+
+function parseOpenTelemetryHeaders(
+  raw: string | undefined,
+  subject: string
+): Readonly<Record<string, string>> {
+  if (raw === undefined || raw.length === 0) return {};
+  if (raw.length > 8_192 || raw.includes('\0') || /[\r\n]/u.test(raw)) {
+    throw invalid(`${subject} contains an invalid or oversized header list.`);
+  }
+  const result: Record<string, string> = {};
+  const entries = raw.split(',');
+  if (entries.length > 32) {
+    throw invalid(`${subject} may contain at most 32 headers.`);
+  }
+  for (const entry of entries) {
+    const separator = entry.indexOf('=');
+    if (separator <= 0) {
+      throw invalid(`${subject} contains a malformed header entry.`);
+    }
+    const name = entry.slice(0, separator).trim().toLowerCase();
+    if (!/^[a-z0-9][a-z0-9_.-]{0,127}$/u.test(name)) {
+      throw invalid(`${subject} contains an invalid header name.`);
+    }
+    let value: string;
+    try {
+      value = decodeURIComponent(entry.slice(separator + 1).trim());
+    } catch {
+      throw invalid(`${subject} contains an invalid encoded header value.`);
+    }
+    if (value.length > 4_096 || value.includes('\0') || /[\r\n]/u.test(value)) {
+      throw invalid(`${subject} contains an invalid or oversized header value.`);
+    }
+    if (Object.hasOwn(result, name)) {
+      throw invalid(`${subject} contains a duplicate header name.`);
+    }
+    result[name] = value;
+  }
+  return Object.freeze(result);
+}
+
+const OPEN_TELEMETRY_RESOURCE_KEYS = new Set([
+  'cloud.provider',
+  'cloud.region',
+  'deployment.environment.name',
+  'service.namespace',
+]);
+
+function parseOpenTelemetryResourceAttributes(
+  raw: string | undefined
+): Readonly<Record<string, string>> {
+  if (raw === undefined || raw.length === 0) return {};
+  if (raw.length > 4_096 || raw.includes('\0') || /[\r\n]/u.test(raw)) {
+    throw invalid('OTEL_RESOURCE_ATTRIBUTES contains invalid or oversized data.');
+  }
+  const result: Record<string, string> = {};
+  const entries = raw.split(',');
+  if (entries.length > 16) {
+    throw invalid('OTEL_RESOURCE_ATTRIBUTES may contain at most 16 attributes.');
+  }
+  for (const entry of entries) {
+    const separator = entry.indexOf('=');
+    if (separator <= 0) {
+      throw invalid('OTEL_RESOURCE_ATTRIBUTES contains a malformed attribute.');
+    }
+    const key = entry.slice(0, separator).trim();
+    if (!OPEN_TELEMETRY_RESOURCE_KEYS.has(key) || Object.hasOwn(result, key)) {
+      throw invalid(
+        `OTEL_RESOURCE_ATTRIBUTES contains an unsupported or duplicate key: ${key || '<empty>'}.`
+      );
+    }
+    let value: string;
+    try {
+      value = decodeURIComponent(entry.slice(separator + 1).trim());
+    } catch {
+      throw invalid('OTEL_RESOURCE_ATTRIBUTES contains an invalid encoded value.');
+    }
+    if (value.length === 0 || value.length > 256 || /[\u0000-\u001f\u007f]/u.test(value)) {
+      throw invalid('OTEL_RESOURCE_ATTRIBUTES contains an invalid or oversized value.');
+    }
+    result[key] = value;
+  }
+  return Object.freeze(result);
+}
+
+function signalEnabledFromEnvironment(
+  environment: Readonly<Record<string, string | undefined>>,
+  signal: 'TRACES' | 'METRICS' | 'LOGS'
+): boolean | undefined {
+  const name = `OTEL_${signal}_EXPORTER`;
+  const raw = environment[name];
+  if (raw === undefined) return undefined;
+  if (raw === 'otlp') return true;
+  if (raw === 'none') return false;
+  throw invalid(`${name} must be otlp or none.`);
+}
+
+function resolveOpenTelemetrySampler(
+  configuration: OpenTelemetryConfigurationV1 | undefined,
+  environment: Readonly<Record<string, string | undefined>>
+): [ResolvedOpenTelemetryConfigurationV1['sampler'], OpenTelemetryConfigurationSource] {
+  const raw = environment.OTEL_TRACES_SAMPLER;
+  if (raw !== undefined) {
+    if (raw === 'always_on') return [{ name: 'always_on' }, 'environment'];
+    if (raw === 'always_off') return [{ name: 'always_off' }, 'environment'];
+    if (raw !== 'parentbased_traceidratio') {
+      throw invalid(
+        'OTEL_TRACES_SAMPLER must be always_on, always_off, or parentbased_traceidratio.'
+      );
+    }
+    const argument = environment.OTEL_TRACES_SAMPLER_ARG;
+    if (argument === undefined || argument.trim().length === 0) {
+      throw invalid(
+        'OTEL_TRACES_SAMPLER_ARG is required for parentbased_traceidratio.'
+      );
+    }
+    const ratio = Number(argument);
+    if (!Number.isFinite(ratio) || ratio < 0 || ratio > 1) {
+      throw invalid('OTEL_TRACES_SAMPLER_ARG must be a number from 0 through 1.');
+    }
+    return [{ name: 'parentbased_traceidratio', ratio }, 'environment'];
+  }
+  if (environment.OTEL_TRACES_SAMPLER_ARG !== undefined) {
+    throw invalid('OTEL_TRACES_SAMPLER_ARG requires OTEL_TRACES_SAMPLER.');
+  }
+  if (configuration?.samplingRatio !== undefined) {
+    return [
+      {
+        name: 'parentbased_traceidratio',
+        ratio: configuration.samplingRatio,
+      },
+      'config',
+    ];
+  }
+  return [{ name: 'parentbased_traceidratio', ratio: 1 }, 'default'];
+}
+
+function openTelemetryHeadersFromEnvironment(
+  environment: Readonly<Record<string, string | undefined>>
+): OpenTelemetrySecretsV1['headers'] {
+  return {
+    common: parseOpenTelemetryHeaders(
+      environment.OTEL_EXPORTER_OTLP_HEADERS,
+      'OTEL_EXPORTER_OTLP_HEADERS'
+    ),
+    traces: parseOpenTelemetryHeaders(
+      environment.OTEL_EXPORTER_OTLP_TRACES_HEADERS,
+      'OTEL_EXPORTER_OTLP_TRACES_HEADERS'
+    ),
+    metrics: parseOpenTelemetryHeaders(
+      environment.OTEL_EXPORTER_OTLP_METRICS_HEADERS,
+      'OTEL_EXPORTER_OTLP_METRICS_HEADERS'
+    ),
+    logs: parseOpenTelemetryHeaders(
+      environment.OTEL_EXPORTER_OTLP_LOGS_HEADERS,
+      'OTEL_EXPORTER_OTLP_LOGS_HEADERS'
+    ),
+  };
+}
+
+function headerNames(
+  headers: Readonly<Record<string, string>>
+): readonly string[] {
+  return Object.keys(headers).sort();
+}
+
+function resolveOpenTelemetryConfiguration(
+  configuration: OpenTelemetryConfigurationV1 | undefined,
+  environment: Readonly<Record<string, string | undefined>>
+): ResolvedOpenTelemetryConfigurationV1 {
+  const disabled = environmentBoolean(environment, 'OTEL_SDK_DISABLED');
+  const commonEndpoint = openTelemetryEndpoint(
+    environment.OTEL_EXPORTER_OTLP_ENDPOINT,
+    'OTEL_EXPORTER_OTLP_ENDPOINT'
+  );
+  const specificEndpoints = {
+    traces: openTelemetryEndpoint(
+      environment.OTEL_EXPORTER_OTLP_TRACES_ENDPOINT,
+      'OTEL_EXPORTER_OTLP_TRACES_ENDPOINT'
+    ),
+    metrics: openTelemetryEndpoint(
+      environment.OTEL_EXPORTER_OTLP_METRICS_ENDPOINT,
+      'OTEL_EXPORTER_OTLP_METRICS_ENDPOINT'
+    ),
+    logs: openTelemetryEndpoint(
+      environment.OTEL_EXPORTER_OTLP_LOGS_ENDPOINT,
+      'OTEL_EXPORTER_OTLP_LOGS_ENDPOINT'
+    ),
+  };
+  const endpointEnables =
+    commonEndpoint !== undefined ||
+    Object.values(specificEndpoints).some(value => value !== undefined);
+  const enabled =
+    disabled === true
+      ? false
+      : endpointEnables
+        ? true
+        : configuration?.enabled ?? false;
+  const enabledSource: OpenTelemetryConfigurationSource =
+    disabled !== undefined || endpointEnables
+      ? 'environment'
+      : configuration?.enabled !== undefined
+        ? 'config'
+        : 'default';
+
+  const protocolVariables = [
+    'OTEL_EXPORTER_OTLP_PROTOCOL',
+    'OTEL_EXPORTER_OTLP_TRACES_PROTOCOL',
+    'OTEL_EXPORTER_OTLP_METRICS_PROTOCOL',
+    'OTEL_EXPORTER_OTLP_LOGS_PROTOCOL',
+  ] as const;
+  if (enabled) {
+    for (const name of protocolVariables) {
+      const protocol = environment[name];
+      if (protocol !== undefined && protocol !== 'http/protobuf') {
+        throw invalid(`${name} must be http/protobuf.`);
+      }
+    }
+  }
+
+  const traceEnvironment = enabled
+    ? signalEnabledFromEnvironment(environment, 'TRACES')
+    : undefined;
+  const metricEnvironment = enabled
+    ? signalEnabledFromEnvironment(environment, 'METRICS')
+    : undefined;
+  const logEnvironment = enabled
+    ? signalEnabledFromEnvironment(environment, 'LOGS')
+    : undefined;
+  const traces = traceEnvironment ?? configuration?.traces ?? true;
+  const metrics = metricEnvironment ?? configuration?.metrics ?? true;
+  const logs = logEnvironment ?? configuration?.logs ?? false;
+  if (enabled && !traces && !metrics && !logs) {
+    throw invalid('OpenTelemetry is enabled but every signal is disabled.');
+  }
+
+  const serviceName = optionalString(
+    environment.OTEL_SERVICE_NAME,
+    'OTEL_SERVICE_NAME',
+    128
+  ) ?? 'woml-runtime';
+  if (!/^[a-zA-Z0-9][a-zA-Z0-9._/-]{0,127}$/u.test(serviceName)) {
+    throw invalid('OTEL_SERVICE_NAME contains unsupported characters.');
+  }
+  const resourceAttributes = enabled
+    ? parseOpenTelemetryResourceAttributes(environment.OTEL_RESOURCE_ATTRIBUTES)
+    : {};
+  const [sampler, samplerSource] = enabled
+    ? resolveOpenTelemetrySampler(configuration, environment)
+    : [
+        { name: 'parentbased_traceidratio', ratio: 1 } as const,
+        'default' as const,
+      ];
+  const headers = enabled
+    ? openTelemetryHeadersFromEnvironment(environment)
+    : { common: {}, traces: {}, metrics: {}, logs: {} };
+  const baseEndpoint = commonEndpoint ?? OPEN_TELEMETRY_DEFAULT_ENDPOINT;
+  const endpoints = {
+    traces:
+      specificEndpoints.traces ?? signalEndpoint(baseEndpoint, 'traces'),
+    metrics:
+      specificEndpoints.metrics ?? signalEndpoint(baseEndpoint, 'metrics'),
+    logs: specificEndpoints.logs ?? signalEndpoint(baseEndpoint, 'logs'),
+  };
+  const maxQueueSize =
+    configuration?.maxQueueSize ?? OPEN_TELEMETRY_DEFAULT_QUEUE_SIZE;
+  const maxExportBatchSize =
+    configuration?.maxExportBatchSize ?? OPEN_TELEMETRY_DEFAULT_BATCH_SIZE;
+  if (maxExportBatchSize > maxQueueSize) {
+    throw invalid(
+      'observability.openTelemetry.maxExportBatchSize cannot exceed maxQueueSize.'
+    );
+  }
+  const exportIntervalMs =
+    configuration?.exportIntervalMs ??
+    OPEN_TELEMETRY_DEFAULT_EXPORT_INTERVAL_MS;
+  const exportTimeoutMs =
+    configuration?.exportTimeoutMs ??
+    OPEN_TELEMETRY_DEFAULT_EXPORT_TIMEOUT_MS;
+  if (enabled && metrics && exportTimeoutMs >= exportIntervalMs) {
+    throw invalid(
+      'observability.openTelemetry.exportTimeoutMs must be less than exportIntervalMs when metrics export is enabled.'
+    );
+  }
+  const endpointSource = (
+    specific: string | undefined
+  ): OpenTelemetryConfigurationSource =>
+    specific !== undefined || commonEndpoint !== undefined
+      ? 'environment'
+      : 'default';
+  return {
+    profile: OPEN_TELEMETRY_CONFIGURATION_PROFILE,
+    enabled,
+    protocol: 'http/protobuf',
+    serviceName,
+    resourceAttributes,
+    signals: { traces, metrics, logs },
+    endpoints,
+    headerNames: {
+      common: headerNames(headers.common),
+      traces: headerNames(headers.traces),
+      metrics: headerNames(headers.metrics),
+      logs: headerNames(headers.logs),
+    },
+    sampler,
+    exportIntervalMs,
+    exportTimeoutMs,
+    shutdownTimeoutMs:
+      configuration?.shutdownTimeoutMs ??
+      OPEN_TELEMETRY_DEFAULT_SHUTDOWN_TIMEOUT_MS,
+    maxQueueSize,
+    maxExportBatchSize,
+    propagation: configuration?.propagation ?? true,
+    sources: {
+      enabled: enabledSource,
+      serviceName:
+        environment.OTEL_SERVICE_NAME === undefined ? 'default' : 'environment',
+      resourceAttributes:
+        environment.OTEL_RESOURCE_ATTRIBUTES === undefined
+          ? 'default'
+          : 'environment',
+      traces:
+        traceEnvironment !== undefined
+          ? 'environment'
+          : configuration?.traces !== undefined
+            ? 'config'
+            : 'default',
+      metrics:
+        metricEnvironment !== undefined
+          ? 'environment'
+          : configuration?.metrics !== undefined
+            ? 'config'
+            : 'default',
+      logs:
+        logEnvironment !== undefined
+          ? 'environment'
+          : configuration?.logs !== undefined
+            ? 'config'
+            : 'default',
+      sampler: samplerSource,
+      endpoints: {
+        traces: endpointSource(specificEndpoints.traces),
+        metrics: endpointSource(specificEndpoints.metrics),
+        logs: endpointSource(specificEndpoints.logs),
+      },
+    },
+  };
+}
+
+export function resolveOpenTelemetrySecrets(
+  configuration: ResolvedOpenTelemetryConfigurationV1,
+  environment: Readonly<Record<string, string | undefined>> = process.env
+): OpenTelemetrySecretsV1 {
+  if (!configuration.enabled) {
+    return { headers: { common: {}, traces: {}, metrics: {}, logs: {} } };
+  }
+  const headers = openTelemetryHeadersFromEnvironment(environment);
+  for (const signal of ['common', 'traces', 'metrics', 'logs'] as const) {
+    const names = headerNames(headers[signal]);
+    if (names.join('\0') !== configuration.headerNames[signal].join('\0')) {
+      throw new RuntimeConfigurationError(
+        'WOML_OTEL_CONFIGURATION_CHANGED',
+        'OpenTelemetry exporter headers changed after runtime configuration was resolved.'
+      );
+    }
+  }
+  return { headers };
 }
 
 function value<T>(cli: T | undefined, environment: T | undefined, config: T | undefined, fallback: T): [T, 'cli' | 'environment' | 'config' | 'default'] {
@@ -286,8 +989,8 @@ export async function resolveRuntimeConfiguration(
   overrides: RuntimeConfigurationOverrides = {},
   environment: Readonly<Record<string, string | undefined>> = process.env,
   cwd = process.cwd()
-): Promise<ResolvedRuntimeConfigurationV1> {
-  let config: RuntimeConfigurationV1 | undefined;
+): Promise<ResolvedRuntimeConfiguration> {
+  let config: RuntimeConfiguration | undefined;
   let configPath: string | undefined;
   let base = cwd;
   if (rawConfigPath !== undefined) {
@@ -347,9 +1050,13 @@ export async function resolveRuntimeConfiguration(
   const stateBase = stateSource === 'config' ? base : cwd;
   const logBase = logDirectorySource === 'config' ? base : cwd;
   const backupDirectory = config?.backup?.directory;
-  return {
-    profile: RUNTIME_CONFIG_PROFILE,
-    schemaVersion: 1,
+  const openTelemetry = resolveOpenTelemetryConfiguration(
+    config?.schemaVersion === 2
+      ? config.observability?.openTelemetry
+      : undefined,
+    environment
+  );
+  const resolved = {
     ...(configPath === undefined ? {} : { configPath }),
     deploymentName,
     statePath: resolve(stateBase, rawStatePath),
@@ -373,6 +1080,27 @@ export async function resolveRuntimeConfiguration(
       'logging.directory': logDirectorySource,
       workers: workersSource,
       shutdownTimeoutMs: shutdownSource,
+    },
+  };
+  if (config?.schemaVersion === 2 || openTelemetry.enabled) {
+    return {
+      profile: RUNTIME_CONFIG_PROFILE_V2,
+      schemaVersion: 2,
+      ...resolved,
+      observability: {
+        health: config?.observability?.health ?? true,
+        metrics: config?.observability?.metrics ?? true,
+        openTelemetry,
+      },
+    };
+  }
+  return {
+    profile: RUNTIME_CONFIG_PROFILE_V1,
+    schemaVersion: 1,
+    ...resolved,
+    observability: {
+      health: config?.observability?.health ?? true,
+      metrics: config?.observability?.metrics ?? true,
     },
   };
 }
@@ -403,7 +1131,7 @@ async function writableAncestor(
 }
 
 export async function preflightRuntimeConfiguration(
-  configuration: ResolvedRuntimeConfigurationV1,
+  configuration: ResolvedRuntimeConfiguration,
   dependencies: {
     readonly accessPath?: (path: string, mode?: number) => Promise<void>;
     readonly statFilesystem?: (

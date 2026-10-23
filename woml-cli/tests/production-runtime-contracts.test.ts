@@ -9,7 +9,12 @@ const fixtureRoot = resolve(import.meta.dir, 'fixtures/production-runtime');
 
 const schemas = [
   'runtime-configuration.v1.schema.json',
+  'runtime-configuration.v2.schema.json',
+  'opentelemetry-configuration.v1.schema.json',
+  'opentelemetry-exporter-health.v1.schema.json',
+  'telemetry-signal.v1.schema.json',
   'production-preflight.v1.schema.json',
+  'production-preflight.v2.schema.json',
   'deployment-activation.v1.schema.json',
   'background-runtime-control.v1.schema.json',
   'runtime-instance.v1.schema.json',

@@ -1,0 +1,81 @@
+{
+  "profile": "woml.production-preflight/v2",
+  "status": "passed",
+  "configuration": {
+    "profile": "woml.runtime-configuration/v2",
+    "schemaVersion": 2,
+    "configPath": "/srv/woml/woml.runtime.json",
+    "deploymentName": "checkout-production",
+    "statePath": "/srv/woml/state/workflow-history.sqlite",
+    "public": { "host": "127.0.0.1", "port": 3000 },
+    "admin": { "host": "127.0.0.1", "port": 3001 },
+    "logging": { "format": "json", "level": "info", "directory": "/srv/woml/logs" },
+    "workers": 4,
+    "shutdownTimeoutMs": 30000,
+    "observability": {
+      "health": true,
+      "metrics": true,
+      "openTelemetry": {
+        "profile": "woml.opentelemetry-configuration/v1",
+        "enabled": true,
+        "protocol": "http/protobuf",
+        "serviceName": "checkout-runtime",
+        "resourceAttributes": { "deployment.environment.name": "production" },
+        "signals": { "traces": true, "metrics": true, "logs": false },
+        "endpoints": {
+          "traces": "https://collector.example.test/v1/traces",
+          "metrics": "https://collector.example.test/v1/metrics",
+          "logs": "https://collector.example.test/v1/logs"
+        },
+        "headerNames": { "common": ["authorization"], "traces": [], "metrics": [], "logs": [] },
+        "sampler": { "name": "parentbased_traceidratio", "ratio": 0.25 },
+        "exportIntervalMs": 10000,
+        "exportTimeoutMs": 5000,
+        "shutdownTimeoutMs": 5000,
+        "maxQueueSize": 2048,
+        "maxExportBatchSize": 512,
+        "propagation": true,
+        "sources": {
+          "enabled": "environment",
+          "serviceName": "environment",
+          "resourceAttributes": "environment",
+          "traces": "default",
+          "metrics": "default",
+          "logs": "default",
+          "sampler": "config",
+          "endpoints": { "traces": "environment", "metrics": "environment", "logs": "environment" }
+        }
+      }
+    },
+    "sources": {
+      "deploymentName": "config",
+      "statePath": "config",
+      "public.host": "default",
+      "public.port": "default",
+      "admin.host": "default",
+      "admin.port": "default",
+      "logging.format": "config",
+      "logging.level": "default",
+      "logging.directory": "config",
+      "workers": "default",
+      "shutdownTimeoutMs": "default"
+    }
+  },
+  "environment": {
+    "profile": "woml.runtime-preflight/v1",
+    "state": { "path": "/srv/woml/state/workflow-history.sqlite", "existing": false, "writableAncestor": "/srv/woml", "availableBytes": 1073741824 },
+    "logging": { "directory": "/srv/woml/logs", "writableAncestor": "/srv/woml" },
+    "ports": { "public": "127.0.0.1:3000", "admin": "127.0.0.1:3001", "distinct": true }
+  },
+  "secretProvider": "environment",
+  "workflows": [
+    {
+      "workflowId": "checkout",
+      "sourcePath": "/srv/woml/workflows/checkout.woml",
+      "definitionHash": "sha256:1111111111111111111111111111111111111111111111111111111111111111",
+      "triggerCount": 1,
+      "moduleCount": 0,
+      "requiredSecrets": []
+    }
+  ]
+}
