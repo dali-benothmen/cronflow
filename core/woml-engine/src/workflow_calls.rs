@@ -386,6 +386,8 @@ struct WorkflowCallExecutionConfig {
   schedule_progress_reporter: Option<ScheduleProgressReporter>,
   interval_progress_reporter: Option<IntervalProgressReporter>,
   workflow_call_progress_reporter: Option<WorkflowCallProgressReporter>,
+  telemetry_reporter: Option<crate::TelemetrySignalReporter>,
+  telemetry_context: Option<crate::TelemetrySignalContext>,
   resolved_secrets: Arc<BTreeMap<String, String>>,
   capability_registry: Weak<CapabilityRegistry>,
   policy_execution_registry: PolicyExecutionRegistry,
@@ -403,6 +405,8 @@ impl WorkflowCallExecutionConfig {
       schedule_progress_reporter: options.schedule_progress_reporter.clone(),
       interval_progress_reporter: options.interval_progress_reporter.clone(),
       workflow_call_progress_reporter: options.workflow_call_progress_reporter.clone(),
+      telemetry_reporter: options.telemetry_reporter.clone(),
+      telemetry_context: options.telemetry_context.clone(),
       resolved_secrets: Arc::clone(&options.resolved_secrets),
       capability_registry: Arc::downgrade(&options.capability_registry),
       policy_execution_registry: options.policy_execution_registry(),
@@ -424,6 +428,8 @@ impl WorkflowCallExecutionConfig {
     options.schedule_progress_reporter = self.schedule_progress_reporter.clone();
     options.interval_progress_reporter = self.interval_progress_reporter.clone();
     options.workflow_call_progress_reporter = self.workflow_call_progress_reporter.clone();
+    options.telemetry_reporter = self.telemetry_reporter.clone();
+    options.telemetry_context = self.telemetry_context.clone();
     options.resolved_secrets = Arc::clone(&self.resolved_secrets);
     Ok(options)
   }

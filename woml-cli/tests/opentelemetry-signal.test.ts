@@ -1,0 +1,113 @@
+import { describe, expect, test } from 'bun:test';
+import { resolve } from 'node:path';
+
+import {
+  mapTelemetrySignalToSpan,
+  parseTelemetrySignal,
+  womlSpanIdV1,
+  womlTraceIdV1,
+} from '../src/opentelemetry-signal';
+import { OpenTelemetryRuntime } from '../src/opentelemetry-runtime';
+
+const fixture = resolve(
+  import.meta.dir,
+  'fixtures/opentelemetry/contracts.v1.json'
+);
+
+describe('OpenTelemetry Signal v1', () => {
+  test('strictly decodes the frozen cross-language fixture', async () => {
+    const contracts = await Bun.file(fixture).json();
+    const signal = parseTelemetrySignal(JSON.stringify(contracts.signal));
+    expect(signal.kind).toBe('attempt');
+    expect(signal.durationMs).toBe(125);
+    expect(womlTraceIdV1(signal.runId!)).toBe(
+      contracts.traceIdentities.traceId
+    );
+    expect(
+      womlSpanIdV1(
+        signal.runId!,
+        'attempt',
+        `${signal.nodeId}:${signal.attempt}:${signal.invocationId}`
+      )
+    ).toBe(contracts.traceIdentities.attemptSpanId);
+  });
+
+  test('maps a completed durable interval to one deterministic span', async () => {
+    const contracts = await Bun.file(fixture).json();
+    const signal = parseTelemetrySignal(JSON.stringify(contracts.signal));
+    expect(mapTelemetrySignalToSpan(signal)).toEqual({
+      name: 'woml.step',
+      traceId: '71bbd5822afe17d9d00bf8eaa62854b3',
+      spanId: '8a857c39a28e38ba',
+      parentSpanId: '0868430ecec5cefe',
+      startTime: '2026-10-23T12:00:00.000Z',
+      endTime: '2026-10-23T12:00:00.125Z',
+      status: 'ok',
+      attributes: {
+        'woml.signal.id': 'telemetry_run_01HXTRACE_settled',
+        'woml.signal.kind': 'attempt',
+        'woml.durable.status': 'succeeded',
+        'woml.deployment.id': 'deployment_01HX',
+        'woml.runtime.instance.id': 'runtime_01HX',
+        'woml.workflow.id': 'checkout',
+        'woml.run.id': 'run_01HXTRACE',
+        'woml.node.id': 'prepare',
+        'woml.attempt': 1,
+        'woml.invocation.id': 'inv_01',
+        'handler.category': 'runtime.script',
+        'node.kind': 'step',
+        'retry.scheduled': false,
+      },
+    });
+    const { endedAt: _endedAt, ...withoutEnd } = signal;
+    expect(
+      mapTelemetrySignalToSpan({ ...withoutEnd, status: 'waiting' })
+    ).toBeUndefined();
+  });
+
+  test('rejects future, oversized, non-finite, unknown, and value-bearing records', async () => {
+    const contracts = await Bun.file(fixture).json();
+    const base = contracts.signal;
+    const invalid = [
+      { ...base, profile: 'woml.telemetry-signal/v2' },
+      { ...base, durationMs: 1e400 },
+      { ...base, payload: { token: 'forbidden' } },
+      { ...base, attributes: { ...base.attributes, custom: 'forbidden' } },
+      { ...base, signalId: 'x'.repeat(321) },
+    ];
+    for (const value of invalid) {
+      expect(() => parseTelemetrySignal(JSON.stringify(value))).toThrow();
+    }
+    expect(() => parseTelemetrySignal(' '.repeat(16 * 1024 + 1))).toThrow(
+      'oversized telemetry'
+    );
+  });
+
+  test('hands accepted records to the lazy SDK without making export authoritative', async () => {
+    const contracts = await Bun.file(fixture).json();
+    const signal = parseTelemetrySignal(JSON.stringify(contracts.signal));
+    const accepted: string[] = [];
+    const runtime = await OpenTelemetryRuntime.start(
+      contracts.resolvedConfiguration,
+      {
+        runtimeInstanceId: 'runtime_01HX',
+        deploymentId: 'deployment_01HX',
+        runtimeVersion: '1.0.10',
+        environment: {
+          OTEL_EXPORTER_OTLP_HEADERS: 'authorization=Bearer%20test',
+        },
+        loadSdk: async () => ({
+          emit: value => {
+            accepted.push(value.signalId);
+            return true;
+          },
+          forceFlush: async () => {},
+          shutdown: async () => {},
+        }),
+      }
+    );
+    expect(runtime.record(signal)).toBe(true);
+    expect(accepted).toEqual(['telemetry_run_01HXTRACE_settled']);
+    await runtime.shutdown();
+  });
+});

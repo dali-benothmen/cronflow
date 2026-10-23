@@ -270,6 +270,8 @@ pub struct RuntimeExecutionOptions {
   pub workflow_call_progress_reporter: Option<WorkflowCallProgressReporter>,
   pub runtime_policy_progress_reporter: Option<RuntimePolicyProgressReporter>,
   pub operational_output_reporter: Option<crate::OperationalOutputReporter>,
+  pub telemetry_reporter: Option<crate::TelemetrySignalReporter>,
+  pub telemetry_context: Option<crate::TelemetrySignalContext>,
   pub resolved_secrets: Arc<BTreeMap<String, String>>,
   pub(crate) signal_ingress_token: Option<String>,
   pub capability_registry: Arc<CapabilityRegistry>,
@@ -416,6 +418,14 @@ impl std::fmt::Debug for RuntimeExecutionOptions {
           .as_ref()
           .map(|_| "configured"),
       )
+      .field(
+        "telemetry_reporter",
+        &self.telemetry_reporter.as_ref().map(|_| "configured"),
+      )
+      .field(
+        "telemetry_context",
+        &self.telemetry_context.as_ref().map(|_| "configured"),
+      )
       .finish()
   }
 }
@@ -504,6 +514,8 @@ impl RuntimeExecutionOptions {
       workflow_call_progress_reporter: None,
       runtime_policy_progress_reporter: None,
       operational_output_reporter: None,
+      telemetry_reporter: None,
+      telemetry_context: None,
       resolved_secrets: Arc::new(BTreeMap::new()),
       signal_ingress_token: None,
       capability_registry,
@@ -543,6 +555,16 @@ impl RuntimeExecutionOptions {
 
   pub fn with_progress_reporter(mut self, reporter: ExecutionProgressReporter) -> Self {
     self.progress_reporter = Some(reporter);
+    self
+  }
+
+  pub fn with_telemetry_reporter(
+    mut self,
+    context: crate::TelemetrySignalContext,
+    reporter: crate::TelemetrySignalReporter,
+  ) -> Self {
+    self.telemetry_context = Some(context);
+    self.telemetry_reporter = Some(reporter);
     self
   }
 
@@ -2749,10 +2771,19 @@ async fn execute_with_engine<E: RuntimeDagEngine>(
 ) -> Result<WorkflowRuntimeOutcome, RuntimeExecutionError> {
   let mut span = crate::performance::PerformanceSpan::new("runtime", "runtime.run_engine");
   span.count("nodes", engine.workflow().graph.nodes.len());
-  let result = execute_with_engine_unprofiled(engine, trigger, options).await;
-  if let Ok(outcome) = &result {
-    span.run_id(runtime_outcome_run_id(outcome).to_string());
-    span.succeed();
+  let result = execute_with_engine_unprofiled(engine, trigger, options.clone()).await;
+  match &result {
+    Ok(outcome) => {
+      let run_id = runtime_outcome_run_id(outcome);
+      report_telemetry_history(engine, run_id, &options);
+      span.run_id(run_id.to_string());
+      span.succeed();
+    }
+    Err(error) => {
+      if let Some(events) = runtime_error_events(error) {
+        report_telemetry_events(&engine.workflow().workflow_id, events, &options);
+      }
+    }
   }
   result
 }
@@ -2999,11 +3030,54 @@ async fn resume_with_engine<E: RuntimeDagEngine>(
   span.run_id(run_id.to_string());
   span.count("nodes", engine.workflow().graph.nodes.len());
   let result = resume_with_engine_unprofiled(engine, run_id, options.clone()).await;
+  report_telemetry_history(engine, run_id, &options);
   settle_operational_run(engine, run_id, &options);
   if result.is_ok() {
     span.succeed();
   }
   result
+}
+
+fn report_telemetry_history<E: RuntimeDagEngine>(
+  engine: &E,
+  run_id: &str,
+  options: &RuntimeExecutionOptions,
+) {
+  if options.telemetry_reporter.is_none() || options.telemetry_context.is_none() {
+    return;
+  }
+  let Ok(events) = engine.events(run_id) else {
+    return;
+  };
+  report_telemetry_events(&engine.workflow().workflow_id, &events, options);
+}
+
+fn report_telemetry_events(
+  workflow_id: &str,
+  events: &[RunEvent],
+  options: &RuntimeExecutionOptions,
+) {
+  let (Some(reporter), Some(context)) = (
+    options.telemetry_reporter.as_ref(),
+    options.telemetry_context.as_ref(),
+  ) else {
+    return;
+  };
+  for signal in crate::project_telemetry_signals(events, workflow_id, context) {
+    reporter(signal);
+  }
+}
+
+fn runtime_error_events(error: &RuntimeExecutionError) -> Option<&[RunEvent]> {
+  match error {
+    RuntimeExecutionError::RunFailed(details) => Some(&details.events),
+    RuntimeExecutionError::BranchFailed(details) => Some(&details.events),
+    RuntimeExecutionError::ParallelFailed(details) => Some(&details.events),
+    RuntimeExecutionError::ApprovalFailed(details) => Some(&details.events),
+    RuntimeExecutionError::NotificationFailed(details) => Some(&details.events),
+    RuntimeExecutionError::RunCancelled(details) => Some(&details.events),
+    _ => None,
+  }
 }
 
 fn settle_operational_run<E: RuntimeDagEngine>(

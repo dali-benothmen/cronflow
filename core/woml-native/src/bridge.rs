@@ -628,6 +628,7 @@ fn native_operational_output_reporter(
 fn native_runtime_progress_reporters(
   env: &Env,
   progress_callback: JsFunction,
+  telemetry_enabled: bool,
 ) -> napi::Result<(
   TriggerProgressReporter,
   ScheduleProgressReporter,
@@ -636,8 +637,27 @@ fn native_runtime_progress_reporters(
   RuntimePolicyProgressReporter,
   NativeRuntimeInstanceReporter,
   OperationalOutputReporter,
+  Option<woml_engine::TelemetrySignalReporter>,
 )> {
   let operational_output_reporter = native_operational_output_reporter(env, &progress_callback)?;
+  let telemetry_reporter = if telemetry_enabled {
+    let mut telemetry = progress_callback
+      .create_threadsafe_function::<String, String, _, ErrorStrategy::Fatal>(1024, |context| {
+        Ok(vec![context.value])
+      })?;
+    telemetry.unref(env)?;
+    let telemetry = Arc::new(telemetry);
+    Some(woml_engine::bounded_telemetry_reporter(
+      1024,
+      Arc::new(move |message| {
+        if let Ok(json) = serde_json::to_string(&message) {
+          let _ = telemetry.call(json, ThreadsafeFunctionCallMode::NonBlocking);
+        }
+      }),
+    ))
+  } else {
+    None
+  };
   let mut progress = progress_callback
     .create_threadsafe_function::<String, String, _, ErrorStrategy::Fatal>(0, |context| {
       Ok(vec![context.value])
@@ -682,6 +702,7 @@ fn native_runtime_progress_reporters(
       }
     }),
     operational_output_reporter,
+    telemetry_reporter,
   ))
 }
 
@@ -1762,6 +1783,7 @@ pub fn start_woml_webhook_runtime(
   start_suspended: bool,
   runtime_capabilities_json: Option<String>,
   signal_ingress_token: Option<String>,
+  telemetry_enabled: bool,
   progress_callback: JsFunction,
 ) -> napi::Result<JsObject> {
   let mut decode_span = woml_engine::performance::PerformanceSpan::new_for_process(
@@ -1782,6 +1804,7 @@ pub fn start_woml_webhook_runtime(
   let bind_address: SocketAddr = bind_address
     .parse()
     .map_err(|error| napi::Error::from_reason(format!("Invalid webhook bind address: {error}")))?;
+  let runtime_id = format!("runtime_{}", uuid::Uuid::new_v4().simple());
   let (
     progress_reporter,
     schedule_progress_reporter,
@@ -1790,7 +1813,8 @@ pub fn start_woml_webhook_runtime(
     runtime_policy_progress_reporter,
     runtime_instance_reporter,
     operational_output_reporter,
-  ) = native_runtime_progress_reporters(&env, progress_callback)?;
+    telemetry_reporter,
+  ) = native_runtime_progress_reporters(&env, progress_callback, telemetry_enabled)?;
   let mut runtime_secrets = BTreeMap::new();
   for registration in &registrations {
     for (name, value) in &registration.resolved_secrets {
@@ -1849,6 +1873,17 @@ pub fn start_woml_webhook_runtime(
     .with_workflow_call_progress_reporter(workflow_call_progress_reporter)
     .with_runtime_policy_progress_reporter(runtime_policy_progress_reporter)
     .with_operational_output_reporter(operational_output_reporter);
+  let execution = if let Some(telemetry_reporter) = telemetry_reporter {
+    execution.with_telemetry_reporter(
+      woml_engine::TelemetrySignalContext {
+        runtime_instance_id: runtime_id.clone(),
+        deployment_id: deployment_id.clone(),
+      },
+      telemetry_reporter,
+    )
+  } else {
+    execution
+  };
   let execution = apply_runtime_capabilities(execution, runtime_capabilities_json)?
     .with_signal_ingress_token(signal_ingress_token)
     .with_shared_script_hosts();
@@ -1872,7 +1907,6 @@ pub fn start_woml_webhook_runtime(
     );
     let started_at = Utc::now();
     let shutdown_deadline = std::time::Duration::from_millis(u64::from(shutdown_timeout_ms));
-    let runtime_id = format!("runtime_{}", uuid::Uuid::new_v4().simple());
     let (startup_sender, startup_receiver) =
       mpsc::sync_channel::<Result<SocketAddr, NativeTriggerRuntimeError>>(1);
     let (control_sender, mut control_receiver) = mpsc::channel::<NativeWebhookRuntimeCommand>();

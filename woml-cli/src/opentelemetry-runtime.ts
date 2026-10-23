@@ -3,6 +3,7 @@ import {
   type OpenTelemetrySecretsV1,
   type ResolvedOpenTelemetryConfigurationV1,
 } from './runtime-config';
+import type { TelemetrySignalV1 } from './opentelemetry-signal';
 
 export const OPEN_TELEMETRY_EXPORTER_HEALTH_PROFILE =
   'woml.opentelemetry-exporter-health/v1';
@@ -40,6 +41,7 @@ export interface OpenTelemetrySdkStartOptions {
 }
 
 export interface OpenTelemetrySdkHandle {
+  emit?(signal: TelemetrySignalV1): boolean;
   forceFlush(): Promise<void>;
   shutdown(): Promise<void>;
 }
@@ -173,6 +175,29 @@ export class OpenTelemetryRuntime {
         ? {}
         : { lastErrorCode: this.#lastErrorCode }),
     };
+  }
+
+  record(signal: TelemetrySignalV1): boolean {
+    if (
+      this.#state !== 'healthy' ||
+      this.#handle === undefined ||
+      this.#handle.emit === undefined
+    ) {
+      return false;
+    }
+    try {
+      const accepted = this.#handle.emit(signal);
+      if (!accepted) {
+        this.#dropped += 1;
+        this.#publish();
+      }
+      return accepted;
+    } catch {
+      this.#dropped += 1;
+      this.#lastErrorCode = 'WOML_OTEL_SIGNAL_REJECTED';
+      this.#publish();
+      return false;
+    }
   }
 
   async shutdown(): Promise<void> {

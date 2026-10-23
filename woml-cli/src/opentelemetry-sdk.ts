@@ -1,11 +1,21 @@
 import { resourceFromAttributes } from '@opentelemetry/resources';
 import {
+  ROOT_CONTEXT,
+  SpanKind,
+  SpanStatusCode,
+  TraceFlags,
+  trace,
+  type SpanAttributes,
+} from '@opentelemetry/api';
+import {
   AlwaysOffSampler,
   AlwaysOnSampler,
   BatchSpanProcessor,
   ParentBasedSampler,
   TraceIdRatioBasedSampler,
   TracerProvider,
+  RandomIdGenerator,
+  type IdGenerator,
   type Sampler,
 } from '@opentelemetry/sdk-trace';
 import {
@@ -24,6 +34,33 @@ import type {
   OpenTelemetrySdkHandle,
   OpenTelemetrySdkStartOptions,
 } from './opentelemetry-runtime';
+import {
+  mapTelemetrySignalToSpan,
+  type TelemetrySignalV1,
+  type TelemetrySpanV1,
+} from './opentelemetry-signal';
+
+class DeterministicIdGenerator implements IdGenerator {
+  readonly #fallback = new RandomIdGenerator();
+  #next?: { readonly traceId: string; readonly spanId: string };
+
+  withIds<T>(traceId: string, spanId: string, action: () => T): T {
+    this.#next = { traceId, spanId };
+    try {
+      return action();
+    } finally {
+      this.#next = undefined;
+    }
+  }
+
+  generateTraceId(): string {
+    return this.#next?.traceId ?? this.#fallback.generateTraceId();
+  }
+
+  generateSpanId(): string {
+    return this.#next?.spanId ?? this.#fallback.generateSpanId();
+  }
+}
 
 function mergedHeaders(
   common: Readonly<Record<string, string>>,
@@ -76,6 +113,7 @@ export async function startOpenTelemetrySdk(
     forceFlush(): Promise<void>;
     shutdown(): Promise<void>;
   }[] = [];
+  let emitTrace: ((signal: TelemetrySignalV1) => boolean) | undefined;
 
   if (configuration.signals.traces) {
     const exporter = new OTLPTraceExporter({
@@ -84,10 +122,11 @@ export async function startOpenTelemetrySdk(
       timeoutMillis: configuration.exportTimeoutMs,
       concurrencyLimit: 1,
     });
-    providers.push(
-      new TracerProvider({
+    const idGenerator = new DeterministicIdGenerator();
+    const provider = new TracerProvider({
         resource,
         sampler: sampler(configuration),
+        idGenerator,
         spanLimits: {
           attributeCountLimit: 32,
           attributeValueLengthLimit: 256,
@@ -105,8 +144,35 @@ export async function startOpenTelemetrySdk(
             exportTimeoutMillis: configuration.exportTimeoutMs,
           }),
         ],
-      })
-    );
+      });
+    providers.push(provider);
+    const tracer = provider.getTracer('woml.runtime', options.resource.runtimeVersion);
+    emitTrace = signal => {
+      const mapped = mapTelemetrySignalToSpan(signal);
+      if (mapped === undefined) return true;
+      return idGenerator.withIds(mapped.traceId, mapped.spanId, () => {
+        const parent = spanParentContext(mapped, configuration);
+        const span = tracer.startSpan(
+          mapped.name,
+          {
+            kind: SpanKind.INTERNAL,
+            startTime: new Date(mapped.startTime),
+            attributes: mapped.attributes as SpanAttributes,
+          },
+          parent
+        );
+        span.setStatus({
+          code:
+            mapped.status === 'error'
+              ? SpanStatusCode.ERROR
+              : mapped.status === 'ok'
+                ? SpanStatusCode.OK
+                : SpanStatusCode.UNSET,
+        });
+        span.end(new Date(mapped.endTime));
+        return true;
+      });
+    };
   }
 
   if (configuration.signals.metrics) {
@@ -158,6 +224,7 @@ export async function startOpenTelemetrySdk(
   }
 
   return {
+    emit: signal => emitTrace?.(signal) ?? true,
     forceFlush: async () => {
       await settleAll(providers.map(provider => () => provider.forceFlush()));
     },
@@ -165,4 +232,30 @@ export async function startOpenTelemetrySdk(
       await settleAll(providers.map(provider => () => provider.shutdown()));
     },
   };
+}
+
+function spanParentContext(
+  span: TelemetrySpanV1,
+  configuration: OpenTelemetrySdkStartOptions['configuration']
+) {
+  if (span.parentSpanId === undefined) return ROOT_CONTEXT;
+  return trace.setSpanContext(ROOT_CONTEXT, {
+    traceId: span.traceId,
+    spanId: span.parentSpanId,
+    traceFlags: sampled(span.traceId, configuration)
+      ? TraceFlags.SAMPLED
+      : TraceFlags.NONE,
+    isRemote: false,
+  });
+}
+
+function sampled(
+  traceId: string,
+  configuration: OpenTelemetrySdkStartOptions['configuration']
+): boolean {
+  if (configuration.sampler.name === 'always_on') return true;
+  if (configuration.sampler.name === 'always_off') return false;
+  if (configuration.sampler.name !== 'parentbased_traceidratio') return false;
+  const prefix = Number.parseInt(traceId.slice(0, 13), 16);
+  return prefix / 0x1_0000_0000_0000 < configuration.sampler.ratio;
 }

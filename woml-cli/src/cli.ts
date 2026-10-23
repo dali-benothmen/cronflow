@@ -202,6 +202,7 @@ import {
   OpenTelemetryRuntime,
   type OpenTelemetrySdkLoader,
 } from './opentelemetry-runtime';
+import type { TelemetrySignalV1 } from './opentelemetry-signal';
 import {
   readRuntimeDescriptor,
   removeRuntimeDescriptor,
@@ -5740,6 +5741,7 @@ async function activateWorkflows(
   let runtimeControl: RuntimeControlHandle | undefined;
   let observability: RuntimeObservability | undefined;
   let openTelemetryRuntime: OpenTelemetryRuntime | undefined;
+  const pendingTelemetrySignals: TelemetrySignalV1[] = [];
   let operationalOutput: RuntimeOperationalOutput | undefined;
   let foregroundOutputCursor = 0;
   let foregroundOutputDrain = Promise.resolve();
@@ -5968,7 +5970,18 @@ async function activateWorkflows(
               startSuspended: true,
               runtimeCapabilities: args.runtimeCapabilities,
               signalIngressToken,
+              telemetryEnabled: args.openTelemetry?.enabled === true,
               onOperationalOutput: observeOperationalOutput,
+              onTelemetrySignal: signal => {
+                if (openTelemetryRuntime !== undefined) {
+                  openTelemetryRuntime.record(signal);
+                } else if (
+                  pendingTelemetrySignals.length <
+                  (args.openTelemetry?.maxQueueSize ?? 0)
+                ) {
+                  pendingTelemetrySignals.push(signal);
+                }
+              },
               onTriggerProgress: progress => {
                 observe(progress);
                 if (
@@ -6244,6 +6257,9 @@ async function activateWorkflows(
             },
           }
         );
+        for (const signal of pendingTelemetrySignals.splice(0)) {
+          openTelemetryRuntime.record(signal);
+        }
       }
       runtimeControl = await profileAsync(
         'runtime',
