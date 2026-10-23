@@ -269,6 +269,7 @@ pub struct RuntimeExecutionOptions {
   pub interval_progress_reporter: Option<IntervalProgressReporter>,
   pub workflow_call_progress_reporter: Option<WorkflowCallProgressReporter>,
   pub runtime_policy_progress_reporter: Option<RuntimePolicyProgressReporter>,
+  pub operational_output_reporter: Option<crate::OperationalOutputReporter>,
   pub resolved_secrets: Arc<BTreeMap<String, String>>,
   pub(crate) signal_ingress_token: Option<String>,
   pub capability_registry: Arc<CapabilityRegistry>,
@@ -501,6 +502,7 @@ impl RuntimeExecutionOptions {
       interval_progress_reporter: None,
       workflow_call_progress_reporter: None,
       runtime_policy_progress_reporter: None,
+      operational_output_reporter: None,
       resolved_secrets: Arc::new(BTreeMap::new()),
       signal_ingress_token: None,
       capability_registry,
@@ -769,6 +771,14 @@ impl RuntimeExecutionOptions {
     reporter: RuntimePolicyProgressReporter,
   ) -> Self {
     self.runtime_policy_progress_reporter = Some(reporter);
+    self
+  }
+
+  pub fn with_operational_output_reporter(
+    mut self,
+    reporter: crate::OperationalOutputReporter,
+  ) -> Self {
+    self.operational_output_reporter = Some(reporter);
     self
   }
 
@@ -2074,12 +2084,14 @@ fn attach_durable_capability_authority(
   database_path: &std::path::Path,
 ) -> Result<RuntimeExecutionOptions, RuntimeExecutionError> {
   let operational_output = Arc::new(
-    crate::operational_output_store_for_state(database_path).map_err(|error| {
-      RuntimeExecutionError::InvalidConfiguration(format!(
-        "{}: the operational-output path could not be derived",
-        error.code()
-      ))
-    })?,
+    crate::operational_output_store_for_state(database_path)
+      .map(|store| store.with_reporter(options.operational_output_reporter.clone()))
+      .map_err(|error| {
+        RuntimeExecutionError::InvalidConfiguration(format!(
+          "{}: the operational-output path could not be derived",
+          error.code()
+        ))
+      })?,
   );
   if let Some(process) = &options.managed_process_handler {
     process

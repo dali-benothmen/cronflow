@@ -31,6 +31,7 @@ pub const MAX_OPERATIONAL_INLINE_RUN_BYTES: u64 = 256 * 1024 * 1024;
 pub const DEFAULT_OPERATIONAL_RETENTION_MS: u64 = 7 * 24 * 60 * 60 * 1_000;
 pub const DEFAULT_OPERATIONAL_STORE_BYTES: u64 = 1024 * 1024 * 1024;
 pub const OPERATIONAL_PROGRESS_CADENCE_MS: i64 = 250;
+pub type OperationalOutputReporter = Arc<dyn Fn(u64) + Send + Sync>;
 
 const MAX_ID_BYTES: usize = 320;
 const MAX_REASON_BYTES: usize = 128;
@@ -258,12 +259,18 @@ pub enum OperationalStreamEventV1 {
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct OperationalProgressSnapshotV1 {
   pub run_id: String,
+  #[serde(skip_serializing_if = "Option::is_none")]
   pub node_id: Option<String>,
+  #[serde(skip_serializing_if = "Option::is_none")]
   pub attempt: Option<u32>,
   pub progress_id: String,
+  #[serde(skip_serializing_if = "Option::is_none")]
   pub current: Option<f64>,
+  #[serde(skip_serializing_if = "Option::is_none")]
   pub total: Option<f64>,
+  #[serde(skip_serializing_if = "Option::is_none")]
   pub unit: Option<String>,
+  #[serde(skip_serializing_if = "Option::is_none")]
   pub message: Option<String>,
   pub status: OperationalProgressStatusV1,
   pub sequence: u64,
@@ -284,6 +291,7 @@ pub struct OperationalOutputStoreInspectionV1 {
   pub retained_output_bytes: u64,
   pub active_runs: u64,
   pub terminal_runs: u64,
+  pub truncated_streams: u64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -333,6 +341,7 @@ pub struct OperationalOutputStore {
   path: PathBuf,
   deployment_id: String,
   connection: Mutex<Connection>,
+  reporter: Option<OperationalOutputReporter>,
 }
 
 impl std::fmt::Debug for OperationalOutputStore {
@@ -349,6 +358,14 @@ impl OperationalOutputStore {
   pub fn open(
     path: impl AsRef<Path>,
     deployment_id: impl Into<String>,
+  ) -> Result<Self, OperationalOutputError> {
+    Self::open_with_reporter(path, deployment_id, None)
+  }
+
+  pub fn open_with_reporter(
+    path: impl AsRef<Path>,
+    deployment_id: impl Into<String>,
+    reporter: Option<OperationalOutputReporter>,
   ) -> Result<Self, OperationalOutputError> {
     let deployment_id = deployment_id.into();
     validate_id(&deployment_id)?;
@@ -373,6 +390,7 @@ impl OperationalOutputStore {
       path,
       deployment_id,
       connection: Mutex::new(connection),
+      reporter,
     })
   }
 
@@ -463,6 +481,9 @@ impl OperationalOutputStore {
     transaction
       .commit()
       .map_err(|_| OperationalOutputError::Unavailable)?;
+    if let Some(reporter) = &self.reporter {
+      reporter(record.sequence);
+    }
     Ok(record)
   }
 
@@ -508,9 +529,9 @@ impl OperationalOutputStore {
         "the operational stream is already closed",
       ));
     }
-    let previous: Option<String> = transaction
+    let previous: Option<(String, u64)> = transaction
       .query_row(
-        "SELECT occurred_at FROM woml_operational_progress
+        "SELECT occurred_at, sequence FROM woml_operational_progress
          WHERE run_id = ?1 AND node_key = ?2 AND attempt_key = ?3 AND progress_id = ?4",
         params![
           draft.identity.run_id,
@@ -518,13 +539,13 @@ impl OperationalOutputStore {
           draft.identity.attempt.unwrap_or(0),
           progress_id,
         ],
-        |row| row.get(0),
+        |row| Ok((row.get(0)?, row.get(1)?)),
       )
       .optional()
       .map_err(|_| OperationalOutputError::Corrupt)?;
     let within_cadence = previous
-      .as_deref()
-      .and_then(|value| DateTime::parse_from_rfc3339(value).ok())
+      .as_ref()
+      .and_then(|(value, _)| DateTime::parse_from_rfc3339(value).ok())
       .is_some_and(|previous| {
         let elapsed = now.signed_duration_since(previous).num_milliseconds();
         (0..OPERATIONAL_PROGRESS_CADENCE_MS).contains(&elapsed)
@@ -557,6 +578,9 @@ impl OperationalOutputStore {
     transaction
       .commit()
       .map_err(|_| OperationalOutputError::Unavailable)?;
+    if let (Some(reporter), Some((_, sequence))) = (&self.reporter, previous) {
+      reporter(sequence);
+    }
     Ok(true)
   }
 
@@ -737,6 +761,13 @@ impl OperationalOutputStore {
         |row| Ok((row.get(0)?, row.get(1)?)),
       )
       .map_err(|_| OperationalOutputError::Corrupt)?;
+    let truncated_streams = connection
+      .query_row(
+        "SELECT COUNT(DISTINCT run_id) FROM woml_operational_records WHERE kind = 'truncated'",
+        [],
+        |row| row.get(0),
+      )
+      .map_err(|_| OperationalOutputError::Corrupt)?;
     Ok(OperationalOutputStoreInspectionV1 {
       profile: "woml.operational-output-store/v1".to_string(),
       schema_version: OPERATIONAL_OUTPUT_STORE_SCHEMA_VERSION,
@@ -749,6 +780,7 @@ impl OperationalOutputStore {
       retained_output_bytes,
       active_runs,
       terminal_runs,
+      truncated_streams,
     })
   }
 
@@ -853,6 +885,7 @@ pub struct LazyOperationalOutputStore {
   path: PathBuf,
   deployment_id: String,
   active: Mutex<Option<Arc<OperationalOutputStore>>>,
+  reporter: Option<OperationalOutputReporter>,
 }
 
 impl LazyOperationalOutputStore {
@@ -861,7 +894,13 @@ impl LazyOperationalOutputStore {
       path: path.into(),
       deployment_id: deployment_id.into(),
       active: Mutex::new(None),
+      reporter: None,
     }
+  }
+
+  pub fn with_reporter(mut self, reporter: Option<OperationalOutputReporter>) -> Self {
+    self.reporter = reporter;
+    self
   }
 
   pub fn is_active(&self) -> bool {
@@ -880,9 +919,10 @@ impl LazyOperationalOutputStore {
     if let Some(store) = active.as_ref() {
       return Ok(Arc::clone(store));
     }
-    let store = Arc::new(OperationalOutputStore::open(
+    let store = Arc::new(OperationalOutputStore::open_with_reporter(
       &self.path,
       self.deployment_id.clone(),
+      self.reporter.clone(),
     )?);
     *active = Some(Arc::clone(&store));
     Ok(store)

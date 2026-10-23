@@ -59,7 +59,8 @@
     "recordCount": 2,
     "retainedOutputBytes": 26,
     "activeRuns": 1,
-    "terminalRuns": 0
+    "terminalRuns": 0,
+    "truncatedStreams": 0
   },
   "processV2": {
     "contract": "woml.process",

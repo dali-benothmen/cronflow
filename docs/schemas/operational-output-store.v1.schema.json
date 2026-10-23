@@ -11,7 +11,7 @@
     "inspection": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["profile", "schemaVersion", "deploymentId", "nextSequence", "latestSequence", "prunedThrough", "recordCount", "retainedOutputBytes", "activeRuns", "terminalRuns"],
+      "required": ["profile", "schemaVersion", "deploymentId", "nextSequence", "latestSequence", "prunedThrough", "recordCount", "retainedOutputBytes", "activeRuns", "terminalRuns", "truncatedStreams"],
       "properties": {
         "profile": { "const": "woml.operational-output-store/v1" },
         "schemaVersion": { "const": 1 },
@@ -23,7 +23,8 @@
         "recordCount": { "$ref": "#/$defs/count" },
         "retainedOutputBytes": { "$ref": "#/$defs/count" },
         "activeRuns": { "$ref": "#/$defs/count" },
-        "terminalRuns": { "$ref": "#/$defs/count" }
+        "terminalRuns": { "$ref": "#/$defs/count" },
+        "truncatedStreams": { "$ref": "#/$defs/count" }
       }
     },
     "prune": {

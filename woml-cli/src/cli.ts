@@ -1,7 +1,7 @@
 #!/usr/bin/env bun
 
 import { createHash, randomUUID } from 'node:crypto';
-import { existsSync } from 'node:fs';
+import { existsSync, realpathSync } from 'node:fs';
 import {
   chmod,
   mkdir,
@@ -12,7 +12,7 @@ import {
   unlink,
   writeFile,
 } from 'node:fs/promises';
-import { dirname, extname, join, resolve } from 'node:path';
+import { basename, dirname, extname, join, resolve } from 'node:path';
 
 import packageMetadata from '../package.json' with { type: 'json' };
 
@@ -80,9 +80,13 @@ import {
   inspectCorrectionV1WithRust,
   recoverCorrectionWithRust,
   listRunPresentationsWithRust,
+  hasWorkflowDefinitionWithRust,
   listRunsWithRust,
   observeRuntimeWithRust,
   observeLocksV1WithRust,
+  readOperationalOutputPageWithRust,
+  inspectOperationalProgressWithRust,
+  observeOperationalOutputWithRust,
   BackupOperationError,
   ArtifactOperationError,
   RetentionOperationError,
@@ -206,6 +210,11 @@ import {
   type RuntimeControlHandle,
 } from './runtime-control';
 import { RuntimeObservability } from './runtime-observability';
+import {
+  renderOperationalRecord,
+  RuntimeOperationalOutput,
+  type OperationalOutputWakeupV1,
+} from './operational-output';
 import { ForegroundPresentation } from './foreground-presentation';
 import {
   followWorkflowLogs,
@@ -1287,7 +1296,13 @@ function formatRunInspection(
   artifactsTruncated = false,
   waitInspection?: RustWaitInspectionV1,
   locks: readonly RustLockInspectionV1[] = [],
-  correction?: RustCorrectionInspectionV1
+  correction?: RustCorrectionInspectionV1,
+  operationalOutput?: {
+    readonly state: 'available' | 'unavailable';
+    readonly latestSequence?: number;
+    readonly activeProgress?: number;
+    readonly progressLanes?: number;
+  }
 ): string {
   const lines = [
     `Run: ${inspection.runId}`,
@@ -1517,7 +1532,28 @@ function formatRunInspection(
       );
     }
   }
+  if (operationalOutput !== undefined) {
+    lines.push('Operational output:');
+    if (operationalOutput.state === 'unavailable') {
+      lines.push('  Temporarily unavailable; durable run state is unaffected.');
+    } else if ((operationalOutput.latestSequence ?? 0) === 0) {
+      lines.push('  No retained output.');
+    } else {
+      lines.push(
+        `  Retained through sequence ${operationalOutput.latestSequence} · ${operationalOutput.activeProgress ?? 0}/${operationalOutput.progressLanes ?? 0} progress lanes active`
+      );
+      lines.push(`  View: woml logs ${inspection.runId} --no-follow`);
+    }
+  }
   return `${lines.join('\n')}\n`;
+}
+
+function operationalOutputPath(statePath: string): string {
+  const name = basename(statePath);
+  if (name === 'state.sqlite') return join(dirname(statePath), 'output.sqlite');
+  const extension = extname(name);
+  const stem = extension.length === 0 ? name : name.slice(0, -extension.length);
+  return join(dirname(statePath), `${stem}.output.sqlite`);
 }
 
 function formatCancellation(result: RustRunCancellationResultV1): string {
@@ -2942,6 +2978,15 @@ function deploymentIdentity(statePath: string): string {
     .update(resolve(statePath))
     .digest('hex')
     .slice(0, 24)}`;
+}
+
+function operationalOutputDeploymentIdentity(statePath: string): string {
+  const identitySource = existsSync(statePath)
+    ? realpathSync.native(statePath)
+    : resolve(statePath);
+  return `deployment_${createHash('sha256')
+    .update(identitySource)
+    .digest('hex')}`;
 }
 
 function editorTypesPath(inputPath: string, inputIsDirectory: boolean): string {
@@ -5680,6 +5725,9 @@ async function activateWorkflows(
   let discordTransport: SharedDiscordTransport | undefined;
   let runtimeControl: RuntimeControlHandle | undefined;
   let observability: RuntimeObservability | undefined;
+  let operationalOutput: RuntimeOperationalOutput | undefined;
+  let foregroundOutputCursor = 0;
+  let foregroundOutputDrain = Promise.resolve();
   let automaticRetention: AutomaticRetentionHandle | undefined;
   const pendingObservabilityProgress: unknown[] = [];
   const scheduleDue = new Map<string, string>();
@@ -5719,6 +5767,45 @@ async function activateWorkflows(
       return;
     }
     observability.recordProgress(progress);
+  };
+  const observeOperationalOutput = (
+    wakeup: OperationalOutputWakeupV1
+  ): void => {
+    operationalOutput?.notify(wakeup);
+    if (background || wakeup.newestSequence <= foregroundOutputCursor) return;
+    foregroundOutputDrain = foregroundOutputDrain
+      .then(() => {
+        while (foregroundOutputCursor < wakeup.newestSequence) {
+          const page = readOperationalOutputPageWithRust(
+            args.statePath,
+            { after: foregroundOutputCursor, limit: 250 },
+            { nativeCorePath: dependencies.nativeCorePath }
+          );
+          for (const item of page.records) {
+            io.stderr(
+              `${renderOperationalRecord(item, {
+                color: args.color,
+                includeRunLabel: productionSources.length > 1,
+                unicode: process.env.TERM !== 'dumb',
+                isTTY: io.isTTY === true,
+                width: process.stderr.columns,
+              })}\n`
+            );
+          }
+          const previous = foregroundOutputCursor;
+          foregroundOutputCursor = Math.max(
+            foregroundOutputCursor,
+            page.nextAfter
+          );
+          if (!page.hasMore || foregroundOutputCursor === previous) break;
+        }
+      })
+      .catch(error => {
+        foregroundPresentation.warning(
+          'WOML_OUTPUT_STREAM_UNAVAILABLE',
+          error instanceof Error ? error.message : String(error)
+        );
+      });
   };
   let descriptorPath: string | undefined;
   let resolveRuntimeUnavailable!: () => void;
@@ -5866,6 +5953,7 @@ async function activateWorkflows(
               startSuspended: true,
               runtimeCapabilities: args.runtimeCapabilities,
               signalIngressToken,
+              onOperationalOutput: observeOperationalOutput,
               onTriggerProgress: progress => {
                 observe(progress);
                 if (
@@ -5927,6 +6015,41 @@ async function activateWorkflows(
         }
       );
       runtimeId = runtime.runtimeId;
+      operationalOutput = new RuntimeOperationalOutput({
+        deploymentId: operationalOutputDeploymentIdentity(args.statePath),
+        hasRun: runId => {
+          try {
+            inspectRunPresentationWithRust(args.statePath, runId, {
+              nativeCorePath: dependencies.nativeCorePath,
+            });
+            return true;
+          } catch (error) {
+            if (
+              error instanceof RunManagementError &&
+              error.code === 'WOML_RUN_NOT_FOUND'
+            ) return false;
+            throw error;
+          }
+        },
+        hasWorkflow: workflowId =>
+          hasWorkflowDefinitionWithRust(args.statePath, workflowId, {
+            nativeCorePath: dependencies.nativeCorePath,
+          }),
+        readPage: (runId, after, limit) =>
+          readOperationalOutputPageWithRust(
+            args.statePath,
+            { ...(runId === undefined ? {} : { runId }), after, limit },
+            { nativeCorePath: dependencies.nativeCorePath }
+          ),
+        readProgress: runId =>
+          inspectOperationalProgressWithRust(args.statePath, runId, {
+            nativeCorePath: dependencies.nativeCorePath,
+          }),
+        readObservation: () =>
+          observeOperationalOutputWithRust(args.statePath, {
+            nativeCorePath: dependencies.nativeCorePath,
+          }),
+      });
       const artifactAuthority =
         args.runtimeCapabilities?.artifacts === undefined
           ? undefined
@@ -6044,6 +6167,11 @@ async function activateWorkflows(
               observeLocksV1WithRust(args.statePath, {
                 nativeCorePath: dependencies.nativeCorePath,
               }),
+            observeOutput: () =>
+              observeOperationalOutputWithRust(args.statePath, {
+                nativeCorePath: dependencies.nativeCorePath,
+              }),
+            outputFollowers: () => operationalOutput?.followerCount ?? 0,
             ...(artifactAuthority === undefined ||
             artifactObservationSecrets === undefined
               ? {}
@@ -6082,6 +6210,7 @@ async function activateWorkflows(
             host: args.adminHost,
             port: args.adminPort,
             observability,
+            output: operationalOutput,
             healthEnabled: args.observabilityHealth,
             metricsEnabled: args.observabilityMetrics,
             presentations: {
@@ -7219,15 +7348,17 @@ async function runCliUnprofiled(
     'get',
     'cancel',
     'recover',
+    'logs',
     'runs',
     'telegram',
     'discord',
     'whatsapp',
   ]);
   if (
-    args.includes('--logs') &&
-    args[0] !== undefined &&
-    !commands.has(args[0])
+    args[0] === 'logs' ||
+    (args.includes('--logs') &&
+      args[0] !== undefined &&
+      !commands.has(args[0]))
   ) {
     try {
       const logArguments = await resolveLogFollowArguments(args);
@@ -7627,6 +7758,44 @@ async function runCliUnprofiled(
         get.runId,
         { nativeCorePath: dependencies.nativeCorePath }
       );
+      let operationalSummary:
+        | {
+            readonly state: 'available' | 'unavailable';
+            readonly latestSequence?: number;
+            readonly activeProgress?: number;
+            readonly progressLanes?: number;
+          }
+        | undefined;
+      if (!get.json && existsSync(operationalOutputPath(get.statePath))) {
+        try {
+          const page = readOperationalOutputPageWithRust(
+            get.statePath,
+            { runId: get.runId, after: 0, limit: 1 },
+            { nativeCorePath: dependencies.nativeCorePath }
+          );
+          const progress = inspectOperationalProgressWithRust(
+            get.statePath,
+            get.runId,
+            { nativeCorePath: dependencies.nativeCorePath }
+          );
+          operationalSummary = {
+            state: 'available',
+            latestSequence: page.latestSequence,
+            activeProgress: progress.filter(item => item.status === 'active')
+              .length,
+            progressLanes: progress.length,
+          };
+        } catch {
+          operationalSummary = { state: 'unavailable' };
+        }
+      } else if (!get.json) {
+        operationalSummary = {
+          state: 'available',
+          latestSequence: 0,
+          activeProgress: 0,
+          progressLanes: 0,
+        };
+      }
       const publicResult =
         result.profile === 'woml.run-inspection/v11'
           ? {
@@ -7685,7 +7854,8 @@ async function runCliUnprofiled(
               artifactInspection.truncated,
               waitInspection,
               lockInspection,
-              correctionInspection
+              correctionInspection,
+              operationalSummary
             )
       );
       return 0;

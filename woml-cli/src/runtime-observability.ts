@@ -4,6 +4,7 @@ import type {
   RustRunListV1,
   RustRuntimeObservationV1,
 } from './rust-executor';
+import type { OperationalOutputObservationV1 } from './operational-output';
 
 export type RuntimeLifecycle =
   | 'starting'
@@ -185,6 +186,8 @@ export class RuntimeObservability implements RuntimeObservabilitySurface {
   readonly #observeDurable?: () => RustRuntimeObservationV1;
   readonly #observeArtifacts?: () => RustArtifactObservationV1;
   readonly #observeLocks?: () => RustLockObservationV1;
+  readonly #observeOutput?: () => OperationalOutputObservationV1;
+  readonly #outputFollowers?: () => number;
   readonly #storeSize: () => Promise<number>;
   readonly #emitLog: (text: string) => void;
   readonly #logFormat: 'text' | 'json';
@@ -214,6 +217,8 @@ export class RuntimeObservability implements RuntimeObservabilitySurface {
     readonly observeDurable?: () => RustRuntimeObservationV1;
     readonly observeArtifacts?: () => RustArtifactObservationV1;
     readonly observeLocks?: () => RustLockObservationV1;
+    readonly observeOutput?: () => OperationalOutputObservationV1;
+    readonly outputFollowers?: () => number;
     readonly storeSize: () => Promise<number>;
     readonly logFormat: 'text' | 'json';
     readonly emitLog: (text: string) => void;
@@ -231,6 +236,8 @@ export class RuntimeObservability implements RuntimeObservabilitySurface {
     this.#observeDurable = options.observeDurable;
     this.#observeArtifacts = options.observeArtifacts;
     this.#observeLocks = options.observeLocks;
+    this.#observeOutput = options.observeOutput;
+    this.#outputFollowers = options.outputFollowers;
     this.#storeSize = options.storeSize;
     this.#logFormat = options.logFormat;
     this.#emitLog = options.emitLog;
@@ -452,9 +459,19 @@ export class RuntimeObservability implements RuntimeObservabilitySurface {
   }
 
   detailedHealth(): unknown {
+    let outputState: 'ready' | 'degraded' | undefined;
+    if (this.#observeOutput !== undefined) {
+      try {
+        this.#observeOutput();
+        outputState = 'ready';
+      } catch {
+        outputState = 'degraded';
+      }
+    }
     const status =
       this.#lifecycle === 'ready'
-        ? this.#components.some(component => component.status === 'degraded')
+        ? outputState === 'degraded' ||
+          this.#components.some(component => component.status === 'degraded')
           ? 'degraded'
           : 'ready'
         : this.#lifecycle === 'degraded'
@@ -465,11 +482,24 @@ export class RuntimeObservability implements RuntimeObservabilitySurface {
       kind: 'detail',
       status,
       runtimeInstanceId: this.#runtimeInstanceId,
-      components: this.#components.map(({ name, status, code }) => ({
-        name,
-        status,
-        ...(code === undefined ? {} : { code }),
-      })),
+      components: [
+        ...this.#components.map(({ name, status, code }) => ({
+          name,
+          status,
+          ...(code === undefined ? {} : { code }),
+        })),
+        ...(outputState === undefined
+          ? []
+          : [
+              {
+                name: 'operational-output',
+                status: outputState,
+                ...(outputState === 'ready'
+                  ? {}
+                  : { code: 'WOML_OUTPUT_STORE_UNAVAILABLE' }),
+              },
+            ]),
+      ],
     };
   }
 
@@ -559,6 +589,12 @@ export class RuntimeObservability implements RuntimeObservabilitySurface {
     const durable = this.#observeDurable?.();
     const artifacts = this.#observeArtifacts?.();
     const locks = this.#observeLocks?.();
+    let output: OperationalOutputObservationV1 | undefined;
+    try {
+      output = this.#observeOutput?.();
+    } catch {
+      output = undefined;
+    }
     const statusTotal = (status: string): number =>
       durable?.statusTotals[status] ??
       snapshot.runs.filter(run => run.status === status).length;
@@ -596,6 +632,35 @@ export class RuntimeObservability implements RuntimeObservabilitySurface {
       metric('woml_workflow_calls_active', 'gauge', durable?.workflowCallsActive ?? this.#counterPrefix('workflow_call:')),
       metric('woml_worker_restarts_total', 'counter', this.#counters.get('provider:restarted') ?? 0, { provider: 'script_host' })
     );
+    if (output !== undefined) {
+      results.push(
+        metric('woml_output_store_healthy', 'gauge', 1),
+        metric('woml_output_records_retained', 'gauge', output.recordCount),
+        metric(
+          'woml_output_bytes_retained',
+          'gauge',
+          output.retainedOutputBytes
+        ),
+        metric('woml_output_streams_active', 'gauge', output.activeRuns),
+        metric(
+          'woml_output_streams_truncated',
+          'gauge',
+          output.truncatedStreams
+        ),
+        metric(
+          'woml_output_followers',
+          'gauge',
+          this.#outputFollowers?.() ?? 0
+        ),
+        metric(
+          'woml_output_pruned_through',
+          'gauge',
+          output.prunedThrough
+        )
+      );
+    } else if (this.#observeOutput !== undefined) {
+      results.push(metric('woml_output_store_healthy', 'gauge', 0));
+    }
     const loops = [...this.#forEachProgress.values()];
     results.push(
       metric('woml_for_each_iterations_active', 'gauge', loops.reduce((sum, loop) => sum + loop.active, 0)),

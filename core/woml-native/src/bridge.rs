@@ -3,12 +3,15 @@
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::net::SocketAddr;
 use std::path::PathBuf;
-use std::sync::{mpsc, Arc, Mutex, OnceLock};
+use std::sync::{
+  atomic::{AtomicBool, AtomicU64, Ordering},
+  mpsc, Arc, Mutex, OnceLock,
+};
 use std::thread::JoinHandle;
 
 use chrono::{DateTime, Utc};
 use napi::threadsafe_function::{ErrorStrategy, ThreadsafeFunctionCallMode};
-use napi::{Env, JsFunction, JsObject};
+use napi::{Env, JsFunction, JsObject, Status};
 use napi_derive::napi;
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
@@ -31,11 +34,12 @@ use woml_engine::{
   ExternalTriggerAdmissionCommand, InfrastructurePolicyBundleV1, InfrastructurePolicyTrustV1,
   IntervalProgress, IntervalProgressReporter, LifecycleProgress, NotificationHostClientError,
   NotificationHostProcessOptions, NotificationJourneyDiagnostics, NotificationJourneyError,
-  ParallelFailurePolicy, ProcessPolicyV1, ProcessRuntimeMode, RetentionError, RetentionPolicyV1,
-  ReviewerDirectoryAuthorityV1, ReviewerDirectoryV1, ReviewerIdentityClaimV1, ReviewerProviderV1,
-  RichApprovalDecisionStatus, RichApprovalIdentityDecision, RunFailure, RunPresentationError,
-  RunStatus, RuntimeExecutionError, RuntimeExecutionOptions, RuntimeModuleArtifact,
-  RuntimePolicyProgress, RuntimePolicyProgressReporter, ScheduleProgress, ScheduleProgressReporter,
+  OperationalOutputReporter, ParallelFailurePolicy, ProcessPolicyV1, ProcessRuntimeMode,
+  RetentionError, RetentionPolicyV1, ReviewerDirectoryAuthorityV1, ReviewerDirectoryV1,
+  ReviewerIdentityClaimV1, ReviewerProviderV1, RichApprovalDecisionStatus,
+  RichApprovalIdentityDecision, RunFailure, RunPresentationError, RunStatus, RuntimeExecutionError,
+  RuntimeExecutionOptions, RuntimeModuleArtifact, RuntimePolicyProgress,
+  RuntimePolicyProgressReporter, ScheduleProgress, ScheduleProgressReporter,
   ScriptHostProcessOptions, SystemEngineClock, TimerWaitSettlement, TriggerAdmissionRequest,
   TriggerProgress, TriggerProgressReporter, WebhookDefinitionRegistration, WebhookRuntimeError,
   WomlWebhookServer, WomlWebhookServerConfig, WorkflowCallProgress, WorkflowCallProgressReporter,
@@ -590,6 +594,37 @@ fn trigger_runtime_napi_error(error: NativeTriggerRuntimeError) -> napi::Error {
   napi::Error::from_reason(reason)
 }
 
+fn native_operational_output_reporter(
+  env: &Env,
+  progress_callback: &JsFunction,
+) -> napi::Result<OperationalOutputReporter> {
+  let scheduled = Arc::new(AtomicBool::new(false));
+  let newest_sequence = Arc::new(AtomicU64::new(0));
+  let callback_scheduled = Arc::clone(&scheduled);
+  let callback_sequence = Arc::clone(&newest_sequence);
+  let mut wakeup = progress_callback
+    .create_threadsafe_function::<(), String, _, ErrorStrategy::Fatal>(1, move |_| {
+      callback_scheduled.store(false, Ordering::Release);
+      Ok(vec![format!(
+        "{{\"profile\":\"woml.operational-output-wakeup/v1\",\"newestSequence\":{}}}",
+        callback_sequence.load(Ordering::Acquire)
+      )])
+    })?;
+  wakeup.unref(env)?;
+  let wakeup = Arc::new(wakeup);
+  Ok(Arc::new(move |sequence| {
+    newest_sequence.fetch_max(sequence, Ordering::AcqRel);
+    if scheduled
+      .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+      .is_ok()
+    {
+      if wakeup.call((), ThreadsafeFunctionCallMode::NonBlocking) != Status::Ok {
+        scheduled.store(false, Ordering::Release);
+      }
+    }
+  }))
+}
+
 fn native_runtime_progress_reporters(
   env: &Env,
   progress_callback: JsFunction,
@@ -600,7 +635,9 @@ fn native_runtime_progress_reporters(
   WorkflowCallProgressReporter,
   RuntimePolicyProgressReporter,
   NativeRuntimeInstanceReporter,
+  OperationalOutputReporter,
 )> {
+  let operational_output_reporter = native_operational_output_reporter(env, &progress_callback)?;
   let mut progress = progress_callback
     .create_threadsafe_function::<String, String, _, ErrorStrategy::Fatal>(0, |context| {
       Ok(vec![context.value])
@@ -644,6 +681,7 @@ fn native_runtime_progress_reporters(
         let _ = runtime_instance_progress.call(json, ThreadsafeFunctionCallMode::Blocking);
       }
     }),
+    operational_output_reporter,
   ))
 }
 
@@ -967,6 +1005,7 @@ fn runtime_options_with_progress(
   resolved_secrets_json: String,
   runtime_capabilities_json: Option<String>,
 ) -> napi::Result<RuntimeExecutionOptions> {
+  let operational_output_reporter = native_operational_output_reporter(env, &progress_callback)?;
   let mut progress = progress_callback
     .create_threadsafe_function::<String, String, _, ErrorStrategy::Fatal>(0, |context| {
       Ok(vec![context.value])
@@ -995,7 +1034,8 @@ fn runtime_options_with_progress(
       if let Ok(json) = serde_json::to_string(&message) {
         let _ = runtime_policy_progress.call(json, ThreadsafeFunctionCallMode::Blocking);
       }
-    })),
+    }))
+    .with_operational_output_reporter(operational_output_reporter),
     runtime_capabilities_json,
   )
 }
@@ -1749,6 +1789,7 @@ pub fn start_woml_webhook_runtime(
     workflow_call_progress_reporter,
     runtime_policy_progress_reporter,
     runtime_instance_reporter,
+    operational_output_reporter,
   ) = native_runtime_progress_reporters(&env, progress_callback)?;
   let mut runtime_secrets = BTreeMap::new();
   for registration in &registrations {
@@ -1806,7 +1847,8 @@ pub fn start_woml_webhook_runtime(
     .with_schedule_progress_reporter(schedule_progress_reporter)
     .with_interval_progress_reporter(interval_progress_reporter)
     .with_workflow_call_progress_reporter(workflow_call_progress_reporter)
-    .with_runtime_policy_progress_reporter(runtime_policy_progress_reporter);
+    .with_runtime_policy_progress_reporter(runtime_policy_progress_reporter)
+    .with_operational_output_reporter(operational_output_reporter);
   let execution = apply_runtime_capabilities(execution, runtime_capabilities_json)?
     .with_signal_ingress_token(signal_ingress_token)
     .with_shared_script_hosts();
@@ -2426,6 +2468,75 @@ pub fn observe_woml_runtime(event_store_path: String) -> napi::Result<String> {
   serde_json::to_string(&observation).map_err(|error| {
     napi::Error::from_reason(format!(
       "Could not encode WOML runtime observation: {error}"
+    ))
+  })
+}
+
+fn operational_output_napi_error(error: woml_engine::OperationalOutputError) -> napi::Error {
+  napi::Error::from_reason(format!("{}: {error}", error.code()))
+}
+
+fn operational_cursor(value: f64) -> napi::Result<u64> {
+  if !value.is_finite() || value < 0.0 || value.fract() != 0.0 || value > 9_007_199_254_740_991.0 {
+    return Err(napi::Error::from_reason(
+      "WOML_OUTPUT_CURSOR_INVALID: the operational-output cursor is invalid".to_string(),
+    ));
+  }
+  Ok(value as u64)
+}
+
+#[napi]
+pub fn read_woml_operational_output_page(
+  event_store_path: String,
+  run_id: Option<String>,
+  after: f64,
+  limit: u32,
+) -> napi::Result<String> {
+  let store = woml_engine::operational_output_store_for_state(&PathBuf::from(event_store_path))
+    .and_then(|store| store.activate())
+    .map_err(operational_output_napi_error)?;
+  let after = operational_cursor(after)?;
+  let page = match run_id {
+    Some(run_id) => {
+      store.read_run_page(&run_id, after, usize::try_from(limit).unwrap_or(usize::MAX))
+    }
+    None => store.read_page(after, usize::try_from(limit).unwrap_or(usize::MAX)),
+  }
+  .map_err(operational_output_napi_error)?;
+  serde_json::to_string(&page).map_err(|error| {
+    napi::Error::from_reason(format!(
+      "WOML_OUTPUT_STORE_UNAVAILABLE: could not encode operational output: {error}"
+    ))
+  })
+}
+
+#[napi]
+pub fn inspect_woml_operational_progress(
+  event_store_path: String,
+  run_id: String,
+) -> napi::Result<String> {
+  let store = woml_engine::operational_output_store_for_state(&PathBuf::from(event_store_path))
+    .and_then(|store| store.activate())
+    .map_err(operational_output_napi_error)?;
+  let progress = store
+    .latest_progress(&run_id)
+    .map_err(operational_output_napi_error)?;
+  serde_json::to_string(&progress).map_err(|error| {
+    napi::Error::from_reason(format!(
+      "WOML_OUTPUT_STORE_UNAVAILABLE: could not encode operational progress: {error}"
+    ))
+  })
+}
+
+#[napi]
+pub fn observe_woml_operational_output(event_store_path: String) -> napi::Result<String> {
+  let store = woml_engine::operational_output_store_for_state(&PathBuf::from(event_store_path))
+    .and_then(|store| store.activate())
+    .map_err(operational_output_napi_error)?;
+  let observation = store.inspect().map_err(operational_output_napi_error)?;
+  serde_json::to_string(&observation).map_err(|error| {
+    napi::Error::from_reason(format!(
+      "WOML_OUTPUT_STORE_UNAVAILABLE: could not encode operational observation: {error}"
     ))
   })
 }
