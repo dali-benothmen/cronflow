@@ -2977,6 +2977,7 @@ async fn handle_webhook(
   if request.path() == WHATSAPP_CALLBACK_PATH {
     return handle_whatsapp_callback(request, body, state).await;
   }
+  let inbound_trace_context = inbound_trace_context(&request);
   let signal = request
     .path()
     .strip_prefix("/v1/signals/")
@@ -3198,6 +3199,11 @@ async fn handle_webhook(
     occurrence_id: outcome.occurrence_id,
     run_id: outcome.run_id.clone(),
   };
+  state.execution.report_telemetry_admission_context(
+    &outcome.run_id,
+    inbound_trace_context,
+    Utc::now(),
+  );
   state.report_accepted(&identity, outcome.duplicate);
   if !outcome.duplicate {
     state.report_run_started(&identity);
@@ -3220,6 +3226,7 @@ async fn handle_event_publication(
   state: web::Data<WebhookRuntimeState>,
   event_name: String,
 ) -> HttpResponse {
+  let inbound_trace_context = inbound_trace_context(&request);
   if request.method() != Method::POST {
     return event_rejected_response(
       state.get_ref(),
@@ -3390,6 +3397,11 @@ async fn handle_event_publication(
           occurrence_id: outcome.occurrence_id,
           run_id: outcome.run_id.clone(),
         };
+        state.execution.report_telemetry_admission_context(
+          &outcome.run_id,
+          inbound_trace_context.clone(),
+          received_at,
+        );
         state.report_accepted(&identity, outcome.duplicate);
         if !outcome.duplicate {
           state.report_run_started(&identity);
@@ -3449,6 +3461,35 @@ async fn handle_event_publication(
     status,
     deliveries,
   })
+}
+
+fn inbound_trace_context(request: &HttpRequest) -> crate::InboundTraceContext {
+  let mut traceparents = request.headers().get_all("traceparent");
+  let traceparent = match (traceparents.next(), traceparents.next()) {
+    (None, None) => None,
+    (Some(value), None) => match value.to_str() {
+      Ok(value) => Some(value),
+      Err(_) => return crate::InboundTraceContext::Invalid,
+    },
+    _ => return crate::InboundTraceContext::Invalid,
+  };
+  let mut tracestate = String::new();
+  for value in request.headers().get_all("tracestate") {
+    let Ok(value) = value.to_str() else {
+      return crate::InboundTraceContext::Invalid;
+    };
+    if !tracestate.is_empty() {
+      tracestate.push(',');
+    }
+    tracestate.push_str(value);
+    if tracestate.len() > crate::MAX_TRACESTATE_BYTES {
+      return crate::InboundTraceContext::Invalid;
+    }
+  }
+  crate::parse_w3c_trace_context(
+    traceparent,
+    (!tracestate.is_empty()).then_some(tracestate.as_str()),
+  )
 }
 
 fn valid_event_id(value: &str) -> bool {

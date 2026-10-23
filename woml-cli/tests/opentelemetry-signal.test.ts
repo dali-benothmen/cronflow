@@ -3,11 +3,18 @@ import { resolve } from 'node:path';
 
 import {
   mapTelemetrySignalToSpan,
+  parseTelemetryAdmissionLink,
   parseTelemetrySignal,
   womlSpanIdV1,
   womlTraceIdV1,
 } from '../src/opentelemetry-signal';
 import { OpenTelemetryRuntime } from '../src/opentelemetry-runtime';
+import {
+  metricFactsForTelemetrySignal,
+  prometheusIdentity,
+  safeLogForTelemetrySignal,
+  TelemetryActiveGaugeState,
+} from '../src/opentelemetry-observation';
 
 const fixture = resolve(
   import.meta.dir,
@@ -109,5 +116,71 @@ describe('OpenTelemetry Signal v1', () => {
     expect(runtime.record(signal)).toBe(true);
     expect(accepted).toEqual(['telemetry_run_01HXTRACE_settled']);
     await runtime.shutdown();
+  });
+
+  test('strictly accepts safe admission links and rejects malformed context', () => {
+    const link = parseTelemetryAdmissionLink(
+      JSON.stringify({
+        profile: 'woml.telemetry-admission-link/v1',
+        occurredAt: '2026-10-23T12:00:00.000Z',
+        runtimeInstanceId: 'runtime_01',
+        deploymentId: 'deployment_01',
+        runId: 'run_01',
+        status: 'linked',
+        traceId: '4bf92f3577b34da6a3ce929d0e0e4736',
+        spanId: '00f067aa0ba902b7',
+        sampled: true,
+      })
+    );
+    expect(link.status).toBe('linked');
+    expect(() =>
+      parseTelemetryAdmissionLink(
+        JSON.stringify({ ...link, traceId: '0'.repeat(32) })
+      )
+    ).toThrow('invalid telemetry context');
+    expect(() =>
+      parseTelemetryAdmissionLink(
+        JSON.stringify({ ...link, baggage: 'secret=value' })
+      )
+    ).toThrow('invalid telemetry context');
+  });
+
+  test('uses one low-cardinality fact model for OTel and Prometheus identities', async () => {
+    const contracts = await Bun.file(fixture).json();
+    const signal = parseTelemetrySignal(JSON.stringify(contracts.signal));
+    const facts = metricFactsForTelemetrySignal(signal);
+    expect(facts.map(fact => fact.name)).toEqual([
+      'woml.runtime.step.attempts',
+      'woml.runtime.step.duration',
+    ]);
+    expect(prometheusIdentity(facts[0]!)).toBe(
+      'woml_runtime_step_attempts{handler_category="runtime.script",status="succeeded"}'
+    );
+    const encoded = JSON.stringify(facts);
+    expect(encoded).not.toContain(signal.runId);
+    expect(encoded).not.toContain(signal.nodeId);
+    expect(encoded).not.toContain(signal.invocationId);
+  });
+
+  test('tracks active gauges without exporting identity and emits only safe correlated logs', async () => {
+    const contracts = await Bun.file(fixture).json();
+    const settled = parseTelemetrySignal(JSON.stringify(contracts.signal));
+    const active = new TelemetryActiveGaugeState();
+    active.observe({
+      ...settled,
+      kind: 'run',
+      status: 'started',
+      endedAt: undefined,
+      durationMs: undefined,
+    });
+    expect(active.facts()[0]).toMatchObject({ value: 1 });
+    active.observe({ ...settled, kind: 'run' });
+    expect(active.facts()[0]).toMatchObject({ value: 0 });
+    const log = safeLogForTelemetrySignal(settled)!;
+    expect(log.traceId).toBe('71bbd5822afe17d9d00bf8eaa62854b3');
+    expect(log.spanId).toBe('8a857c39a28e38ba');
+    expect(JSON.stringify(log)).not.toContain(settled.runId);
+    expect(JSON.stringify(log)).not.toContain(settled.nodeId);
+    expect(JSON.stringify(log)).not.toContain(settled.invocationId);
   });
 });

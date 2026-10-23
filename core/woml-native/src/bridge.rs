@@ -638,25 +638,36 @@ fn native_runtime_progress_reporters(
   NativeRuntimeInstanceReporter,
   OperationalOutputReporter,
   Option<woml_engine::TelemetrySignalReporter>,
+  Option<woml_engine::TelemetryAdmissionLinkReporter>,
 )> {
   let operational_output_reporter = native_operational_output_reporter(env, &progress_callback)?;
-  let telemetry_reporter = if telemetry_enabled {
+  let (telemetry_reporter, telemetry_admission_link_reporter) = if telemetry_enabled {
     let mut telemetry = progress_callback
       .create_threadsafe_function::<String, String, _, ErrorStrategy::Fatal>(1024, |context| {
         Ok(vec![context.value])
       })?;
     telemetry.unref(env)?;
     let telemetry = Arc::new(telemetry);
-    Some(woml_engine::bounded_telemetry_reporter(
-      1024,
-      Arc::new(move |message| {
-        if let Ok(json) = serde_json::to_string(&message) {
-          let _ = telemetry.call(json, ThreadsafeFunctionCallMode::NonBlocking);
-        }
-      }),
-    ))
+    let admission_links = Arc::clone(&telemetry);
+    (
+      Some(woml_engine::bounded_telemetry_reporter(
+        1024,
+        Arc::new(move |message| {
+          if let Ok(json) = serde_json::to_string(&message) {
+            let _ = telemetry.call(json, ThreadsafeFunctionCallMode::NonBlocking);
+          }
+        }),
+      )),
+      Some(
+        Arc::new(move |message: woml_engine::TelemetryAdmissionLinkV1| {
+          if let Ok(json) = serde_json::to_string(&message) {
+            let _ = admission_links.call(json, ThreadsafeFunctionCallMode::NonBlocking);
+          }
+        }) as woml_engine::TelemetryAdmissionLinkReporter,
+      ),
+    )
   } else {
-    None
+    (None, None)
   };
   let mut progress = progress_callback
     .create_threadsafe_function::<String, String, _, ErrorStrategy::Fatal>(0, |context| {
@@ -703,6 +714,7 @@ fn native_runtime_progress_reporters(
     }),
     operational_output_reporter,
     telemetry_reporter,
+    telemetry_admission_link_reporter,
   ))
 }
 
@@ -1784,6 +1796,8 @@ pub fn start_woml_webhook_runtime(
   runtime_capabilities_json: Option<String>,
   signal_ingress_token: Option<String>,
   telemetry_enabled: bool,
+  telemetry_propagation: bool,
+  telemetry_sampling_ratio: f64,
   progress_callback: JsFunction,
 ) -> napi::Result<JsObject> {
   let mut decode_span = woml_engine::performance::PerformanceSpan::new_for_process(
@@ -1814,6 +1828,7 @@ pub fn start_woml_webhook_runtime(
     runtime_instance_reporter,
     operational_output_reporter,
     telemetry_reporter,
+    telemetry_admission_link_reporter,
   ) = native_runtime_progress_reporters(&env, progress_callback, telemetry_enabled)?;
   let mut runtime_secrets = BTreeMap::new();
   for registration in &registrations {
@@ -1884,6 +1899,11 @@ pub fn start_woml_webhook_runtime(
   } else {
     execution
   };
+  let execution = execution.with_telemetry_propagation(
+    telemetry_enabled && telemetry_propagation,
+    telemetry_sampling_ratio,
+    telemetry_admission_link_reporter,
+  );
   let execution = apply_runtime_capabilities(execution, runtime_capabilities_json)?
     .with_signal_ingress_token(signal_ingress_token)
     .with_shared_script_hosts();

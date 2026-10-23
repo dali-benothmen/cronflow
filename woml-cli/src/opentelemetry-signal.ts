@@ -2,6 +2,8 @@ import { createHash } from 'node:crypto';
 
 export const TELEMETRY_SIGNAL_PROFILE = 'woml.telemetry-signal/v1';
 export const TELEMETRY_SIGNAL_MAX_BYTES = 16 * 1024;
+export const TELEMETRY_ADMISSION_LINK_PROFILE =
+  'woml.telemetry-admission-link/v1';
 
 export type TelemetrySignalKind =
   | 'runtime'
@@ -59,6 +61,18 @@ export interface TelemetrySpanV1 {
   readonly endTime: string;
   readonly status: 'unset' | 'ok' | 'error';
   readonly attributes: Readonly<Record<string, string | number | boolean>>;
+}
+
+export interface TelemetryAdmissionLinkV1 {
+  readonly profile: typeof TELEMETRY_ADMISSION_LINK_PROFILE;
+  readonly occurredAt: string;
+  readonly runtimeInstanceId: string;
+  readonly deploymentId: string;
+  readonly runId: string;
+  readonly status: 'linked' | 'invalid';
+  readonly traceId?: string;
+  readonly spanId?: string;
+  readonly sampled?: boolean;
 }
 
 const kinds = new Set<TelemetrySignalKind>([
@@ -223,6 +237,52 @@ export function parseTelemetrySignal(json: string): TelemetrySignalV1 {
     throw new Error('The native core returned a reversed telemetry interval.');
   }
   return value as unknown as TelemetrySignalV1;
+}
+
+export function parseTelemetryAdmissionLink(
+  json: string
+): TelemetryAdmissionLinkV1 {
+  if (Buffer.byteLength(json) > 4 * 1024) {
+    throw new Error('The native core returned oversized telemetry context.');
+  }
+  const value: unknown = JSON.parse(json);
+  if (!record(value)) throw new Error('The native core returned invalid telemetry context.');
+  const allowed = new Set([
+    'profile',
+    'occurredAt',
+    'runtimeInstanceId',
+    'deploymentId',
+    'runId',
+    'status',
+    'traceId',
+    'spanId',
+    'sampled',
+  ]);
+  const linked = value.status === 'linked';
+  if (
+    Object.keys(value).some(key => !allowed.has(key)) ||
+    value.profile !== TELEMETRY_ADMISSION_LINK_PROFILE ||
+    !dateTime(value.occurredAt) ||
+    !safeId(value.runtimeInstanceId) ||
+    !safeId(value.deploymentId) ||
+    !safeId(value.runId) ||
+    !['linked', 'invalid'].includes(String(value.status)) ||
+    (linked &&
+      (typeof value.traceId !== 'string' ||
+        !/^[0-9a-f]{32}$/u.test(value.traceId) ||
+        /^0+$/u.test(value.traceId) ||
+        typeof value.spanId !== 'string' ||
+        !/^[0-9a-f]{16}$/u.test(value.spanId) ||
+        /^0+$/u.test(value.spanId) ||
+        typeof value.sampled !== 'boolean')) ||
+    (!linked &&
+      (value.traceId !== undefined ||
+        value.spanId !== undefined ||
+        value.sampled !== undefined))
+  ) {
+    throw new Error('The native core returned invalid telemetry context.');
+  }
+  return value as unknown as TelemetryAdmissionLinkV1;
 }
 
 function digest(parts: readonly string[], bytes: number): string {

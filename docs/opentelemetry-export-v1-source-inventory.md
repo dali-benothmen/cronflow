@@ -6,13 +6,16 @@ This inventory identifies where OpenTelemetry facts may come from. It does not
 authorize copying complete values from those sources. The safe output remains
 limited by Telemetry Signal v1 and the attribute policy.
 
-OTE2 and OTE3 implement this boundary in
+OTE2 through OTE5 implement this boundary in
 `core/woml-engine/src/telemetry.rs`,
+`core/woml-engine/src/telemetry_propagation.rs`,
 `woml-cli/src/opentelemetry-signal.ts`, and
-`woml-cli/src/opentelemetry-sdk.ts`. Rust projects value-free facts from the
+`woml-cli/src/opentelemetry-observation.ts`. Rust projects value-free facts from the
 authoritative durable history only after execution commits. The native bridge
 uses bounded non-blocking dispatch, and TypeScript rejects any record outside
-the frozen schema before constructing an SDK span.
+the frozen schemas before constructing SDK spans, metrics, or logs. W3C
+admission links remain transient, and managed HTTP propagation is derived from
+engine-owned identity after policy validation.
 
 | Concern | Authoritative or operational source | OTE mapping decision |
 | --- | --- | --- |

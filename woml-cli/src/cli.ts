@@ -202,7 +202,10 @@ import {
   OpenTelemetryRuntime,
   type OpenTelemetrySdkLoader,
 } from './opentelemetry-runtime';
-import type { TelemetrySignalV1 } from './opentelemetry-signal';
+import type {
+  TelemetryAdmissionLinkV1,
+  TelemetrySignalV1,
+} from './opentelemetry-signal';
 import {
   readRuntimeDescriptor,
   removeRuntimeDescriptor,
@@ -5742,6 +5745,8 @@ async function activateWorkflows(
   let observability: RuntimeObservability | undefined;
   let openTelemetryRuntime: OpenTelemetryRuntime | undefined;
   const pendingTelemetrySignals: TelemetrySignalV1[] = [];
+  const pendingTelemetryLinks: TelemetryAdmissionLinkV1[] = [];
+  const observedTelemetrySignalIds = new Set<string>();
   let operationalOutput: RuntimeOperationalOutput | undefined;
   let foregroundOutputCursor = 0;
   let foregroundOutputDrain = Promise.resolve();
@@ -5971,8 +5976,25 @@ async function activateWorkflows(
               runtimeCapabilities: args.runtimeCapabilities,
               signalIngressToken,
               telemetryEnabled: args.openTelemetry?.enabled === true,
+              telemetryPropagation:
+                args.openTelemetry?.enabled === true &&
+                args.openTelemetry.propagation,
+              telemetrySamplingRatio:
+                args.openTelemetry === undefined
+                  ? 0
+                  : 'ratio' in args.openTelemetry.sampler
+                    ? args.openTelemetry.sampler.ratio
+                    : args.openTelemetry.sampler.name === 'always_on'
+                      ? 1
+                      : 0,
               onOperationalOutput: observeOperationalOutput,
               onTelemetrySignal: signal => {
+                if (observability !== undefined) {
+                  observability.recordTelemetrySignal(signal);
+                  if (openTelemetryRuntime === undefined) {
+                    observedTelemetrySignalIds.add(signal.signalId);
+                  }
+                }
                 if (openTelemetryRuntime !== undefined) {
                   openTelemetryRuntime.record(signal);
                 } else if (
@@ -5980,6 +6002,16 @@ async function activateWorkflows(
                   (args.openTelemetry?.maxQueueSize ?? 0)
                 ) {
                   pendingTelemetrySignals.push(signal);
+                }
+              },
+              onTelemetryAdmissionLink: link => {
+                if (openTelemetryRuntime !== undefined) {
+                  openTelemetryRuntime.recordAdmissionLink(link);
+                } else if (
+                  pendingTelemetryLinks.length <
+                  (args.openTelemetry?.maxQueueSize ?? 0)
+                ) {
+                  pendingTelemetryLinks.push(link);
                 }
               },
               onTriggerProgress: progress => {
@@ -6257,7 +6289,13 @@ async function activateWorkflows(
             },
           }
         );
+        for (const link of pendingTelemetryLinks.splice(0)) {
+          openTelemetryRuntime.recordAdmissionLink(link);
+        }
         for (const signal of pendingTelemetrySignals.splice(0)) {
+          if (!observedTelemetrySignalIds.delete(signal.signalId)) {
+            observability?.recordTelemetrySignal(signal);
+          }
           openTelemetryRuntime.record(signal);
         }
       }

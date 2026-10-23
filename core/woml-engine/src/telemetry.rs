@@ -235,7 +235,28 @@ pub fn project_telemetry_signals(
         run_started_at = data.admitted_at;
         run_trigger = Some(data.trigger.handler.clone());
       }
-      RunEventPayload::RunExecutionStarted(data) => run_started_at = data.started_at,
+      RunEventPayload::RunExecutionStarted(data) => {
+        run_started_at = data.started_at;
+        signals.push(point_signal(
+          event,
+          workflow_id,
+          context,
+          TelemetrySignalKind::Run,
+          TelemetrySignalStatus::Started,
+          None,
+          None,
+          None,
+          None,
+          [(
+            "trigger.type",
+            run_trigger
+              .as_deref()
+              .and_then(safe_category)
+              .map(TelemetryAttributeValue::String)
+              .unwrap_or_else(|| string_attribute("unknown")),
+          )],
+        ));
+      }
       RunEventPayload::RunTimeoutReached(data) => run_code = Some(data.code.clone()),
       RunEventPayload::RunOutcomeDecided(crate::RunOutcomeDecidedData::Failed { failure }) => {
         run_code = Some(failure.code.clone());
@@ -244,6 +265,26 @@ pub fn project_telemetry_signals(
         run_started_at = event.occurred_at;
         run_trigger = data.trigger_handler.clone();
         workflow_call = data.ingress.is_some();
+        signals.push(point_signal(
+          event,
+          workflow_id,
+          context,
+          TelemetrySignalKind::Run,
+          TelemetrySignalStatus::Started,
+          None,
+          None,
+          None,
+          None,
+          [(
+            "trigger.type",
+            data
+              .trigger_handler
+              .as_deref()
+              .and_then(safe_category)
+              .map(TelemetryAttributeValue::String)
+              .unwrap_or_else(|| string_attribute("unknown")),
+          )],
+        ));
       }
       RunEventPayload::StepAttemptStarted(data) => {
         attempts.insert(
@@ -1057,8 +1098,15 @@ mod tests {
         deployment_id: "deployment_01".to_string(),
       },
     );
-    assert_eq!(signals.len(), 2);
-    assert_eq!(signals[0].duration_ms, Some(115.0));
+    assert_eq!(signals.len(), 3);
+    assert_eq!(signals[0].status, TelemetrySignalStatus::Started);
+    assert_eq!(
+      signals
+        .iter()
+        .find(|signal| signal.kind == TelemetrySignalKind::Attempt)
+        .and_then(|signal| signal.duration_ms),
+      Some(115.0)
+    );
     let encoded = serde_json::to_string(&signals).unwrap();
     assert!(!encoded.contains("never-export-this"));
     assert!(!encoded.contains("secret-idempotency-value"));

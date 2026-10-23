@@ -272,6 +272,9 @@ pub struct RuntimeExecutionOptions {
   pub operational_output_reporter: Option<crate::OperationalOutputReporter>,
   pub telemetry_reporter: Option<crate::TelemetrySignalReporter>,
   pub telemetry_context: Option<crate::TelemetrySignalContext>,
+  pub telemetry_admission_link_reporter: Option<crate::TelemetryAdmissionLinkReporter>,
+  pub telemetry_propagation: Arc<AtomicBool>,
+  pub telemetry_sampling_ratio: Arc<RwLock<f64>>,
   pub resolved_secrets: Arc<BTreeMap<String, String>>,
   pub(crate) signal_ingress_token: Option<String>,
   pub capability_registry: Arc<CapabilityRegistry>,
@@ -454,10 +457,16 @@ impl RuntimeExecutionOptions {
     });
     let capability_registry = Arc::new(CapabilityRegistry::default());
     let managed_storage_store = Arc::new(crate::ManagedStorageStore::default());
+    let telemetry_propagation = Arc::new(AtomicBool::new(false));
+    let telemetry_sampling_ratio = Arc::new(RwLock::new(0.0));
     capability_registry
-      .register(Arc::new(crate::ManagedHttpHandler::with_storage(
-        Arc::clone(&managed_storage_store),
-      )))
+      .register(Arc::new(
+        crate::ManagedHttpHandler::with_storage_and_propagation(
+          Arc::clone(&managed_storage_store),
+          Arc::clone(&telemetry_propagation),
+          Arc::clone(&telemetry_sampling_ratio),
+        ),
+      ))
       .expect("the production HTTP capability is registered exactly once");
     capability_registry
       .register(Arc::new(crate::ManagedTelegramHandler::default()))
@@ -516,6 +525,9 @@ impl RuntimeExecutionOptions {
       operational_output_reporter: None,
       telemetry_reporter: None,
       telemetry_context: None,
+      telemetry_admission_link_reporter: None,
+      telemetry_propagation,
+      telemetry_sampling_ratio,
       resolved_secrets: Arc::new(BTreeMap::new()),
       signal_ingress_token: None,
       capability_registry,
@@ -566,6 +578,64 @@ impl RuntimeExecutionOptions {
     self.telemetry_context = Some(context);
     self.telemetry_reporter = Some(reporter);
     self
+  }
+
+  pub fn with_telemetry_propagation(
+    mut self,
+    enabled: bool,
+    sampling_ratio: f64,
+    reporter: Option<crate::TelemetryAdmissionLinkReporter>,
+  ) -> Self {
+    self.telemetry_propagation.store(enabled, Ordering::Release);
+    *self
+      .telemetry_sampling_ratio
+      .write()
+      .expect("telemetry sampling ratio lock") = sampling_ratio.clamp(0.0, 1.0);
+    self.telemetry_admission_link_reporter = reporter;
+    self
+  }
+
+  pub fn report_telemetry_admission_context(
+    &self,
+    run_id: &str,
+    context: crate::InboundTraceContext,
+    occurred_at: chrono::DateTime<chrono::Utc>,
+  ) {
+    if !self.telemetry_propagation.load(Ordering::Acquire) {
+      return;
+    }
+    let (Some(reporter), Some(signal_context)) = (
+      self.telemetry_admission_link_reporter.as_ref(),
+      self.telemetry_context.as_ref(),
+    ) else {
+      return;
+    };
+    let (status, trace_id, span_id, sampled) = match context {
+      crate::InboundTraceContext::Absent => return,
+      crate::InboundTraceContext::Invalid => (
+        crate::TelemetryAdmissionLinkStatus::Invalid,
+        None,
+        None,
+        None,
+      ),
+      crate::InboundTraceContext::Valid(context) => (
+        crate::TelemetryAdmissionLinkStatus::Linked,
+        Some(context.trace_id),
+        Some(context.span_id),
+        Some(context.sampled),
+      ),
+    };
+    reporter(crate::TelemetryAdmissionLinkV1 {
+      profile: crate::TELEMETRY_ADMISSION_LINK_PROFILE,
+      occurred_at,
+      runtime_instance_id: signal_context.runtime_instance_id.clone(),
+      deployment_id: signal_context.deployment_id.clone(),
+      run_id: run_id.to_string(),
+      status,
+      trace_id,
+      span_id,
+      sampled,
+    });
   }
 
   pub fn with_lifecycle_progress_reporter(mut self, reporter: LifecycleProgressReporter) -> Self {

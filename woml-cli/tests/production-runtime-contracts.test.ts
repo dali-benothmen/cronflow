@@ -13,6 +13,7 @@ const schemas = [
   'opentelemetry-configuration.v1.schema.json',
   'opentelemetry-exporter-health.v1.schema.json',
   'telemetry-signal.v1.schema.json',
+  'telemetry-admission-link.v1.schema.json',
   'production-preflight.v1.schema.json',
   'production-preflight.v2.schema.json',
   'deployment-activation.v1.schema.json',

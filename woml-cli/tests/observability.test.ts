@@ -4,6 +4,11 @@ import Ajv2020 from 'ajv/dist/2020';
 import { RuntimeObservability } from '../src/runtime-observability';
 import { startRuntimeControl } from '../src/runtime-control';
 import type { RustRunListV1 } from '../src/rust-executor';
+import { parseTelemetrySignal } from '../src/opentelemetry-signal';
+import {
+  metricFactsForTelemetrySignal,
+  prometheusIdentity,
+} from '../src/opentelemetry-observation';
 
 const controls: { close(): Promise<void> }[] = [];
 
@@ -106,6 +111,26 @@ function authorization(capability: string): HeadersInit {
 }
 
 describe('Frozen observability artifacts', () => {
+  test('Prometheus and OTLP consume the same reviewed telemetry facts', async () => {
+    const contracts = await Bun.file(
+      new URL('./fixtures/opentelemetry/contracts.v1.json', import.meta.url)
+    ).json();
+    const signal = parseTelemetrySignal(JSON.stringify(contracts.signal));
+    const observed = fixture();
+    observed.recordTelemetrySignal(signal);
+    observed.recordTelemetrySignal(signal);
+    const prometheus = await observed.prometheusMetrics();
+    for (const fact of metricFactsForTelemetrySignal(signal)) {
+      expect(prometheus).toContain(prometheusIdentity(fact));
+    }
+    expect(prometheus).toContain(
+      `${prometheusIdentity(metricFactsForTelemetrySignal(signal)[0]!)} 1`
+    );
+    expect(prometheus).not.toContain(signal.runId!);
+    expect(prometheus).not.toContain(signal.nodeId!);
+    expect(prometheus).not.toContain(signal.invocationId!);
+  });
+
   test('matches the reviewed golden snapshot, log, and Prometheus fixtures', async () => {
     const logs: string[] = [];
     const instant = Date.parse('2026-08-12T09:00:02.000Z');

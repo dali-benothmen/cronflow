@@ -93,7 +93,8 @@ as metric dimensions.
 
 ## Metric mapping
 
-Version 1 reserves these low-cardinality instruments for later OTE phases:
+Version 1 exports these low-cardinality instruments from the shared typed
+metric facts used by both OTLP and Prometheus encoding:
 
 - `woml.runtime.runs` counter by terminal status and trigger type;
 - `woml.runtime.run.duration` histogram in milliseconds;
@@ -104,22 +105,36 @@ Version 1 reserves these low-cardinality instruments for later OTE phases:
 - `woml.runtime.active_runs`, `active_waits`, `active_approvals`, and
   `active_locks` gauges;
 - `woml.runtime.capability.calls` and `capability.duration` by category/status;
+- `woml.runtime.propagation.contexts` by `linked` or `invalid` status;
 - `woml.exporter.exports`, `failures`, `dropped`, and `queue.utilization`.
 
 ## Structured log correlation
 
-Only existing safe WOML structured runtime records are eligible. Correlation
-may add `trace_id` and `span_id`. Script/process output, provider messages,
-workflow values, and approval contents are not promoted into OTLP logs. Log
-export defaults off.
+Only terminal records derived from the existing safe telemetry facts are
+eligible. Their bodies are fixed `woml.<kind>.<status>` values. Correlation
+adds the deterministic `trace_id` and `span_id`; attributes remain restricted
+to reviewed status/category facts and stable `WOML_*` codes. Script/process
+output, provider messages, workflow values, and approval contents are not
+promoted into OTLP logs. Log export defaults off and does not alter local
+logging.
 
 ## W3C propagation contract
 
-Version 1 reserves valid inbound `traceparent` and bounded `tracestate` as a
-link to a WOML-owned run trace. Invalid context is ignored and counted.
-`baggage` is denied. When managed HTTP propagation is enabled, WOML-owned
-headers replace author-supplied `traceparent`, `tracestate`, and `baggage`.
-Implementation begins after the safe signal boundary is available.
+Version 1 accepts the exact W3C v00 `traceparent` shape and validates
+`tracestate` at no more than 512 bytes and 32 members. A valid inbound context
+becomes a link to the WOML-owned run trace through the transient
+`woml.telemetry-admission-link/v1` record. Only normalized trace ID, span ID,
+and sampled bit cross the native callback; raw headers and `tracestate` are
+never retained. Invalid context is ignored without rejecting admission and is
+counted as an invalid link record. `baggage` is denied.
+
+When managed HTTP propagation is enabled, WOML derives `traceparent` from the
+engine-verified run and attempt identity after capability and infrastructure
+policy validation. It replaces author-supplied `traceparent` and removes
+author-supplied `tracestate` and `baggage` before transport. Workflow Call and
+Workflow Start create the same transient link from the parent attempt to the
+child WOML-owned trace. Native `fetch`, imported clients, and process
+environment propagation are outside the v1 contract.
 
 ## Lifecycle and failure behavior
 

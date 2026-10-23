@@ -36,9 +36,15 @@ import type {
 } from './opentelemetry-runtime';
 import {
   mapTelemetrySignalToSpan,
+  type TelemetryAdmissionLinkV1,
   type TelemetrySignalV1,
   type TelemetrySpanV1,
 } from './opentelemetry-signal';
+import {
+  metricFactsForTelemetrySignal,
+  safeLogForTelemetrySignal,
+  TelemetryActiveGaugeState,
+} from './opentelemetry-observation';
 
 class DeterministicIdGenerator implements IdGenerator {
   readonly #fallback = new RandomIdGenerator();
@@ -114,6 +120,11 @@ export async function startOpenTelemetrySdk(
     shutdown(): Promise<void>;
   }[] = [];
   let emitTrace: ((signal: TelemetrySignalV1) => boolean) | undefined;
+  let emitMetric: ((signal: TelemetrySignalV1) => boolean) | undefined;
+  let emitLog: ((signal: TelemetrySignalV1) => boolean) | undefined;
+  let recordPropagationContext: ((status: 'linked' | 'invalid') => void) | undefined;
+  const admissionLinks = new Map<string, TelemetryAdmissionLinkV1>();
+  const seenSignals = new Set<string>();
 
   if (configuration.signals.traces) {
     const exporter = new OTLPTraceExporter({
@@ -158,6 +169,13 @@ export async function startOpenTelemetrySdk(
             kind: SpanKind.INTERNAL,
             startTime: new Date(mapped.startTime),
             attributes: mapped.attributes as SpanAttributes,
+            ...(mapped.name !== 'woml.run'
+              ? {}
+              : {
+                  links: admissionLinkContexts(
+                    admissionLinks.get(signal.runId!)
+                  ),
+                }),
           },
           parent
         );
@@ -170,6 +188,7 @@ export async function startOpenTelemetrySdk(
                 : SpanStatusCode.UNSET,
         });
         span.end(new Date(mapped.endTime));
+        if (mapped.name === 'woml.run') admissionLinks.delete(signal.runId!);
         return true;
       });
     };
@@ -182,8 +201,7 @@ export async function startOpenTelemetrySdk(
       timeoutMillis: configuration.exportTimeoutMs,
       concurrencyLimit: 1,
     });
-    providers.push(
-      new MeterProvider({
+    const provider = new MeterProvider({
         resource,
         readers: [
           new PeriodicExportingMetricReader({
@@ -192,8 +210,48 @@ export async function startOpenTelemetrySdk(
             exportTimeoutMillis: configuration.exportTimeoutMs,
           }),
         ],
-      })
-    );
+      });
+    providers.push(provider);
+    const meter = provider.getMeter('woml.runtime', options.resource.runtimeVersion);
+    const instruments = {
+      runs: meter.createCounter('woml.runtime.runs', { unit: '1' }),
+      runDuration: meter.createHistogram('woml.runtime.run.duration', { unit: 'ms' }),
+      stepAttempts: meter.createCounter('woml.runtime.step.attempts', { unit: '1' }),
+      stepDuration: meter.createHistogram('woml.runtime.step.duration', { unit: 'ms' }),
+      retries: meter.createCounter('woml.runtime.retries', { unit: '1' }),
+      capabilityCalls: meter.createCounter('woml.runtime.capability.calls', { unit: '1' }),
+      capabilityDuration: meter.createHistogram('woml.runtime.capability.duration', { unit: 'ms' }),
+      propagationContexts: meter.createCounter('woml.runtime.propagation.contexts', { unit: '1' }),
+    };
+    const active = new TelemetryActiveGaugeState();
+    for (const [name, gauge] of [
+      ['woml.runtime.active_runs', meter.createObservableGauge('woml.runtime.active_runs', { unit: '1' })],
+      ['woml.runtime.active_waits', meter.createObservableGauge('woml.runtime.active_waits', { unit: '1' })],
+      ['woml.runtime.active_approvals', meter.createObservableGauge('woml.runtime.active_approvals', { unit: '1' })],
+      ['woml.runtime.active_locks', meter.createObservableGauge('woml.runtime.active_locks', { unit: '1' })],
+    ] as const) {
+      gauge.addCallback(result => {
+        const fact = active.facts().find(candidate => candidate.name === name);
+        result.observe(fact?.value ?? 0);
+      });
+    }
+    emitMetric = signal => {
+      active.observe(signal);
+      for (const fact of metricFactsForTelemetrySignal(signal)) {
+        const attributes = fact.attributes as SpanAttributes;
+        if (fact.name === 'woml.runtime.runs') instruments.runs.add(fact.value, attributes);
+        else if (fact.name === 'woml.runtime.run.duration') instruments.runDuration.record(fact.value, attributes);
+        else if (fact.name === 'woml.runtime.step.attempts') instruments.stepAttempts.add(fact.value, attributes);
+        else if (fact.name === 'woml.runtime.step.duration') instruments.stepDuration.record(fact.value, attributes);
+        else if (fact.name === 'woml.runtime.retries') instruments.retries.add(fact.value, attributes);
+        else if (fact.name === 'woml.runtime.capability.calls') instruments.capabilityCalls.add(fact.value, attributes);
+        else if (fact.name === 'woml.runtime.capability.duration') instruments.capabilityDuration.record(fact.value, attributes);
+      }
+      return true;
+    };
+    recordPropagationContext = status => {
+      instruments.propagationContexts.add(1, { status });
+    };
   }
 
   if (configuration.signals.logs) {
@@ -203,8 +261,7 @@ export async function startOpenTelemetrySdk(
       timeoutMillis: configuration.exportTimeoutMs,
       concurrencyLimit: 1,
     });
-    providers.push(
-      new LoggerProvider({
+    const provider = new LoggerProvider({
         resource,
         logRecordLimits: {
           attributeCountLimit: 32,
@@ -219,12 +276,56 @@ export async function startOpenTelemetrySdk(
             exportTimeoutMillis: configuration.exportTimeoutMs,
           }),
         ],
-      })
-    );
+      });
+    providers.push(provider);
+    const logger = provider.getLogger('woml.runtime', options.resource.runtimeVersion);
+    emitLog = signal => {
+      const record = safeLogForTelemetrySignal(signal);
+      if (record === undefined) return true;
+      const correlation =
+        record.traceId === undefined || record.spanId === undefined
+          ? ROOT_CONTEXT
+          : trace.setSpanContext(ROOT_CONTEXT, {
+              traceId: record.traceId,
+              spanId: record.spanId,
+              traceFlags: sampled(record.traceId, configuration)
+                ? TraceFlags.SAMPLED
+                : TraceFlags.NONE,
+              isRemote: false,
+            });
+      logger.emit({
+        body: record.body,
+        timestamp: new Date(record.timestamp),
+        severityText: record.severityText,
+        severityNumber: record.severityNumber,
+        attributes: record.attributes,
+        context: correlation,
+      });
+      return true;
+    };
   }
 
   return {
-    emit: signal => emitTrace?.(signal) ?? true,
+    emit: signal => {
+      if (seenSignals.has(signal.signalId)) return true;
+      while (seenSignals.size >= configuration.maxQueueSize) {
+        const oldest = seenSignals.values().next().value;
+        if (oldest === undefined) break;
+        seenSignals.delete(oldest);
+      }
+      seenSignals.add(signal.signalId);
+      const traceAccepted = emitTrace?.(signal) ?? true;
+      const metricAccepted = emitMetric?.(signal) ?? true;
+      const logAccepted = emitLog?.(signal) ?? true;
+      return traceAccepted && metricAccepted && logAccepted;
+    },
+    link: link => {
+      recordPropagationContext?.(link.status);
+      if (link.status === 'invalid') return true;
+      if (admissionLinks.size >= configuration.maxQueueSize) return false;
+      if (!admissionLinks.has(link.runId)) admissionLinks.set(link.runId, link);
+      return true;
+    },
     forceFlush: async () => {
       await settleAll(providers.map(provider => () => provider.forceFlush()));
     },
@@ -232,6 +333,28 @@ export async function startOpenTelemetrySdk(
       await settleAll(providers.map(provider => () => provider.shutdown()));
     },
   };
+}
+
+function admissionLinkContexts(
+  link: TelemetryAdmissionLinkV1 | undefined
+) {
+  if (
+    link?.status !== 'linked' ||
+    link.traceId === undefined ||
+    link.spanId === undefined
+  ) {
+    return [];
+  }
+  return [
+    {
+      context: {
+        traceId: link.traceId,
+        spanId: link.spanId,
+        traceFlags: link.sampled ? TraceFlags.SAMPLED : TraceFlags.NONE,
+        isRemote: true,
+      },
+    },
+  ];
 }
 
 function spanParentContext(

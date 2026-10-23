@@ -5,6 +5,13 @@ import type {
   RustRuntimeObservationV1,
 } from './rust-executor';
 import type { OperationalOutputObservationV1 } from './operational-output';
+import {
+  metricFactsForTelemetrySignal,
+  prometheusIdentity,
+  TelemetryActiveGaugeState,
+  type TelemetryMetricFactV1,
+} from './opentelemetry-observation';
+import type { TelemetrySignalV1 } from './opentelemetry-signal';
 
 export type RuntimeLifecycle =
   | 'starting'
@@ -77,6 +84,7 @@ export interface RuntimeObservabilitySurface {
   snapshot(): Promise<unknown>;
   metrics(): Promise<readonly unknown[]>;
   prometheusMetrics(): Promise<string>;
+  recordTelemetrySignal(signal: TelemetrySignalV1): void;
   stream(afterSequence?: number): Response;
   closeStreams(): void;
 }
@@ -204,6 +212,13 @@ export class RuntimeObservability implements RuntimeObservabilitySurface {
   readonly #currentNodes = new Map<string, string>();
   readonly #parentRuns = new Map<string, string>();
   readonly #forEachProgress = new Map<string, ObservedForEachProgress>();
+  readonly #telemetryMetricSeries = new Map<
+    string,
+    { fact: TelemetryMetricFactV1; sum: number; count: number }
+  >();
+  readonly #telemetryActive = new TelemetryActiveGaugeState();
+  readonly #telemetrySignalIds = new Set<string>();
+  #telemetryObserved = false;
   #nextSubscriberId = 1;
   #sequence = 0;
   #lifecycle: RuntimeLifecycle = 'starting';
@@ -396,6 +411,32 @@ export class RuntimeObservability implements RuntimeObservabilitySurface {
       `${kind.replaceAll('_', ' ')} ${status}.`,
       fields
     );
+  }
+
+  recordTelemetrySignal(signal: TelemetrySignalV1): void {
+    if (this.#telemetrySignalIds.has(signal.signalId)) return;
+    while (this.#telemetrySignalIds.size >= 10_000) {
+      const oldest = this.#telemetrySignalIds.values().next().value;
+      if (oldest === undefined) break;
+      this.#telemetrySignalIds.delete(oldest);
+    }
+    this.#telemetrySignalIds.add(signal.signalId);
+    this.#telemetryObserved = true;
+    this.#telemetryActive.observe(signal);
+    for (const fact of metricFactsForTelemetrySignal(signal)) {
+      const identity = prometheusIdentity(fact);
+      const existing = this.#telemetryMetricSeries.get(identity);
+      if (existing === undefined) {
+        this.#telemetryMetricSeries.set(identity, {
+          fact,
+          sum: fact.value,
+          count: 1,
+        });
+      } else {
+        existing.sum += fact.value;
+        existing.count += 1;
+      }
+    }
   }
 
   alert(code: string, message: string, level: 'warn' | 'error' = 'error'): void {
@@ -734,6 +775,22 @@ export class RuntimeObservability implements RuntimeObservabilitySurface {
       lines.push(
         `${metric.name}${labels.length === 0 ? '' : `{${labels.map(([key, value]) => `${key}="${value}"`).join(',')}}`} ${Number.isFinite(metric.value) ? metric.value : 0}`
       );
+    }
+    if (this.#telemetryObserved) {
+      for (const { fact, sum, count } of this.#telemetryMetricSeries.values()) {
+        const identity = prometheusIdentity(fact);
+        lines.push(
+          `# TYPE ${fact.name.replaceAll('.', '_')} ${fact.instrument === 'counter' ? 'counter' : 'gauge'}`
+        );
+        lines.push(
+          `${identity} ${fact.instrument === 'counter' ? sum : sum / count}`
+        );
+      }
+      for (const fact of this.#telemetryActive.facts()) {
+        const name = fact.name.replaceAll('.', '_');
+        lines.push(`# TYPE ${name} gauge`);
+        lines.push(`${name} ${fact.value}`);
+      }
     }
     return `${lines.join('\n')}\n`;
   }
