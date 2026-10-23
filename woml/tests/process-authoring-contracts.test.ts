@@ -111,6 +111,7 @@ describe('Process v1 authoring contracts', () => {
       'readonly timeout?: number | string;',
       'readonly stream?: boolean;',
       'readonly streamStartSequence?: number | null;',
+      'readonly streamArtifact?: WomlArtifactReferenceV1 | null;',
       'interface WomlProgressService',
       'readonly progress: WomlProgressService;',
       ') => Promise<WomlProcessRunResult>;',

@@ -1186,8 +1186,16 @@ Working directory, environment, timeout, output, and concurrency are bounded by
 Process Policy v1. Process execution is disabled by default and requires
 `--allow-process` for a foreground review or `--process-policy` for durable
 runtime authority. Results expose exit or signal status, bounded stdout and
-stderr, byte and truncation counts, and duration. See
-[Process execution](woml-process.md).
+stderr, byte and truncation counts, and duration. `stream: true` selects Process
+v2 and additionally returns cursor bounds, stream truncation, and an optional
+immutable transcript artifact reference. See [Process execution](woml-process.md)
+and [Streaming Output and Progress](woml-streaming-output-and-progress.md).
+
+`services.progress.report({ id?, current?, total?, unit?, message? })` publishes
+one bounded latest-value operational progress lane for the current trusted step
+attempt. At least `current` or `message` is required. Reports are awaited,
+coalesced, replayable to operators, and never added to durable workflow context
+or the business-event vocabulary.
 
 `services.events.emit(name, payload, options?)` directly fans out a named event
 to loaded `<event>` subscribers without HTTP or a publisher credential. Rust

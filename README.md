@@ -333,6 +333,7 @@ Every example below is checked against the current WOML compiler.
 | [Workflow composition](./examples/workflowCallManual/)               | One workflow calling another and using its returned result              | `woml run examples/workflowCallManual`            |
 | [Durable external callback](./examples/durableWaits/ciCallback.woml) | A run that releases its worker and resumes from an idempotent CI signal | `woml run examples/durableWaits/ciCallback.woml`  |
 | [Preview environment saga](./examples/compensationAndCleanup/previewEnvironment.woml) | Explicit rollback and mandatory cleanup for partial infrastructure success | `woml run examples/compensationAndCleanup/previewEnvironment.woml` |
+| [Streamed Terraform release](./examples/streamingOutput/)           | Live process output, structured progress, review, locking, compensation, and replay | See the example runbook |
 | [Local TypeScript module](./examples/moduleWorkflow.woml)            | Reusable project code exposed through `services.*`                      | `woml run examples/moduleWorkflow.woml`           |
 
 Provider examples require their documented credentials. Browse the [complete example catalog](./examples/) for webhooks, schedules, intervals, internal events, databases, storage, cache, lifecycle, retries, communication providers, and production deployment.
@@ -352,6 +353,7 @@ Provider examples require their documented credentials. Browse the [complete exa
 - **Reusable building blocks** — import local JavaScript or TypeScript modules and define reusable WOML steps or notification providers.
 - **Lifecycle and runtime policy** — observe workflow and step events while controlling concurrency, rate limits, queues, and timeouts.
 - **Production operations** — run in the foreground or background, inspect activity, follow logs, cancel runs, back up state, and prune old history.
+- **Streaming output and progress** — follow supervised process output and structured script progress live, reconnect by cursor, and replay bounded redacted records without turning logs into workflow state.
 - **Cross-platform runtime** — install one CLI that selects the appropriate native Rust engine automatically.
 
 ## WOML vs Alternatives
@@ -380,7 +382,7 @@ woml list                                # List workflows and recent runs
 woml get run_...                         # Inspect one run and its event history
 woml cancel run_...                      # Cancel a pending or running workflow
 woml recover run_... --retry action-id   # Resume a verified-safe corrective attempt
-woml workflow-id --logs                  # Follow logs for a workflow
+woml logs workflow-id --follow           # Follow live process output and progress
 woml secrets set API_TOKEN               # Store a secret without printing it
 woml backup backups/latest               # Back up the durable state store
 woml prune --before 30d --dry-run        # Preview retention cleanup
@@ -435,6 +437,7 @@ cp -R skills/woml .agents/skills/woml
 - [Locks and leases](./docs/woml-locks-and-leases.md)
 - [Compensation and cleanup](./docs/woml-compensation-and-cleanup.md)
 - [Run local tools safely](./docs/woml-process.md)
+- [Stream output and report progress](./docs/woml-streaming-output-and-progress.md)
 - [Preserve files as Durable Artifacts](./docs/woml-durable-artifacts.md)
 - [Modules](./docs/woml-modules.md)
 - [Communication providers](./docs/woml-communication-providers.md)

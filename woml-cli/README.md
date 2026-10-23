@@ -304,6 +304,7 @@ return {
 | `services.cache`             | Keeps reusable, expiring optimization data that may be safely discarded.                                                                 |
 | `services.state`             | Stores small, versioned workflow-owned values that must survive future runs and restarts.                                                |
 | `services.process.run()`     | Runs an operator-approved local tool with literal arguments, Rust-owned containment, bounded output, cancellation, and durable recovery. |
+| `services.progress.report()` | Publishes a bounded latest-value progress lane for the current step attempt without adding business events.                           |
 | `services.events.emit()`     | Publishes a durable named event to every matching active workflow.                                                                       |
 | `services.workflows.call()`  | Starts one workflow and waits for its final JSON result.                                                                                 |
 | `services.workflows.start()` | Starts one workflow in the background and immediately returns its durable run ID.                                                        |
@@ -327,7 +328,7 @@ woml cancel run_...                      # Cancel a pending or running workflow
 woml recover run_... --retry action-id   # Retry a verified-safe correction
 woml recover run_... --resolve action-id --note 'ticket OPS-42'
 woml signal job.completed --run run_... --wait result --correlation job-42 --id callback-42 --payload result.json
-woml workflow-id --logs                  # Follow logs for a workflow
+woml logs workflow-id --follow           # Follow live process output and progress
 woml secrets set API_TOKEN               # Store a secret securely
 woml backup backups/latest               # Back up the durable state store
 woml prune --before 30d --dry-run        # Preview retention cleanup
@@ -361,6 +362,7 @@ For Codex and other Agent Skills-compatible tools, copy the repository's complet
 - [CLI reference](https://github.com/dali-benothmen/woml/blob/master/docs/cli-reference.md)
 - [Services and capabilities](https://github.com/dali-benothmen/woml/blob/master/docs/woml-services.md)
 - [Run local tools safely](https://github.com/dali-benothmen/woml/blob/master/docs/woml-process.md)
+- [Stream output and report progress](https://github.com/dali-benothmen/woml/blob/master/docs/woml-streaming-output-and-progress.md)
 - [Durable waits and external signals](https://github.com/dali-benothmen/woml/blob/master/docs/woml-durable-waits.md)
 - [Compensation and cleanup](https://github.com/dali-benothmen/woml/blob/master/docs/woml-compensation-and-cleanup.md)
 - [Modules](https://github.com/dali-benothmen/woml/blob/master/docs/woml-modules.md)

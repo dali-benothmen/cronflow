@@ -7,6 +7,13 @@
     <steps>
       <step id="createPlan" name="Create the immutable Terraform plan">
         <script>
+          await services.progress.report({
+            id: "terraform-release",
+            current: 1,
+            total: 4,
+            unit: "stages",
+            message: "Creating the immutable Terraform plan"
+          });
           return await services.process.run({
             executable: "terraform",
             args: ["plan", "-out", ".woml/artifact-input/production.tfplan", "-no-color"],

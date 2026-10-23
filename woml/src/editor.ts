@@ -231,7 +231,7 @@ interface WomlProcessRunResult {
   readonly streamStartSequence?: number | null;
   readonly streamEndSequence?: number | null;
   readonly streamTruncated?: boolean;
-  readonly streamArtifact?: null;
+  readonly streamArtifact?: WomlArtifactReferenceV1 | null;
 }
 
 interface WomlProcessService {

@@ -3,6 +3,13 @@ import { resolve } from 'node:path';
 
 import Ajv2020, { type ValidateFunction } from 'ajv/dist/2020';
 
+import {
+  analyzeWomlScript,
+  compileWoml,
+  parseWoml,
+  WomlDiagnosticError,
+} from '../src';
+
 const repositoryRoot = resolve(import.meta.dir, '../..');
 const schemaRoot = resolve(repositoryRoot, 'docs/schemas');
 const fixtureRoot = resolve(import.meta.dir, 'fixtures/streaming-output');
@@ -45,6 +52,33 @@ async function validators() {
 }
 
 describe('Streaming Output and Progress v1 contracts', () => {
+  test('recognizes progress as a reserved built-in service in real WOML', () => {
+    const source = `<woml>
+  <workflow id="progress-authoring" version="1.0.0">
+    <triggers><manual id="start" /></triggers>
+    <steps><step id="report"><script>
+      await services.progress.report({ id: "files", current: 1, total: 2 });
+      return { reported: true };
+    </script></step></steps>
+  </workflow>
+</woml>`;
+    const analysis = analyzeWomlScript(
+      'await services.progress.report({ id: "files", current: 1, total: 2 });'
+    );
+
+    expect(analysis.requiredServices).toEqual(['progress']);
+    expect(compileWoml(parseWoml(source)).workflowId).toBe('progress-authoring');
+    expect(() =>
+      compileWoml(parseWoml(`<woml>
+        <imports><module name="progress" from="./progress.ts" /></imports>
+        <workflow id="progress-shadow">
+          <triggers><manual id="start" /></triggers>
+          <steps><step id="done"><script>return true;</script></step></steps>
+        </workflow>
+      </woml>`))
+    ).toThrow(WomlDiagnosticError);
+  });
+
   test('validates reviewed records, pages, streams, store inspection, and producer extensions', async () => {
     const validate = await validators();
     const fixture = await readJson(resolve(fixtureRoot, 'contracts.v1.json'));

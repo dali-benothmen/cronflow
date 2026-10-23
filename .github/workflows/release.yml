@@ -82,7 +82,8 @@ jobs:
           bun scripts/verify-rich-plan-approvals-release.ts
           bun run test:infrastructure-policy-foundation
           bun scripts/verify-infrastructure-policy-release.ts
-          bun test ../woml/tests/streaming-output-contracts.test.ts --max-concurrency=1
+          bun run test:streaming-output-contracts
+          bun scripts/verify-streaming-output-release.ts
       - name: Run the final source and dependency security review
         run: |
           bun run test:final-review

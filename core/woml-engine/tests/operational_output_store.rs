@@ -3,6 +3,7 @@ use std::{
   path::{Path, PathBuf},
   sync::Arc,
   thread,
+  time::Instant,
 };
 
 use chrono::{Duration, Utc};
@@ -19,6 +20,8 @@ use woml_engine::{
 
 const CONTRACTS: &str =
   include_str!("../../../woml/tests/fixtures/streaming-output/contracts.v1.json");
+const PERFORMANCE_BUDGETS: &str =
+  include_str!("../../../examples/streamingOutput/performance-budgets.v1.json");
 
 struct TemporaryStore {
   directory: PathBuf,
@@ -98,7 +101,7 @@ fn progress(run_id: &str, current: f64) -> OperationalRecordDraftV1 {
     body: OperationalBodyV1::Progress {
       progress_id: "items".to_string(),
       current: Some(current),
-      total: Some(1_000.0),
+      total: Some(2_000.0),
       unit: Some("items".to_string()),
       message: Some(format!("processed {current}")),
       status: OperationalProgressStatusV1::Active,
@@ -555,4 +558,190 @@ fn reviewed_operational_records_round_trip_in_rust_without_shape_drift() {
   let mut unknown = contracts["record"].clone();
   unknown["authorSuppliedIdentity"] = serde_json::json!("forbidden");
   assert!(serde_json::from_value::<woml_engine::OperationalRecordV1>(unknown).is_err());
+}
+
+#[test]
+fn generated_records_cursors_utf8_and_retention_races_preserve_invariants() {
+  let temporary = TemporaryStore::new();
+  let store = Arc::new(OperationalOutputStore::open(temporary.path(), "deployment-a").unwrap());
+  let mut state = 0x4d59_5df4_d0f3_3173u64;
+  let mut expected = Vec::new();
+  for index in 0..257u64 {
+    state = state
+      .wrapping_mul(6_364_136_223_846_793_005)
+      .wrapping_add(1_442_695_040_888_963_407);
+    let repeat = (state as usize % 127) + 1;
+    let text = format!("{index}:{}:{}", "🚀".repeat(repeat % 7), "x".repeat(repeat));
+    let record = store.append(output("run-generated", text.clone())).unwrap();
+    assert_eq!(record.sequence, index + 1);
+    let encoded = serde_json::to_vec(&record).unwrap();
+    let decoded: woml_engine::OperationalRecordV1 = serde_json::from_slice(&encoded).unwrap();
+    assert_eq!(decoded, record);
+    expected.push((record.sequence, text));
+  }
+
+  let mut after = 0;
+  let mut replayed = Vec::new();
+  while replayed.len() < expected.len() {
+    state = state
+      .wrapping_mul(6_364_136_223_846_793_005)
+      .wrapping_add(1_442_695_040_888_963_407);
+    let limit = (state as usize % 31) + 1;
+    let page = store.read_run_page("run-generated", after, limit).unwrap();
+    assert!(page.records.len() <= limit);
+    assert!(page
+      .records
+      .windows(2)
+      .all(|pair| pair[0].sequence < pair[1].sequence));
+    for record in page.records {
+      let OperationalBodyV1::Output { text, .. } = record.body else {
+        panic!("generated record changed kind");
+      };
+      replayed.push((record.sequence, text));
+      after = record.sequence;
+    }
+  }
+  assert_eq!(replayed, expected);
+
+  for index in 0..32 {
+    let run_id = format!("run-terminal-{index}");
+    store.append(output(&run_id, "finished")).unwrap();
+    store.append(close(&run_id)).unwrap();
+  }
+  let appender = {
+    let store = Arc::clone(&store);
+    thread::spawn(move || {
+      for index in 0..64 {
+        store
+          .append(output("run-active-race", format!("active-{index}")))
+          .unwrap();
+      }
+    })
+  };
+  let pruner = {
+    let store = Arc::clone(&store);
+    thread::spawn(move || {
+      store
+        .prune_terminal_before(Utc::now() + Duration::seconds(1), 1_000)
+        .unwrap()
+    })
+  };
+  appender.join().unwrap();
+  assert_eq!(pruner.join().unwrap().pruned_runs, 32);
+  let active = store
+    .read_run_page("run-active-race", 0, MAX_OPERATIONAL_PAGE_RECORDS)
+    .unwrap();
+  assert_eq!(active.records.len(), 64);
+  assert!(active.gap.is_none());
+}
+
+#[test]
+fn publication_budgets_cover_activation_append_replay_progress_concurrency_and_prune() {
+  let budgets: serde_json::Value = serde_json::from_str(PERFORMANCE_BUDGETS).unwrap();
+  assert_eq!(
+    budgets["profile"],
+    "woml.streaming-output-performance-budgets/v1"
+  );
+  let maximum = |name: &str| budgets[name].as_f64().expect("numeric performance budget");
+  let temporary = TemporaryStore::new();
+  let activation_started = Instant::now();
+  let store =
+    Arc::new(OperationalOutputStore::open(temporary.path(), "deployment-benchmark").unwrap());
+  let activation_ms = activation_started.elapsed().as_secs_f64() * 1_000.0;
+
+  let append_started = Instant::now();
+  for index in 0..500 {
+    store
+      .append(output(
+        "run-benchmark",
+        format!("{index}:{}", "x".repeat(512)),
+      ))
+      .unwrap();
+  }
+  let append_average_micros = append_started.elapsed().as_secs_f64() * 1_000_000.0 / 500.0;
+
+  let replay_started = Instant::now();
+  let replay = store
+    .read_run_page("run-benchmark", 0, MAX_OPERATIONAL_PAGE_RECORDS)
+    .unwrap();
+  let replay_page_ms = replay_started.elapsed().as_secs_f64() * 1_000.0;
+  assert_eq!(replay.records.len(), 500);
+
+  let progress_started = Instant::now();
+  let first = progress("run-progress-benchmark", 0.0);
+  store.append(first).unwrap();
+  for current in 1..2_000 {
+    let draft = progress("run-progress-benchmark", current as f64);
+    if !store.coalesce_progress_snapshot(&draft).unwrap() {
+      store.append(draft).unwrap();
+    }
+  }
+  let progress_flood_ms = progress_started.elapsed().as_secs_f64() * 1_000.0;
+  assert_eq!(
+    store.latest_progress("run-progress-benchmark").unwrap()[0].current,
+    Some(1_999.0)
+  );
+
+  let concurrent_started = Instant::now();
+  let mut appenders = Vec::new();
+  for worker in 0..4 {
+    let store = Arc::clone(&store);
+    appenders.push(thread::spawn(move || {
+      for index in 0..100 {
+        store
+          .append(output(
+            &format!("run-concurrent-{worker}"),
+            format!("record-{index}"),
+          ))
+          .unwrap();
+      }
+    }));
+  }
+  for appender in appenders {
+    appender.join().unwrap();
+  }
+  let concurrent_append_ms = concurrent_started.elapsed().as_secs_f64() * 1_000.0;
+
+  for index in 0..100 {
+    let run_id = format!("run-prune-{index}");
+    store.append(output(&run_id, "old")).unwrap();
+    store.append(close(&run_id)).unwrap();
+  }
+  let prune_started = Instant::now();
+  let pruned = store
+    .prune_terminal_before(Utc::now() + Duration::seconds(1), 1_000)
+    .unwrap();
+  let prune_hundred_runs_ms = prune_started.elapsed().as_secs_f64() * 1_000.0;
+  assert_eq!(pruned.pruned_runs, 100);
+  let store_bytes = fs::metadata(temporary.path()).unwrap().len() as f64;
+
+  let measurements = [
+    ("storeActivationMsMax", activation_ms),
+    ("appendAverageMicrosMax", append_average_micros),
+    ("replayPageMsMax", replay_page_ms),
+    ("progressFloodMsMax", progress_flood_ms),
+    ("concurrentAppendMsMax", concurrent_append_ms),
+    ("pruneHundredRunsMsMax", prune_hundred_runs_ms),
+    ("benchmarkStoreBytesMax", store_bytes),
+  ];
+  for (name, observed) in measurements {
+    assert!(
+      observed <= maximum(name),
+      "{name} exceeded: {observed:.2} > {:.2}",
+      maximum(name)
+    );
+  }
+  println!(
+    "WOML_STREAMING_BENCHMARK {}",
+    serde_json::json!({
+      "profile": "woml.streaming-output-benchmark/v1",
+      "storeActivationMs": activation_ms,
+      "appendAverageMicros": append_average_micros,
+      "replayPageMs": replay_page_ms,
+      "progressFloodMs": progress_flood_ms,
+      "concurrentAppendMs": concurrent_append_ms,
+      "pruneHundredRunsMs": prune_hundred_runs_ms,
+      "storeBytes": store_bytes,
+    })
+  );
 }

@@ -47,6 +47,7 @@ script-host identity confinement. SOP5 verifies slow-consumer and terminal
 sanitization behavior. SOP6 verifies bounded retention, governed artifact
 rollover, active-run protection, explicit replay gaps, and backup separation.
 SOP7 verifies attempt/phase/run isolation, crash interruption, operator
-filtering, and production-style infrastructure composition. SOP8 adds the
-remaining cross-platform fuzzing, performance gates, packaging, and release
-evidence.
+filtering, and production-style infrastructure composition. SOP8 verifies
+generated record and cursor invariants, UTF-8 and retention races, reviewed
+performance budgets, cross-platform behavior, clean packaging, and the final
+release surface.

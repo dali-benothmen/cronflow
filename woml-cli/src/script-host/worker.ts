@@ -1026,6 +1026,14 @@ function publicProcessResult(
     'streamArtifact',
   ]);
   const version = object.contractVersion;
+  let streamArtifact: JsonObject | null = null;
+  if (version === 2 && object.streamArtifact !== null) {
+    try {
+      streamArtifact = normalizeArtifactReference(object.streamArtifact as JsonValue);
+    } catch {
+      throw new TypeError('Rust returned an invalid Process result.');
+    }
+  }
   const streamFieldsValid =
     version === 1
       ? ![
@@ -1039,7 +1047,7 @@ function publicProcessResult(
         (object.streamEndSequence === null ||
           (Number.isSafeInteger(object.streamEndSequence) && Number(object.streamEndSequence) >= 1)) &&
         typeof object.streamTruncated === 'boolean' &&
-        object.streamArtifact === null;
+        (object.streamArtifact === null || streamArtifact !== null);
   if (
     object.contract !== 'woml.process' ||
     Object.keys(object).some(field => !fields.has(field)) ||
@@ -1087,7 +1095,7 @@ function publicProcessResult(
           streamStartSequence: object.streamStartSequence,
           streamEndSequence: object.streamEndSequence,
           streamTruncated: object.streamTruncated,
-          streamArtifact: null,
+          streamArtifact,
         }
       : {}),
   });

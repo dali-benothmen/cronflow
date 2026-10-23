@@ -112,6 +112,11 @@ jobs:
         run: >-
           bun run benchmark:infrastructure-policy &&
           bun scripts/verify-infrastructure-policy-release.ts
+      - name: Enforce Streaming Output and Progress publication contracts
+        working-directory: woml-cli
+        run: >-
+          bun run benchmark:streaming-output &&
+          bun scripts/verify-streaming-output-release.ts
       - name: Test for-each presentation and clean package
         working-directory: woml-cli
         run: >-
@@ -380,12 +385,17 @@ jobs:
     steps:
       - uses: actions/checkout@v6
       - uses: dtolnay/rust-toolchain@stable
-      - name: Test output ordering, retention, recovery, and governed rollover serially
+      - name: Test output ordering, redaction, retention, recovery, and governed rollover serially
         working-directory: core
         run: >-
           cargo test --config profile.dev.debug=0
           --config profile.dev.incremental=false -j 1 --locked
           -p woml-engine --test operational_output_store -- --test-threads=1 &&
+          cargo test --config profile.dev.debug=0
+          --config profile.dev.incremental=false -j 1 --locked
+          -p woml-engine --lib
+          process::tests::incremental_stream_redaction_covers_every_secret_split_and_invalid_utf8
+          -- --exact --test-threads=1 &&
           cargo test --config profile.dev.debug=0
           --config profile.dev.incremental=false -j 1 --locked
           -p woml-engine --lib operational_output_rollover -- --test-threads=1
@@ -518,6 +528,9 @@ jobs:
       - name: Test Infrastructure Policies from the clean release package
         working-directory: woml-cli
         run: bun test tests/infrastructure-policy-packaged-release.test.ts --max-concurrency=1
+      - name: Test Streaming Output and Progress from the clean release package
+        working-directory: woml-cli
+        run: bun test tests/streaming-output-packaged-release.test.ts --max-concurrency=1
       - name: Pack, seal, and reverify the main artifact
         run: |
           bun woml-cli/scripts/release-artifact.ts pack --root release/main

@@ -1,6 +1,6 @@
 # WOML Streaming Output and Progress v1
 
-**Status:** SOP0–SOP7 implemented on 2026-10-23
+**Status:** SOP0–SOP8 implemented on 2026-10-23
 **Authority:** Rust core  
 **Durability class:** Operational, bounded, and explicitly non-authoritative
 

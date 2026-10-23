@@ -248,5 +248,8 @@ To migrate an existing script:
 The capture-only wire contract remains in [Process v1](protocols/process-v1.md),
 and the operational streaming contract is in
 [Streaming Output and Progress v1](protocols/streaming-output-and-progress-v1.md).
+The author/operator guide for `stream: true`, live following, truncation,
+retention, and transcript artifacts is
+[Streaming Output and Progress](woml-streaming-output-and-progress.md).
 The adversarial boundary is in
 [Process v1 Threat Model](process-v1-threat-model.md).

@@ -2298,6 +2298,107 @@ return {
     });
   });
 
+  test('Process v2 exposes a verified immutable rollover artifact reference', async () => {
+    const completed: CompletedMessage[] = [];
+    const calls: CapabilityCallMessage[] = [];
+    let host!: ScriptHost;
+    host = new ScriptHost({
+      workerUrl: new URL('../src/script-host-worker.ts', import.meta.url),
+      protocolVersion: 4,
+      send: async message => {
+        if (message.messageType === 'completed') {
+          completed.push(message);
+          return;
+        }
+        if (message.messageType !== 'capability_call') return;
+        calls.push(message);
+        const processResult = {
+          contract: 'woml.process',
+          contractVersion: 2,
+          kind: 'result',
+          exitCode: 0,
+          signal: null,
+          stdout: '',
+          stderr: '',
+          stdoutBytes: 20_000_000,
+          stderrBytes: 0,
+          stdoutTruncated: true,
+          stderrTruncated: false,
+          durationMs: 125,
+          streamed: true,
+          streamStartSequence: 1,
+          streamEndSequence: 1_024,
+          streamTruncated: true,
+          streamArtifact: {
+            contract: 'woml.artifact-reference',
+            contractVersion: 1,
+            id: 'artifact_01j00000000000000000000000',
+            name: 'process-output.ndjson',
+            size: 20_000_000,
+            sha256: 'a'.repeat(64),
+            contentType: 'application/x-ndjson',
+          },
+        } as const;
+        host.accept({
+          protocol: 'woml.script-host',
+          protocolVersion: 4,
+          messageType: 'capability_result',
+          invocationId: message.invocationId,
+          callId: message.callId,
+          result: {
+            contract: 'woml.capability-call',
+            contractVersion: 1,
+            messageType: 'result',
+            invocationId: message.invocationId,
+            callId: message.callId,
+            outcome: 'succeeded',
+            resultContractVersion: 1,
+            resultBytes: Buffer.byteLength(JSON.stringify(processResult)),
+            durationMs: 126,
+            result: processResult,
+          },
+        });
+      },
+    });
+
+    host.accept(
+      executeV4(
+        'inv_v4_process_streaming',
+        `
+          const value = await services.process.run({
+            executable: 'bun', args: ['run', 'build'], stream: true
+          }, { name: 'stream-build' });
+          return {
+            artifactFrozen: Object.isFrozen(value.streamArtifact),
+            artifact: value.streamArtifact
+          };
+        `
+      )
+    );
+    await host.drain();
+
+    expect(calls).toHaveLength(1);
+    expect(calls[0]?.call).toMatchObject({
+      capability: 'process',
+      operation: 'run',
+      inputContractVersion: 1,
+      resultContractVersion: 1,
+      input: { contractVersion: 2, stream: true },
+    });
+    expect(completed[0]?.outcome).toMatchObject({
+      kind: 'success',
+      value: {
+        artifactFrozen: true,
+        artifact: {
+          contract: 'woml.artifact-reference',
+          contractVersion: 1,
+          id: 'artifact_01j00000000000000000000000',
+          sha256: 'a'.repeat(64),
+        },
+      },
+    });
+  });
+
   test('Process v1 rejects unsafe and malformed requests before a capability call', async () => {
     const completed: CompletedMessage[] = [];
     let callCount = 0;

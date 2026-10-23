@@ -759,6 +759,7 @@ const reservedModuleAliases = new Set([
   'workflows',
   'state',
   'process',
+  'progress',
   'artifacts',
   'context',
   'attempt',
@@ -3916,6 +3917,7 @@ const builtInServiceNames = new Set([
   'discord',
   'whatsapp',
   'process',
+  'progress',
   'artifacts',
   'locks',
 ]);
