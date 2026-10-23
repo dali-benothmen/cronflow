@@ -81,6 +81,7 @@
       "properties": {
         "maxTimeoutMs": { "type": "integer", "minimum": 1, "maximum": 86400000 },
         "maxOutputBytes": { "type": "integer", "minimum": 1, "maximum": 262144 },
+        "maxStreamBytes": { "type": "integer", "minimum": 1, "maximum": 268435456, "default": 16777216 },
         "maxConcurrent": { "type": "integer", "minimum": 1, "maximum": 64 }
       }
     }

@@ -91,6 +91,7 @@ continues.
 | Immutable files, plans, reports, backups, and diagnostics | [`durableArtifacts/`](durableArtifacts/) |
 | Internal event fan-out | [`internalEvents/`](internalEvents/) |
 | Supervised local and infrastructure tools | [`process/`](process/) |
+| Live output, progress, replay, and governed transcript rollover | [`streamingOutput/`](streamingOutput/) |
 
 Database, network, and provider examples may create local data or call external
 systems. Read the linked service guide in the [documentation map](../docs/README.md)

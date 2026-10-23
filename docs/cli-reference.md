@@ -181,13 +181,20 @@ overwrite an existing destination. Neither command creates a public URL.
 ### Follow logs
 
 ```bash
-woml <run-id|workflow-id> --logs \
+woml logs <run-id|workflow-id> \
+  [--follow|--no-follow] [--tail <count>|--after <cursor>] \
+  [--source <stdout,stderr,script,runtime>] \
+  [--phase <all|forward|corrective>] \
   [--state <path>] [--config <path>] [--json] \
   [--color=auto|always|never]
 ```
 
-Shows matching historical output and follows new records. Press Ctrl+C to stop
-following; the background automation continues running.
+Replays bounded operational records and follows new process output, script
+logs, and structured progress. `--after` resumes from one deployment cursor;
+`--tail` selects recent records; source and phase filters do not widen access
+to another run. The compatible `woml <subject> --logs` shorthand remains
+available. Press Ctrl+C to detach; the automation continues running. See
+[Streaming Output and Progress](woml-streaming-output-and-progress.md).
 
 ## Secrets
 

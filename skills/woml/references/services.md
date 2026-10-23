@@ -14,6 +14,7 @@ Use this reference before generating a `services.*` call. Built-in services exec
 | Small permanent workflow-owned memory | `services.state` |
 | Serialize one short script-local critical section | `services.locks.withLease()` |
 | Approved local or infrastructure command | `services.process.run()` |
+| Bounded current-step progress for operators | `services.progress.report()` |
 | Fan out a named fact to subscribers | `services.events.emit()` |
 | Wait for one child workflow's result | `services.workflows.call()` |
 | Start independent child work | `services.workflows.start()` |
@@ -245,6 +246,29 @@ Rules:
 The result provides `exitCode`, `signal`, `stdout`, `stderr`, total byte counts,
 truncation flags, and `durationMs`. Return only safe fields downstream because
 step results are durable.
+
+Set `stream: true` to publish redacted stdout and stderr while the process is
+running. This does not change the bounded captured result. The Process v2
+result also includes `streamStartSequence`, `streamEndSequence`,
+`streamTruncated`, and an optional immutable `streamArtifact` when an exact
+Artifact Policy grant permits complete-transcript rollover.
+
+## Structured progress
+
+```js
+await services.progress.report({
+  id: "files",
+  current: completed,
+  total: files.length,
+  unit: "files",
+  message: "Validating generated files"
+});
+```
+
+Progress belongs to the current trusted step attempt. Use one stable `id` per
+logical lane and await every call. Reports are bounded, coalesced, replayable,
+and operational only: they are not durable business events and later steps
+cannot consume them as context.
 
 ## Internal events
 

@@ -24,6 +24,7 @@ or schema documents to write and run a workflow.
 | Immutable plan review, roles, and quorum | [Rich Plan Approvals](woml-rich-plan-approvals.md) |
 | Services overview | [Services](woml-services.md) |
 | Supervised local tools | [Process execution](woml-process.md) |
+| Live process output and script progress | [Streaming Output and Progress](woml-streaming-output-and-progress.md) |
 | HTTP | [Outbound HTTP](woml-http-services.md) |
 | SQL databases | [Database](woml-database.md) |
 | Durable objects | [Storage](woml-storage.md) |
@@ -48,6 +49,8 @@ or schema documents to write and run a workflow.
 | Runtime configuration and ownership | [Production runtime](woml-production-runtime.md) |
 | VPS, Docker, proxy, and Kubernetes | [Production deployment](woml-production-deployment.md) |
 | Logs, metrics, and terminal inspection | [Observability](woml-observability.md) |
+| Streaming output, replay, retention, and operations | [Streaming Output and Progress](woml-streaming-output-and-progress.md) |
+| Streaming wire contracts and cursor semantics | [Streaming Output and Progress v1](protocols/streaming-output-and-progress-v1.md) |
 | Recovery behavior | [Recovery](woml-recovery.md) |
 | Backup and restore | [Backup and restore](woml-backup-and-restore.md) |
 | Retention and pruning | [Retention and maintenance](woml-retention-and-maintenance.md) |
@@ -69,6 +72,7 @@ Provider-specific setup is available for [Telegram](telegram.md),
 - [WOML 1.0.0 release notes](release/v1.0.0-release-notes.md)
 - [Process v1 release notes](release/process-v1-release-notes.md)
 - [Infrastructure Policies v1 release notes](release/infrastructure-policies-v1-release-notes.md)
+- [Streaming Output and Progress v1 release notes](release/streaming-output-and-progress-v1-release-notes.md)
 - [Release runbook](woml-release.md)
 - [Provider extension direction](provider-extension-architecture.md)
 

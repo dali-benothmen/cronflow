@@ -1,0 +1,116 @@
+<woml>
+  <workflow id="streamed-terraform-release" name="Streamed Terraform release" description="Review, serialize, apply, verify, and safely compensate a production Terraform change while operators follow its output." version="1.0.0">
+    <triggers>
+      <manual id="start" />
+    </triggers>
+
+    <steps>
+      <step id="createPlan" name="Create the immutable Terraform plan">
+        <script>
+          await services.progress.report({
+            id: "terraform-release",
+            current: 1,
+            total: 4,
+            unit: "stages",
+            message: "Creating the immutable Terraform plan"
+          });
+          return await services.process.run({
+            executable: "terraform",
+            args: ["plan", "-out", ".woml/artifact-input/production.tfplan", "-no-color"],
+            timeout: "10m",
+            stream: true,
+            output: { stdout: "capture", stderr: "capture", maxBytes: 65536 }
+          }, { name: "terraform-plan" });
+        </script>
+      </step>
+
+      <step id="prepareReview" name="Prepare the reviewed change">
+        <script>
+          const plan = await services.artifacts.put(
+            ".woml/artifact-input/production.tfplan",
+            { name: "production.tfplan", contentType: "application/octet-stream", retention: "30d" }
+          );
+          const recovery = await services.artifacts.put(
+            context.payload.recoveryPlanPath ?? ".woml/artifact-input/recovery.tfplan",
+            { name: "recovery.tfplan", contentType: "application/octet-stream", retention: "30d" }
+          );
+          return {
+            plan,
+            recovery,
+            review: {
+              title: "Apply the production Terraform plan",
+              summary: "Apply the exact attached plan while retaining an independently prepared recovery plan.",
+              risk: "high",
+              facts: [{ label: "Environment", value: "production" }],
+              changes: [{ action: "update", target: "production infrastructure", summary: "Apply the approved immutable plan." }],
+              checks: [{ name: "terraform plan", status: context.steps.createPlan.exitCode === 0 ? "passed" : "failed" }],
+              artifacts: [plan, recovery]
+            }
+          };
+        </script>
+      </step>
+
+      <approval id="approvePlan" name="Approve production plan" description="Two trusted owners approve the exact plan before any production process starts." review="{{context.steps.prepareReview.review}}" approvals="2" required-roles="production-owner security-owner" timeout="1h" on-timeout="reject">
+        <when-approved>
+          <lock id="productionLease" name="Own the production deployment lease" key="production/terraform" acquire-timeout="15m" lease="5m">
+            <saga id="release" name="Apply and verify the reviewed plan">
+              <step id="applyPlan" name="Stream Terraform apply">
+                <script>
+                  const planPath = await services.artifacts.materialize(context.steps.prepareReview.plan);
+                  return await services.process.run({
+                    executable: "terraform",
+                    args: ["apply", "-auto-approve", planPath],
+                    timeout: "20m",
+                    stream: true,
+                    output: { stdout: "capture", stderr: "capture", maxBytes: 65536 }
+                  }, { name: "terraform-apply" });
+                </script>
+                <compensate retry="2">
+                  <script>
+                    const recoveryPath = await services.artifacts.materialize(context.steps.prepareReview.recovery);
+                    return await services.process.run({
+                      executable: "terraform",
+                      args: ["apply", "-auto-approve", recoveryPath],
+                      timeout: "20m",
+                      stream: true,
+                      output: { stdout: "capture", stderr: "capture", maxBytes: 65536 }
+                    }, { name: "terraform-compensate" });
+                  </script>
+                </compensate>
+              </step>
+
+              <step id="verifyHealth" name="Verify production health">
+                <script>
+                  const health = await services.process.run({
+                    executable: "kubectl",
+                    args: ["rollout", "status", "deployment/api", "--timeout=5m"],
+                    timeout: "6m",
+                    stream: true,
+                    output: { stdout: "capture", stderr: "capture", maxBytes: 65536 }
+                  }, { name: "verify-rollout" });
+                  if (health.exitCode !== 0) throw new Error("Production health verification failed");
+                  return { healthy: true, fencingToken: context.lock.fencingToken };
+                </script>
+              </step>
+
+              <cleanup>
+                <step id="finalizeRelease" name="Finalize the release record">
+                  <script>return { finalized: true, fencingToken: context.lock.fencingToken };</script>
+                </step>
+              </cleanup>
+            </saga>
+          </lock>
+        </when-approved>
+        <when-rejected>
+          <step id="recordRejection" name="Record the rejected plan">
+            <script>return { applied: false, reason: "review-rejected" };</script>
+          </step>
+        </when-rejected>
+      </approval>
+
+      <step id="summary" name="Publish the release outcome">
+        <script>return { approval: context.steps.approvePlan, release: context.steps.release };</script>
+      </step>
+    </steps>
+  </workflow>
+</woml>

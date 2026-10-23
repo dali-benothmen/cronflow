@@ -68,6 +68,7 @@ OS process name.
 | `output.stdout` | `capture` or `discard` | `capture` |
 | `output.stderr` | `capture` or `discard` | `capture` |
 | `output.maxBytes` | Combined bounded capture budget | `65536` |
+| `stream` | Publish redacted stdout and stderr while the process runs | `false` |
 
 The resolved request is constrained again by the operator policy. Authors
 cannot raise the runtime's maximum timeout, output, concurrency, environment,
@@ -85,9 +86,18 @@ The result contains:
   stderrBytes,
   stdoutTruncated,
   stderrTruncated,
-  durationMs
+  durationMs,
+  streamed,
+  streamStartSequence,
+  streamEndSequence,
+  streamTruncated
 }
 ```
+
+When `stream` is `true`, WOML uses Process v2 and persists bounded operational
+records while it continues draining both pipes. Capture remains independent:
+you can stream a source and still discard it from the returned result. Process
+v1 remains the exact default when streaming is omitted or false.
 
 A non-accepted exit code throws `WomlServiceError`; it does not return a
 successful result. Failure metadata contains safe status, duration, byte, and
@@ -193,6 +203,12 @@ Output is drained while the program runs so a full pipe cannot deadlock the
 child. Captured text is bounded by both the request and policy. The result
 reports total byte counts and whether each stream was truncated.
 
+Streamed output has a separate operator-owned budget. Set optional
+`limits.maxStreamBytes` in Process Policy v1 to a value from 1 byte through
+256 MiB. Existing policies default to 16 MiB. Reaching the limit emits one
+explicit truncation record and WOML keeps draining the process pipes, so noisy
+children cannot deadlock.
+
 Use `discard` for noisy output you do not need. Prefer a machine-readable mode
 from the underlying tool (for example JSON) and parse only the small fields
 required by later steps. Large files belong in durable artifacts or storage,
@@ -229,6 +245,11 @@ To migrate an existing script:
 - [Release verification](../examples/process/release-verification.woml) builds
   and verifies an artifact without publishing it.
 
-The frozen wire contract, limits, diagnostic catalog, and platform semantics
-are in [Process v1](protocols/process-v1.md). The adversarial boundary is in
+The capture-only wire contract remains in [Process v1](protocols/process-v1.md),
+and the operational streaming contract is in
+[Streaming Output and Progress v1](protocols/streaming-output-and-progress-v1.md).
+The author/operator guide for `stream: true`, live following, truncation,
+retention, and transcript artifacts is
+[Streaming Output and Progress](woml-streaming-output-and-progress.md).
+The adversarial boundary is in
 [Process v1 Threat Model](process-v1-threat-model.md).

@@ -29,6 +29,7 @@ describe('Process Policy v1 preflight', () => {
         limits: {
           maxTimeoutMs: 30_000,
           maxOutputBytes: 65_536,
+          maxStreamBytes: 8_388_608,
           maxConcurrent: 2,
         },
       },
@@ -40,6 +41,7 @@ describe('Process Policy v1 preflight', () => {
     expect(policy.workingDirectories).toEqual([
       await realpath(join(root, 'workspace')),
     ]);
+    expect(policy.limits.maxStreamBytes).toBe(8_388_608);
   });
 
   test('rejects a working-directory symlink escape', async () => {
@@ -80,6 +82,7 @@ describe('Process Policy v1 preflight', () => {
       background: false,
     });
     expect(grant.process.policy.executables[0]?.alias).toBe('bun');
+    expect(grant.process.policy.limits.maxStreamBytes).toBeUndefined();
   });
 
   test('rejects unknown fields and disabled policies with stable codes', async () => {

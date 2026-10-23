@@ -138,12 +138,18 @@ payloads. These commands change durable state and require explicit user intent.
 ## Follow logs
 
 ```bash
-woml <run-id|workflow-id> --logs \
+woml logs <run-id|workflow-id> \
+  [--follow|--no-follow] [--tail <count>|--after <cursor>] \
+  [--source <stdout,stderr,script,runtime>] \
+  [--phase <all|forward|corrective>] \
   [--state <path>] [--config <path>] [--json] \
   [--color=auto|always|never]
 ```
 
-Prints matching historical output and follows new records. Ctrl+C exits log following without stopping the background runtime.
+Replays bounded operational output and follows new records. Use `--after` to
+resume a cursor, `--source` to select producers, and `--phase corrective` for
+saga compensation output. The `woml <subject> --logs` shorthand is compatible.
+Ctrl+C detaches without stopping the background runtime.
 
 ## Secrets
 
@@ -209,7 +215,10 @@ woml restore <backup-directory> [--state <path>] [--replace] [--json]
 woml prune --before <duration> [--state <path>] [--dry-run] [--compact] [--json]
 ```
 
-Removes terminal history older than the duration while preserving active/recoverable runs and referenced definitions. Always recommend `--dry-run` first. `--compact` reclaims SQLite space after successful pruning.
+Removes terminal history and eligible operational output older than the
+duration while preserving active/recoverable runs and referenced definitions.
+Always recommend `--dry-run` first. `--compact` reclaims SQLite space after
+successful pruning.
 
 ## Agent command policy
 

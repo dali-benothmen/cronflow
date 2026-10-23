@@ -5,10 +5,11 @@ the SQLite store remain execution truth;
 telemetry is a bounded projection and can be discarded or re-created.
 
 It is the full-screen runtime operations view. In contrast,
-`woml <run-id|workflow-id> --logs` shows durable author-facing workflow history
-and follows matching changes. See
-[WOML Terminal Experience](woml-terminal-experience.md) for that read-only
-viewer and its Ctrl+C/restart behavior.
+`woml logs <run-id|workflow-id>` replays and follows the separate bounded
+operational-output plane: process stdout/stderr, safe script logs, progress,
+truncation, artifact handoff, and stream closure. See
+[Streaming Output and Progress](woml-streaming-output-and-progress.md) for its
+cursor, retention, filtering, and Ctrl+C behavior.
 
 ## What operators can observe
 

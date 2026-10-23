@@ -112,6 +112,11 @@ jobs:
         run: >-
           bun run benchmark:infrastructure-policy &&
           bun scripts/verify-infrastructure-policy-release.ts
+      - name: Enforce Streaming Output and Progress publication contracts
+        working-directory: woml-cli
+        run: >-
+          bun run benchmark:streaming-output &&
+          bun scripts/verify-streaming-output-release.ts
       - name: Test for-each presentation and clean package
         working-directory: woml-cli
         run: >-
@@ -193,6 +198,7 @@ jobs:
           --test rich_plan_approval_runtime
           --test infrastructure_policy_contract
           --test infrastructure_policy_authority
+          --test operational_output_store
           --test retention
           --test webhook_runtime
           -- --test-threads=1
@@ -369,6 +375,39 @@ jobs:
           cargo --version
           git status --short
 
+  operational-output:
+    name: Operational Output Store (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, macos-15, windows-2022]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Test output ordering, redaction, retention, recovery, and governed rollover serially
+        working-directory: core
+        run: >-
+          cargo test --config profile.dev.debug=0
+          --config profile.dev.incremental=false -j 1 --locked
+          -p woml-engine --test operational_output_store --
+          --test-threads=1
+          --skip publication_budgets_cover_activation_append_replay_progress_concurrency_and_prune &&
+          cargo test --config profile.dev.debug=0
+          --config profile.dev.incremental=false -j 1 --locked
+          -p woml-engine --lib
+          process::tests::incremental_stream_redaction_covers_every_secret_split_and_invalid_utf8
+          -- --exact --test-threads=1 &&
+          cargo test --config profile.dev.debug=0
+          --config profile.dev.incremental=false -j 1 --locked
+          -p woml-engine --lib operational_output_rollover -- --test-threads=1
+      - name: Failure diagnostics
+        if: failure()
+        run: |
+          rustc --version
+          cargo --version
+          git status --short
+
   lock-authority:
     name: Lock authority (${{ matrix.os }})
     strategy:
@@ -491,6 +530,9 @@ jobs:
       - name: Test Infrastructure Policies from the clean release package
         working-directory: woml-cli
         run: bun test tests/infrastructure-policy-packaged-release.test.ts --max-concurrency=1
+      - name: Test Streaming Output and Progress from the clean release package
+        working-directory: woml-cli
+        run: bun test tests/streaming-output-packaged-release.test.ts --max-concurrency=1
       - name: Pack, seal, and reverify the main artifact
         run: |
           bun woml-cli/scripts/release-artifact.ts pack --root release/main

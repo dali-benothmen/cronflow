@@ -1,0 +1,135 @@
+{
+  "record": {
+    "profile": "woml.operational-record/v1",
+    "deploymentId": "deployment-local",
+    "sequence": 41,
+    "occurredAt": "2026-10-23T09:30:00.000Z",
+    "workflowId": "infrastructure-watch",
+    "runId": "run_01k7stream",
+    "nodeId": "inspectCluster",
+    "attempt": 1,
+    "invocationId": "inv_01k7stream",
+    "kind": "output",
+    "source": "stdout",
+    "text": "deployment/api is healthy\n",
+    "byteCount": 26
+  },
+  "progressRecord": {
+    "profile": "woml.operational-record/v1",
+    "deploymentId": "deployment-local",
+    "sequence": 42,
+    "occurredAt": "2026-10-23T09:30:00.250Z",
+    "workflowId": "infrastructure-watch",
+    "runId": "run_01k7stream",
+    "nodeId": "inspectCluster",
+    "attempt": 1,
+    "invocationId": "inv_01k7stream",
+    "kind": "progress",
+    "progressId": "resources",
+    "current": 32.0,
+    "total": 100.0,
+    "unit": "resources",
+    "message": "Checking deployments",
+    "status": "active"
+  },
+  "page": {
+    "profile": "woml.operational-page/v1",
+    "deploymentId": "deployment-local",
+    "runId": "run_01k7stream",
+    "requestedAfter": 40,
+    "nextAfter": 42,
+    "earliestAvailable": 41,
+    "latestSequence": 42,
+    "hasMore": false,
+    "records": []
+  },
+  "stream": {
+    "profile": "woml.operational-stream/v1",
+    "event": "heartbeat",
+    "cursor": 42
+  },
+  "storeInspection": {
+    "profile": "woml.operational-output-store/v1",
+    "schemaVersion": 1,
+    "deploymentId": "deployment-local",
+    "nextSequence": 43,
+    "earliestAvailable": 41,
+    "latestSequence": 42,
+    "prunedThrough": 40,
+    "recordCount": 2,
+    "retainedOutputBytes": 26,
+    "activeRuns": 1,
+    "terminalRuns": 0,
+    "truncatedStreams": 0,
+    "maxAttemptBytes": 16777216,
+    "maxRunBytes": 16777216,
+    "maxStoreBytes": 1073741824,
+    "retentionMs": 604800000
+  },
+  "processV2": {
+    "contract": "woml.process",
+    "contractVersion": 2,
+    "kind": "request",
+    "executable": "kubectl",
+    "args": ["get", "deployments", "-o", "json"],
+    "cwd": ".",
+    "env": {},
+    "timeoutMs": 30000,
+    "acceptExitCodes": [0],
+    "stream": true,
+    "output": {
+      "stdout": "discard",
+      "stderr": "capture",
+      "maxBytes": 65536
+    }
+  },
+  "processV2Result": {
+    "contract": "woml.process",
+    "contractVersion": 2,
+    "kind": "result",
+    "exitCode": 0,
+    "signal": null,
+    "stdout": "",
+    "stderr": "",
+    "stdoutBytes": 48000,
+    "stderrBytes": 120,
+    "stdoutTruncated": false,
+    "stderrTruncated": false,
+    "durationMs": 842.5,
+    "streamed": true,
+    "streamStartSequence": 41,
+    "streamEndSequence": 49,
+    "streamTruncated": false,
+    "streamArtifact": null
+  },
+  "scriptFrames": [
+    {
+      "protocol": "woml.script-host",
+      "protocolVersion": 12,
+      "messageType": "script_log",
+      "requestId": "request-42",
+      "frameSequence": 1,
+      "level": "info",
+      "text": "Loaded 32 resources"
+    },
+    {
+      "protocol": "woml.script-host",
+      "protocolVersion": 12,
+      "messageType": "progress_report",
+      "requestId": "request-42",
+      "frameSequence": 2,
+      "progressId": "resources",
+      "current": 32,
+      "total": 100,
+      "unit": "resources"
+    },
+    {
+      "protocol": "woml.script-host",
+      "protocolVersion": 12,
+      "messageType": "progress_ack",
+      "requestId": "request-42",
+      "frameSequence": 2,
+      "accepted": true
+    }
+  ]
+}

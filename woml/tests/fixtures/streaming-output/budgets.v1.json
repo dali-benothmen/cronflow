@@ -1,0 +1,15 @@
+{
+  "profile": "woml.streaming-output-budgets/v1",
+  "decodedChunkBytes": 16384,
+  "scriptFrameBytes": 4096,
+  "persistedTextBytes": 16384,
+  "pageRecords": 1000,
+  "pageBytes": 1048576,
+  "followersPerRuntime": 8,
+  "defaultInlineRunBytes": 16777216,
+  "maximumInlineRunBytes": 268435456,
+  "defaultRetentionMs": 604800000,
+  "defaultStoreBytes": 1073741824,
+  "progressSnapshotsPerSecondPerLane": 4,
+  "napiDelivery": "coalesced-cursor-wakeup"
+}

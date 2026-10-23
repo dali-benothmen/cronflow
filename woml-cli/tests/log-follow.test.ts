@@ -80,8 +80,40 @@ describe('workflow log following', () => {
       LogFollowError
     );
     expect(() => parseLogFollowArguments(['order-processing'])).toThrow(
-      'Usage: woml <run-id|workflow-id> --logs'
+      'Usage: woml logs <run-id|workflow-id>'
     );
+    expect(
+      parseLogFollowArguments([
+        'logs',
+        'run_abc',
+        '--tail',
+        '25',
+        '--source',
+        'stdout,script',
+        '--phase',
+        'corrective',
+        '--no-follow',
+      ])
+    ).toMatchObject({
+      subjectKind: 'run',
+      tail: 25,
+      follow: false,
+      operational: true,
+      phase: 'corrective',
+    });
+    expect(() =>
+      parseLogFollowArguments(['logs', 'run_abc', '--phase', 'cleanup'])
+    ).toThrow(LogFollowError);
+    expect(() =>
+      parseLogFollowArguments([
+        'logs',
+        'run_abc',
+        '--tail',
+        '10',
+        '--after',
+        '3',
+      ])
+    ).toThrow(LogFollowError);
   });
 
   test('renders a terminal retained run and exits without requiring a runtime', async () => {
@@ -115,6 +147,63 @@ describe('workflow log following', () => {
     });
     expect(stdout).not.toContain('\u001b[');
     expect(stderr).toBe('');
+  });
+
+  test('replays operational records as NDJSON without presentation text', async () => {
+    const run = await presentation();
+    const records = [1, 2, 3].map(sequence => ({
+      profile: 'woml.operational-record/v1' as const,
+      deploymentId: 'deployment_logs',
+      sequence,
+      occurredAt: `2026-08-15T09:00:0${sequence}.000Z`,
+      workflowId: run.workflow.id,
+      runId: run.runId,
+      nodeId: 'process',
+      attempt: 1,
+      invocationId: 'inv_logs',
+      kind: 'output' as const,
+      source: sequence === 2 ? ('stderr' as const) : ('stdout' as const),
+      text: `line ${sequence}`,
+      byteCount: 6,
+    }));
+    let stdout = '';
+    const code = await followWorkflowLogs({
+      args: {
+        subject: run.runId,
+        subjectKind: 'run',
+        statePath: '/virtual/state.sqlite',
+        json: true,
+        color: 'always',
+        follow: false,
+        tail: 2,
+        sources: new Set(['stdout', 'stderr']),
+        operational: true,
+      },
+      io: { stdout: text => { stdout += text; }, stderr: () => {}, isTTY: false },
+      dependencies: {
+        readRun: () => run,
+        readOutputPage: (_state, _run, after) => ({
+          profile: 'woml.operational-page/v1',
+          deploymentId: 'deployment_logs',
+          runId: run.runId,
+          requestedAfter: after,
+          nextAfter: 3,
+          earliestAvailable: 1,
+          latestSequence: 3,
+          hasMore: false,
+          records: records.filter(record => record.sequence > after),
+        }),
+        readDescriptor: async () => {
+          throw Object.assign(new Error('missing'), { code: 'ENOENT' });
+        },
+      },
+    });
+    expect(code).toBe(0);
+    const replay = stdout.trim().split('\n').map(line => JSON.parse(line));
+    expect(replay.map(item => item.sequence)).toEqual([2, 3]);
+    expect(replay.every(item => item.profile === 'woml.operational-record/v1')).toBe(true);
+    expect(stdout).not.toContain('woml.run-presentation');
+    expect(stdout).not.toContain('\u001b[');
   });
 
   test('renders retained workflow history oldest-to-newest and explains inactive following', async () => {

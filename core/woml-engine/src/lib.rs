@@ -28,6 +28,7 @@ pub mod model;
 pub mod notification_host;
 pub mod notification_protocol;
 pub mod notification_runtime;
+pub mod operational_output;
 #[doc(hidden)]
 pub mod performance;
 pub mod presentation;
@@ -240,6 +241,20 @@ pub use notification_runtime::{
   run_notification_provider_journey, run_notification_provider_journey_with_custom,
   CustomNotificationJourneyOptions, NotificationDeliveryDiagnostic, NotificationJourneyDiagnostics,
   NotificationJourneyError, NotificationJourneyResult, NOTIFICATION_JOURNEY_DIAGNOSTICS_VERSION,
+};
+pub use operational_output::{
+  operational_output_store_for_state, LazyOperationalOutputStore, OperationalAppendOutcomeV1,
+  OperationalBodyV1, OperationalCloseStatusV1, OperationalExecutionPhaseV1, OperationalGapV1,
+  OperationalIdentityV1, OperationalLogLevelV1, OperationalOutputError, OperationalOutputLimitsV1,
+  OperationalOutputPrunePlanV1, OperationalOutputPruneResultV1, OperationalOutputReporter,
+  OperationalOutputStore, OperationalOutputStoreInspectionV1, OperationalPageV1,
+  OperationalProgressSnapshotV1, OperationalProgressStatusV1, OperationalRecordDraftV1,
+  OperationalRecordV1, OperationalSourceV1, OperationalStreamEventV1,
+  DEFAULT_OPERATIONAL_INLINE_RUN_BYTES, DEFAULT_OPERATIONAL_RETENTION_MS,
+  DEFAULT_OPERATIONAL_STORE_BYTES, MAX_OPERATIONAL_CHUNK_BYTES, MAX_OPERATIONAL_FOLLOWERS,
+  MAX_OPERATIONAL_INLINE_RUN_BYTES, MAX_OPERATIONAL_PAGE_BYTES, MAX_OPERATIONAL_PAGE_RECORDS,
+  MAX_OPERATIONAL_TEXT_BYTES, OPERATIONAL_OUTPUT_STORE_SCHEMA_VERSION, OPERATIONAL_PAGE_PROFILE,
+  OPERATIONAL_RECORD_PROFILE, OPERATIONAL_STREAM_PROFILE,
 };
 pub use presentation::{
   project_run_presentation_v1, recent_run_presentations_from_store_v1,

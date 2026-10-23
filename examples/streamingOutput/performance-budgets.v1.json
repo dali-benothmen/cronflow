@@ -1,0 +1,16 @@
+{
+  "profile": "woml.streaming-output-performance-budgets/v1",
+  "storeActivationMsMax": 2000,
+  "appendAverageMicrosMax": 20000,
+  "replayPageMsMax": 1000,
+  "progressFloodMsMax": 30000,
+  "concurrentAppendMsMax": 30000,
+  "pruneHundredRunsMsMax": 10000,
+  "benchmarkStoreBytesMax": 33554432,
+  "maximumDecodedChunkBytes": 16384,
+  "maximumScriptFrameBytes": 4096,
+  "maximumReplayPageRecords": 1000,
+  "maximumReplayPageBytes": 1048576,
+  "maximumFollowers": 8,
+  "progressCadenceMs": 250
+}

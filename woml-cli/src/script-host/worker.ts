@@ -19,9 +19,11 @@ import type {
   ScriptAttempt,
   ScriptBindingsV1,
   ScriptContext,
+  ScriptHostProtocolVersion,
 } from './types';
 
 export interface ScriptWorkerRequest {
+  readonly protocolVersion?: ScriptHostProtocolVersion;
   readonly invocationId: string;
   readonly runId: string;
   readonly nodeId: string;
@@ -74,6 +76,11 @@ export type ScriptWorkerInbound =
       readonly messageType: 'fetch_observation_ack';
       readonly requestId: string;
       readonly ack: FetchObservationAckMessage;
+    }
+  | {
+      readonly messageType: 'progress_ack';
+      readonly requestId: string;
+      readonly frameSequence: number;
     };
 
 export type ScriptWorkerOutbound =
@@ -88,6 +95,23 @@ export type ScriptWorkerOutbound =
   | {
       readonly messageType: 'fetch_observation';
       readonly observation: NativeFetchObservation;
+    }
+  | {
+      readonly messageType: 'script_log';
+      readonly requestId: string;
+      readonly frameSequence: number;
+      readonly level: 'debug' | 'info' | 'warn' | 'error';
+      readonly text: string;
+    }
+  | {
+      readonly messageType: 'progress_report';
+      readonly requestId: string;
+      readonly frameSequence: number;
+      readonly progressId: string;
+      readonly current?: number;
+      readonly total?: number;
+      readonly unit?: string;
+      readonly message?: string;
     };
 
 type AsyncFunction = (...arguments_: unknown[]) => Promise<unknown>;
@@ -295,10 +319,15 @@ const pendingFetchAcks = new Map<
     readonly reject: (error: NativeFetchTrackingError) => void;
   }
 >();
+const pendingProgressAcks = new Map<
+  number,
+  { readonly resolve: () => void; readonly reject: (error: Error) => void }
+>();
 const operationSequences = new Map<string, number>();
 const automaticEffectfulCalls = new Map<string, number>();
 const workflowTargetIdentityModes = new Map<string, 'automatic' | 'named'>();
 let fetchSequence = 0;
+let operationalFrameSequence = 0;
 const nativeFetch = globalThis.fetch.bind(globalThis);
 const nativeFetchFailures = new WeakMap<
   object,
@@ -685,6 +714,94 @@ function portableRelativeProcessDirectory(value: string): boolean {
   return segments.every(segment => segment !== '..');
 }
 
+function normalizeProgressReport(raw: unknown): {
+  readonly progressId: string;
+  readonly current?: number;
+  readonly total?: number;
+  readonly unit?: string;
+  readonly message?: string;
+} {
+  if (typeof raw !== 'object' || raw === null || Array.isArray(raw)) {
+    throw new TypeError('services.progress.report() requires a progress object.');
+  }
+  const object = raw as Record<string, unknown>;
+  const allowed = new Set(['id', 'current', 'total', 'unit', 'message']);
+  const unknown = Object.keys(object).find(key => !allowed.has(key));
+  if (unknown !== undefined) {
+    throw new TypeError(`Unknown progress option "${unknown}".`);
+  }
+  const progressId = object.id ?? 'default';
+  const current = object.current;
+  const total = object.total;
+  const unit = object.unit;
+  const message = object.message;
+  if (
+    typeof progressId !== 'string' ||
+    progressId.length === 0 ||
+    Buffer.byteLength(progressId, 'utf8') > 128 ||
+    /\s/.test(progressId)
+  ) {
+    throw new TypeError('Progress id must be a non-empty token no larger than 128 bytes.');
+  }
+  if (current === undefined && message === undefined) {
+    throw new TypeError('Progress requires at least current or message.');
+  }
+  if (
+    current !== undefined &&
+    (typeof current !== 'number' ||
+      !Number.isFinite(current) ||
+      current < 0 ||
+      current > Number.MAX_SAFE_INTEGER)
+  ) {
+    throw new TypeError('Progress current must be a finite non-negative number.');
+  }
+  if (
+    total !== undefined &&
+    (typeof total !== 'number' ||
+      !Number.isFinite(total) ||
+      total <= 0 ||
+      total > Number.MAX_SAFE_INTEGER ||
+      (typeof current === 'number' && current > total))
+  ) {
+    throw new TypeError('Progress total must be positive and no smaller than current.');
+  }
+  if (
+    unit !== undefined &&
+    (current === undefined ||
+      typeof unit !== 'string' ||
+      unit.length === 0 ||
+      Buffer.byteLength(unit, 'utf8') > 32 ||
+      unit.includes('\0'))
+  ) {
+    throw new TypeError('Progress unit requires current and must fit within 32 bytes.');
+  }
+  if (
+    message !== undefined &&
+    (typeof message !== 'string' ||
+      message.length === 0 ||
+      Buffer.byteLength(message, 'utf8') > 512 ||
+      message.includes('\0'))
+  ) {
+    throw new TypeError('Progress message must be non-empty and fit within 512 bytes.');
+  }
+  return {
+    progressId,
+    ...(current === undefined ? {} : { current }),
+    ...(total === undefined ? {} : { total }),
+    ...(unit === undefined ? {} : { unit }),
+    ...(message === undefined ? {} : { message }),
+  };
+}
+
+function truncateUtf8(value: string, maxBytes: number): string {
+  if (Buffer.byteLength(value, 'utf8') <= maxBytes) return value;
+  let end = Math.min(value.length, maxBytes);
+  while (end > 0 && Buffer.byteLength(value.slice(0, end), 'utf8') > maxBytes) {
+    end -= 1;
+  }
+  return value.slice(0, end);
+}
+
 function normalizeProcessRequest(input: JsonValue): JsonObject {
   const violation = findJsonViolation(input);
   if (violation !== undefined) {
@@ -702,10 +819,11 @@ function normalizeProcessRequest(input: JsonValue): JsonObject {
     'timeout',
     'acceptExitCodes',
     'output',
+    'stream',
   ]);
   const unknown = Object.keys(object).find(key => !allowed.has(key));
   if (unknown !== undefined) {
-    throw new TypeError(`Unknown Process v1 option "${unknown}".`);
+    throw new TypeError(`Unknown Process option "${unknown}".`);
   }
   if (
     typeof object.executable !== 'string' ||
@@ -812,9 +930,13 @@ function normalizeProcessRequest(input: JsonValue): JsonObject {
     );
   }
 
+  const stream = object.stream ?? false;
+  if (typeof stream !== 'boolean') {
+    throw new TypeError('Process stream must be a boolean.');
+  }
   return deepFreezeJson({
     contract: 'woml.process',
-    contractVersion: 1,
+    contractVersion: stream ? 2 : 1,
     kind: 'request',
     executable: object.executable,
     args: [...args],
@@ -823,6 +945,7 @@ function normalizeProcessRequest(input: JsonValue): JsonObject {
     timeoutMs,
     acceptExitCodes: [...acceptExitCodes],
     output: { stdout, stderr, maxBytes },
+    ...(stream ? { stream: true } : {}),
   });
 }
 
@@ -880,6 +1003,9 @@ function publicProcessResult(
   secrets: readonly string[]
 ): JsonValue {
   const object = plainObject(result);
+  if (object === undefined) {
+    throw new TypeError('Rust returned an invalid Process result.');
+  }
   const fields = new Set([
     'contract',
     'contractVersion',
@@ -893,11 +1019,40 @@ function publicProcessResult(
     'stdoutTruncated',
     'stderrTruncated',
     'durationMs',
+    'streamed',
+    'streamStartSequence',
+    'streamEndSequence',
+    'streamTruncated',
+    'streamArtifact',
   ]);
+  const version = object.contractVersion;
+  let streamArtifact: JsonObject | null = null;
+  if (version === 2 && object.streamArtifact !== null) {
+    try {
+      streamArtifact = normalizeArtifactReference(object.streamArtifact as JsonValue);
+    } catch {
+      throw new TypeError('Rust returned an invalid Process result.');
+    }
+  }
+  const streamFieldsValid =
+    version === 1
+      ? ![
+          'streamed', 'streamStartSequence', 'streamEndSequence',
+          'streamTruncated', 'streamArtifact',
+        ].some(field => Object.hasOwn(object, field))
+      : version === 2 &&
+        object.streamed === true &&
+        (object.streamStartSequence === null ||
+          (Number.isSafeInteger(object.streamStartSequence) && Number(object.streamStartSequence) >= 1)) &&
+        (object.streamEndSequence === null ||
+          (Number.isSafeInteger(object.streamEndSequence) && Number(object.streamEndSequence) >= 1)) &&
+        typeof object.streamTruncated === 'boolean' &&
+        (object.streamArtifact === null || streamArtifact !== null);
   if (
-    object?.contract !== 'woml.process' ||
+    object.contract !== 'woml.process' ||
     Object.keys(object).some(field => !fields.has(field)) ||
-    object.contractVersion !== 1 ||
+    (version !== 1 && version !== 2) ||
+    !streamFieldsValid ||
     object.kind !== 'result' ||
     (object.exitCode !== null &&
       (!Number.isSafeInteger(object.exitCode) ||
@@ -922,7 +1077,7 @@ function publicProcessResult(
     !Number.isFinite(object.durationMs) ||
     object.durationMs < 0
   ) {
-    throw new TypeError('Rust returned an invalid Process v1 result.');
+    throw new TypeError('Rust returned an invalid Process result.');
   }
   return Object.freeze({
     exitCode: object.exitCode,
@@ -934,6 +1089,15 @@ function publicProcessResult(
     stdoutTruncated: object.stdoutTruncated,
     stderrTruncated: object.stderrTruncated,
     durationMs: object.durationMs,
+    ...(version === 2
+      ? {
+          streamed: true,
+          streamStartSequence: object.streamStartSequence,
+          streamEndSequence: object.streamEndSequence,
+          streamTruncated: object.streamTruncated,
+          streamArtifact,
+        }
+      : {}),
   });
 }
 
@@ -2416,6 +2580,43 @@ function deeplyReadonlyServiceFacade(
       if (typeof capabilityProperty !== 'string') return undefined;
       const cached = capabilityCache.get(capabilityProperty);
       if (cached !== undefined) return cached;
+      if (capabilityProperty === 'progress') {
+        const report = async (raw: unknown): Promise<void> => {
+          if (request.protocolVersion !== 12) {
+            throw new Error(
+              'WOML_PROGRESS_UNAVAILABLE: structured progress requires Script Host v12.'
+            );
+          }
+          const value = normalizeProgressReport(raw);
+          const safeValue =
+            value.message === undefined
+              ? value
+              : {
+                  ...value,
+                  message: redactMaterializedPaths(
+                    redactKnownSecrets(
+                      value.message,
+                      Object.values(request.bindings?.secrets ?? {})
+                    ),
+                    materializedPaths
+                  ),
+                };
+          const frameSequence = ++operationalFrameSequence;
+          await new Promise<void>((resolve, reject) => {
+            pendingProgressAcks.set(frameSequence, { resolve, reject });
+            self.postMessage({
+              messageType: 'progress_report',
+              requestId: request.invocationId,
+              frameSequence,
+              ...safeValue,
+            } satisfies ScriptWorkerOutbound);
+          });
+        };
+        Object.freeze(report);
+        const progress = Object.freeze({ report });
+        capabilityCache.set(capabilityProperty, progress);
+        return progress;
+      }
       if (capabilityProperty === 'db') {
         const database = (rawConfig: JsonValue): unknown => {
           const config = Object.freeze(normalizeDatabaseConfig(rawConfig));
@@ -2859,7 +3060,7 @@ function guardedModuleServices(
   path: readonly PropertyKey[] = []
 ): unknown {
   const callable = function guardedWomlModuleService() {};
-  return new Proxy(callable, {
+  return new Proxy(Object.freeze(callable), {
     get(_target, property) {
       return guardedModuleServices(currentServices, invocationActive, [
         ...path,
@@ -3020,6 +3221,8 @@ async function executeScript(
       }
       const executionDeadline = performance.now() + request.timeoutMs;
       operationSequences.clear();
+      operationalFrameSequence = 0;
+      pendingProgressAcks.clear();
       automaticEffectfulCalls.clear();
       workflowTargetIdentityModes.clear();
       const context = deepFreezeJson({
@@ -3070,47 +3273,35 @@ async function executeScript(
       reusableLifecycle,
     } = prepared;
     secretValues = prepared.secretValues;
+    const writeScriptLog = (
+      level: 'debug' | 'info' | 'warn' | 'error',
+      values: readonly unknown[]
+    ): void => {
+      const text = truncateUtf8(
+        redactMaterializedPaths(
+          redactKnownSecrets(values.map(value => String(value)).join(' '), secretValues),
+          materializedPaths
+        ),
+        4_096
+      );
+      if (request.protocolVersion !== 12) {
+        globalThis.console.error(text);
+        return;
+      }
+      self.postMessage({
+        messageType: 'script_log',
+        requestId: request.invocationId,
+        frameSequence: ++operationalFrameSequence,
+        level,
+        text,
+      } satisfies ScriptWorkerOutbound);
+    };
     const safeConsole = Object.freeze({
-      log: (...values: unknown[]) =>
-        globalThis.console.error(
-          redactMaterializedPaths(
-            redactKnownSecrets(
-              values.map(value => String(value)).join(' '),
-              secretValues
-            ),
-            materializedPaths
-          )
-        ),
-      info: (...values: unknown[]) =>
-        globalThis.console.error(
-          redactMaterializedPaths(
-            redactKnownSecrets(
-              values.map(value => String(value)).join(' '),
-              secretValues
-            ),
-            materializedPaths
-          )
-        ),
-      warn: (...values: unknown[]) =>
-        globalThis.console.error(
-          redactMaterializedPaths(
-            redactKnownSecrets(
-              values.map(value => String(value)).join(' '),
-              secretValues
-            ),
-            materializedPaths
-          )
-        ),
-      error: (...values: unknown[]) =>
-        globalThis.console.error(
-          redactMaterializedPaths(
-            redactKnownSecrets(
-              values.map(value => String(value)).join(' '),
-              secretValues
-            ),
-            materializedPaths
-          )
-        ),
+      debug: (...values: unknown[]) => writeScriptLog('debug', values),
+      log: (...values: unknown[]) => writeScriptLog('info', values),
+      info: (...values: unknown[]) => writeScriptLog('info', values),
+      warn: (...values: unknown[]) => writeScriptLog('warn', values),
+      error: (...values: unknown[]) => writeScriptLog('error', values),
     });
     const builtInServices = deeplyReadonlyServiceFacade(
       request,
@@ -3348,6 +3539,13 @@ self.onmessage = (event: MessageEvent<ScriptWorkerInbound>) => {
       pending.reject(
         new NativeFetchTrackingError(message.requestId, message.ack.error)
       );
+    return;
+  }
+  if (message.messageType === 'progress_ack') {
+    const pending = pendingProgressAcks.get(message.frameSequence);
+    if (pending === undefined || message.requestId.length === 0) return;
+    pendingProgressAcks.delete(message.frameSequence);
+    pending.resolve();
     return;
   }
   const pending = pendingCalls.get(message.callId);

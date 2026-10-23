@@ -21,6 +21,7 @@ import type {
   ExecuteMessageV9,
   ExecuteMessageV10,
   ExecuteMessageV11,
+  ExecuteMessageV12,
   FetchObservationMessage,
   JsonValue,
   ScriptAttempt,
@@ -2297,6 +2298,107 @@ return {
     });
   });
 
+  test('Process v2 exposes a verified immutable rollover artifact reference', async () => {
+    const completed: CompletedMessage[] = [];
+    const calls: CapabilityCallMessage[] = [];
+    let host!: ScriptHost;
+    host = new ScriptHost({
+      workerUrl: new URL('../src/script-host-worker.ts', import.meta.url),
+      protocolVersion: 4,
+      send: async message => {
+        if (message.messageType === 'completed') {
+          completed.push(message);
+          return;
+        }
+        if (message.messageType !== 'capability_call') return;
+        calls.push(message);
+        const processResult = {
+          contract: 'woml.process',
+          contractVersion: 2,
+          kind: 'result',
+          exitCode: 0,
+          signal: null,
+          stdout: '',
+          stderr: '',
+          stdoutBytes: 20_000_000,
+          stderrBytes: 0,
+          stdoutTruncated: true,
+          stderrTruncated: false,
+          durationMs: 125,
+          streamed: true,
+          streamStartSequence: 1,
+          streamEndSequence: 1_024,
+          streamTruncated: true,
+          streamArtifact: {
+            contract: 'woml.artifact-reference',
+            contractVersion: 1,
+            id: 'artifact_01j00000000000000000000000',
+            name: 'process-output.ndjson',
+            size: 20_000_000,
+            sha256: 'a'.repeat(64),
+            contentType: 'application/x-ndjson',
+          },
+        } as const;
+        host.accept({
+          protocol: 'woml.script-host',
+          protocolVersion: 4,
+          messageType: 'capability_result',
+          invocationId: message.invocationId,
+          callId: message.callId,
+          result: {
+            contract: 'woml.capability-call',
+            contractVersion: 1,
+            messageType: 'result',
+            invocationId: message.invocationId,
+            callId: message.callId,
+            outcome: 'succeeded',
+            resultContractVersion: 1,
+            resultBytes: Buffer.byteLength(JSON.stringify(processResult)),
+            durationMs: 126,
+            result: processResult,
+          },
+        });
+      },
+    });
+
+    host.accept(
+      executeV4(
+        'inv_v4_process_streaming',
+        `
+          const value = await services.process.run({
+            executable: 'bun', args: ['run', 'build'], stream: true
+          }, { name: 'stream-build' });
+          return {
+            artifactFrozen: Object.isFrozen(value.streamArtifact),
+            artifact: value.streamArtifact
+          };
+        `
+      )
+    );
+    await host.drain();
+
+    expect(calls).toHaveLength(1);
+    expect(calls[0]?.call).toMatchObject({
+      capability: 'process',
+      operation: 'run',
+      inputContractVersion: 1,
+      resultContractVersion: 1,
+      input: { contractVersion: 2, stream: true },
+    });
+    expect(completed[0]?.outcome).toMatchObject({
+      kind: 'success',
+      value: {
+        artifactFrozen: true,
+        artifact: {
+          contract: 'woml.artifact-reference',
+          contractVersion: 1,
+          id: 'artifact_01j00000000000000000000000',
+          sha256: 'a'.repeat(64),
+        },
+      },
+    });
+  });
+
   test('Process v1 rejects unsafe and malformed requests before a capability call', async () => {
     const completed: CompletedMessage[] = [];
     let callCount = 0;
@@ -3376,6 +3478,178 @@ describe('Durable Lock Script Host v10', () => {
         },
       })
     ).toBe(false);
+  });
+});
+
+describe('Structured progress and script logs in Script Host v12', () => {
+  test('awaits progress acknowledgements and emits redacted structured console levels', async () => {
+    const outbound: ScriptHostMessage[] = [];
+    let host!: ScriptHost;
+    host = new ScriptHost({
+      workerUrl: new URL('../src/script-host-worker.ts', import.meta.url),
+      protocolVersion: 12,
+      send: async message => {
+        outbound.push(message);
+        if (message.messageType === 'progress_report') {
+          host.accept({
+            protocol: 'woml.script-host',
+            protocolVersion: 12,
+            messageType: 'progress_ack',
+            requestId: message.requestId,
+            frameSequence: message.frameSequence,
+            accepted: true,
+          });
+        }
+      },
+    });
+    const request: ExecuteMessageV12 = {
+      ...executeStepV7(
+        'inv_progress_v12',
+        `
+          console.debug('starting', secrets.token);
+          await services.progress.report({
+            id: 'files', current: 1, total: 2, unit: 'files',
+            message: \`processed \${secrets.token}\`
+          });
+          await services.progress.report({ id: 'waiting', message: 'Waiting for input' });
+          return {
+            progressFrozen: Object.isFrozen(services.progress),
+            reportFrozen: Object.isFrozen(services.progress.report)
+          };
+        `
+      ),
+      protocolVersion: 12,
+      bindings: {
+        bindingVersion: 1,
+        servicesVersion: 1,
+        secrets: { token: 'never-persist-this-token' },
+      },
+    };
+
+    host.accept(request);
+    await host.drain();
+
+    expect(outbound.filter(message => message.messageType === 'script_log')).toEqual([
+      expect.objectContaining({
+        protocolVersion: 12,
+        requestId: request.invocationId,
+        frameSequence: 1,
+        level: 'debug',
+        text: 'starting [REDACTED]',
+      }),
+    ]);
+    expect(outbound.filter(message => message.messageType === 'progress_report')).toEqual([
+      expect.objectContaining({
+        requestId: request.invocationId,
+        frameSequence: 2,
+        progressId: 'files',
+        current: 1,
+        total: 2,
+        unit: 'files',
+        message: 'processed [REDACTED]',
+      }),
+      expect.objectContaining({
+        requestId: request.invocationId,
+        frameSequence: 3,
+        progressId: 'waiting',
+        message: 'Waiting for input',
+      }),
+    ]);
+    expect(byInvocation(outbound).get(request.invocationId)?.outcome).toEqual({
+      kind: 'success',
+      value: { progressFrozen: true, reportFrozen: true },
+    });
+  });
+
+  test('gives imported modules the same deeply frozen progress service', async () => {
+    const outbound: ScriptHostMessage[] = [];
+    let host!: ScriptHost;
+    host = new ScriptHost({
+      workerUrl: new URL('../src/script-host-worker.ts', import.meta.url),
+      protocolVersion: 12,
+      send: async message => {
+        outbound.push(message);
+        if (message.messageType === 'progress_report') {
+          host.accept({
+            protocol: 'woml.script-host',
+            protocolVersion: 12,
+            messageType: 'progress_ack',
+            requestId: message.requestId,
+            frameSequence: message.frameSequence,
+            accepted: true,
+          });
+        }
+      },
+    });
+    const bundle = `export async function report() {
+      await services.progress.report({ id: 'module', current: 1, total: 1 });
+      return Object.isFrozen(services.progress) && Object.isFrozen(services.progress.report);
+    }`;
+    const sourceMap = JSON.stringify({
+      version: 3,
+      sources: ['modules/progress.ts'],
+      sourcesContent: [bundle],
+      names: [],
+      mappings: '',
+    });
+    const bundleDigest = moduleDigest(bundle);
+    host.accept({
+      protocol: 'woml.script-host',
+      protocolVersion: 12,
+      messageType: 'register_module',
+      bundleDigest,
+      bundle,
+      sourceMapDigest: moduleDigest(sourceMap),
+      sourceMap,
+    });
+    const request: ExecuteMessageV12 = {
+      ...executeStepV7(
+        'inv_module_progress_v12',
+        'return { moduleProgressFrozen: await services.utility.report() };'
+      ),
+      protocolVersion: 12,
+      modules: [{ name: 'utility', bundleDigest, exports: ['report'] }],
+    };
+    host.accept(request);
+    await host.drain();
+
+    expect(outbound).toContainEqual(
+      expect.objectContaining({
+        messageType: 'progress_report',
+        requestId: request.invocationId,
+        progressId: 'module',
+        current: 1,
+        total: 1,
+      })
+    );
+    expect(byInvocation(outbound).get(request.invocationId)?.outcome).toEqual({
+      kind: 'success',
+      value: { moduleProgressFrozen: true },
+    });
+  });
+
+  test('rejects invalid v12 progress and preserves v11 console behavior', async () => {
+    expect(
+      isScriptHostMessage({
+        protocol: 'woml.script-host',
+        protocolVersion: 12,
+        messageType: 'progress_report',
+        requestId: 'inv_invalid_progress',
+        frameSequence: 1,
+        progressId: 'files',
+        current: Number.MAX_SAFE_INTEGER + 1,
+      })
+    ).toBe(false);
+
+    const legacy: ExecuteMessageV11 = {
+      ...executeStepV7('inv_v11_console_compatibility', `console.log('legacy-v11'); return true;`),
+      protocolVersion: 11,
+    };
+    const result = await runHost([legacy], {
+      WOML_SCRIPT_HOST_PROTOCOL_VERSION: '11',
+    });
+    expect(result.messages.some(message => message.messageType === 'script_log')).toBe(false);
+    expect(result.stderr).toContain('legacy-v11');
   });
 });
 

@@ -1,0 +1,20 @@
+{
+  "profile": "woml.streaming-output-inventory/v1",
+  "paths": [
+    { "name": "process-output", "owner": "rust-process-supervisor", "phase": "SOP2" },
+    { "name": "script-console", "owner": "script-host-adapter", "phase": "SOP3" },
+    { "name": "execution-progress", "owner": "runtime-progress-adapter", "phase": "SOP4" },
+    { "name": "lifecycle-progress", "owner": "runtime-progress-adapter", "phase": "SOP4" },
+    { "name": "schedule-progress", "owner": "runtime-progress-adapter", "phase": "SOP4" },
+    { "name": "interval-progress", "owner": "runtime-progress-adapter", "phase": "SOP4" },
+    { "name": "workflow-call-progress", "owner": "runtime-progress-adapter", "phase": "SOP4" },
+    { "name": "runtime-policy-progress", "owner": "runtime-progress-adapter", "phase": "SOP4" },
+    { "name": "foreground-presentation", "owner": "operational-subscriber", "phase": "SOP5" },
+    { "name": "background-runtime-log", "owner": "compatibility-log-sink", "phase": "SOP5" },
+    { "name": "operations-stream", "owner": "operational-stream-gateway", "phase": "SOP5" },
+    { "name": "logs-follower", "owner": "cursor-replay-client", "phase": "SOP5" },
+    { "name": "backup", "owner": "explicit-output-export", "phase": "SOP6" },
+    { "name": "prune", "owner": "output-retention-authority", "phase": "SOP6" },
+    { "name": "observability", "owner": "body-free-output-metrics", "phase": "SOP7" }
+  ]
+}

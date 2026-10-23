@@ -7,7 +7,11 @@ import {
   executeRetentionWithRustAsync,
   planRetentionWithRust,
   maintainArtifactsWithRust,
+  planOperationalOutputPruneWithRust,
+  pruneOperationalOutputWithRust,
   type RustArtifactMaintenanceV1,
+  type OperationalOutputPrunePlanV1,
+  type OperationalOutputPruneResultV1,
   type RetentionPolicyV1,
   type RustRetentionExecutionV1,
   type RustRetentionPlanV1,
@@ -24,9 +28,14 @@ export interface AutomaticRetentionConfiguration {
 
 export interface AutomaticRetentionHandle {
   readonly nextRunAt?: string;
-  runNow(): Promise<(RustRetentionExecutionV1 & { readonly artifacts?: RustArtifactMaintenanceV1 }) | undefined>;
+  runNow(): Promise<(RustRetentionExecutionV1 & RetentionExtras) | undefined>;
   close(): void;
 }
+
+type RetentionExtras = {
+  readonly artifacts?: RustArtifactMaintenanceV1;
+  readonly output: OperationalOutputPruneResultV1;
+};
 
 type RetentionTimer = number | ReturnType<typeof setTimeout>;
 
@@ -176,8 +185,11 @@ export async function runProductionRetention(
     readonly artifactSecrets?: Readonly<Record<string, string>>;
   } = {}
 ): Promise<
-  | (RustRetentionPlanV1 & { readonly artifacts?: RustArtifactMaintenanceV1 })
-  | (RustRetentionExecutionV1 & { readonly artifacts?: RustArtifactMaintenanceV1 })
+  | (RustRetentionPlanV1 & {
+      readonly artifacts?: RustArtifactMaintenanceV1;
+      readonly output: OperationalOutputPrunePlanV1;
+    })
+  | (RustRetentionExecutionV1 & RetentionExtras)
 > {
   await assertStateDatabase(args.statePath);
   const now = options.now ?? new Date();
@@ -201,7 +213,12 @@ export async function runProductionRetention(
           true,
           { nativeCorePath: options.nativeCorePath }
         );
-    return { ...result, ...(artifacts === undefined ? {} : { artifacts }) };
+    const output = planOperationalOutputPruneWithRust(
+      args.statePath,
+      new Date(now.getTime() - args.beforeMs).toISOString(),
+      { nativeCorePath: options.nativeCorePath }
+    );
+    return { ...result, output, ...(artifacts === undefined ? {} : { artifacts }) };
   }
   const result = executeRetentionWithRust(
     args.statePath,
@@ -222,10 +239,16 @@ export async function runProductionRetention(
         false,
         { nativeCorePath: options.nativeCorePath }
       );
-  return { ...result, ...(artifacts === undefined ? {} : { artifacts }) };
+  const output = pruneOperationalOutputWithRust(
+    args.statePath,
+    new Date(now.getTime() - args.beforeMs).toISOString(),
+    { nativeCorePath: options.nativeCorePath }
+  );
+  return { ...result, output, ...(artifacts === undefined ? {} : { artifacts }) };
 }
 
 const DAY_MS = 24 * 60 * 60 * 1_000;
+const DEFAULT_OPERATIONAL_OUTPUT_RETENTION_MS = 7 * DAY_MS;
 
 export function nextRetentionTime(now: Date, hourUtc: number): Date {
   const next = new Date(now);
@@ -242,7 +265,7 @@ export function startAutomaticRetention(options: {
   readonly now?: () => Date;
   readonly setTimer?: (callback: () => void, delay: number) => RetentionTimer;
   readonly clearTimer?: (timer: RetentionTimer) => void;
-  readonly onResult?: (execution: RustRetentionExecutionV1) => void;
+  readonly onResult?: (execution: RustRetentionExecutionV1 & RetentionExtras) => void;
   readonly onError?: (error: unknown) => void;
   readonly artifactAuthority?: ArtifactRuntimeAuthorityV1;
   readonly artifactSecrets?: Readonly<Record<string, string>>;
@@ -258,9 +281,9 @@ export function startAutomaticRetention(options: {
   const next = nextRetentionTime(now(), hour);
   let timer: RetentionTimer | undefined;
   let closed = false;
-  let active: Promise<(RustRetentionExecutionV1 & { readonly artifacts?: RustArtifactMaintenanceV1 }) | undefined> | undefined;
+  let active: Promise<(RustRetentionExecutionV1 & RetentionExtras) | undefined> | undefined;
 
-  const runNow = (): Promise<(RustRetentionExecutionV1 & { readonly artifacts?: RustArtifactMaintenanceV1 }) | undefined> => {
+  const runNow = (): Promise<(RustRetentionExecutionV1 & RetentionExtras) | undefined> => {
     if (closed) return Promise.resolve(undefined);
     if (active !== undefined) return active;
     const current = now();
@@ -290,8 +313,16 @@ export function startAutomaticRetention(options: {
               false,
               { nativeCorePath: options.nativeCorePath }
             );
+        const output = pruneOperationalOutputWithRust(
+          options.statePath,
+          new Date(
+            current.getTime() - DEFAULT_OPERATIONAL_OUTPUT_RETENTION_MS
+          ).toISOString(),
+          { nativeCorePath: options.nativeCorePath }
+        );
         const combined = {
           ...execution,
+          output,
           ...(artifacts === undefined ? {} : { artifacts }),
         };
         options.onResult?.(combined);

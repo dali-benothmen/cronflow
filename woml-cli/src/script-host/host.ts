@@ -18,10 +18,13 @@ import type {
   HostReportedFailure,
   JsonValue,
   ModuleRegisteredMessage,
+  ProgressAckMessage,
+  ProgressReportMessage,
   RegisterModuleMessage,
   ScriptAttempt,
   ScriptHostLimits,
   ScriptHostProtocolVersion,
+  ScriptLogMessage,
   SuccessMessage,
 } from './types';
 import type {
@@ -39,6 +42,8 @@ export interface ScriptHostOptions {
       | CompletedMessage
       | CapabilityCallMessage
       | FetchObservationMessage
+      | ProgressReportMessage
+      | ScriptLogMessage
       | ModuleRegisteredMessage
   ) => Promise<void>;
   readonly protocolVersion?: ScriptHostProtocolVersion;
@@ -82,7 +87,7 @@ function moduleRegisteredMessage(
   return request.protocolVersion === 6 ||
     request.protocolVersion === 7 ||
     request.protocolVersion === 8 ||
-    (request.protocolVersion === 9 || request.protocolVersion === 10 || request.protocolVersion === 11)
+    (request.protocolVersion === 9 || request.protocolVersion === 10 || request.protocolVersion === 11 || request.protocolVersion === 12)
     ? {
         ...base,
         protocolVersion: request.protocolVersion,
@@ -163,6 +168,8 @@ export class ScriptHost {
       | CompletedMessage
       | CapabilityCallMessage
       | FetchObservationMessage
+      | ProgressReportMessage
+      | ScriptLogMessage
       | ModuleRegisteredMessage
   ) => Promise<void>;
   readonly #protocolVersion: ScriptHostProtocolVersion;
@@ -180,6 +187,8 @@ export class ScriptHost {
   >();
   readonly #activeFetches = new Map<string, Set<string>>();
   readonly #closedFetchAcks = new Set<string>();
+  readonly #pendingProgressAcks = new Map<string, Set<number>>();
+  readonly #closedProgressAcks = new Set<string>();
   readonly #moduleBundles = new Map<string, CachedModuleArtifact>();
   #moduleCacheBytes = 0;
   #aborted = false;
@@ -212,6 +221,10 @@ export class ScriptHost {
       this.#fetchObservationAck(message);
       return;
     }
+    if (message.messageType === 'progress_ack') {
+      this.#progressAck(message);
+      return;
+    }
     if (this.#tasks.has(message.invocationId)) {
       throw new MessageProtocolError(
         `Invocation ID "${message.invocationId}" is already active.`
@@ -233,7 +246,7 @@ export class ScriptHost {
       message.protocolVersion === 6 ||
       message.protocolVersion === 7 ||
       message.protocolVersion === 8 ||
-      (message.protocolVersion === 9 || message.protocolVersion === 10 || message.protocolVersion === 11)
+      (message.protocolVersion === 9 || message.protocolVersion === 10 || message.protocolVersion === 11 || message.protocolVersion === 12)
         ? `sha256:${new Bun.CryptoHasher('sha256')
             .update(message.sourceMap)
             .digest('hex')}`
@@ -243,7 +256,7 @@ export class ScriptHost {
       ((message.protocolVersion === 6 ||
         message.protocolVersion === 7 ||
         message.protocolVersion === 8 ||
-        (message.protocolVersion === 9 || message.protocolVersion === 10 || message.protocolVersion === 11)) &&
+        (message.protocolVersion === 9 || message.protocolVersion === 10 || message.protocolVersion === 11 || message.protocolVersion === 12)) &&
         sourceMapDigest !== message.sourceMapDigest);
     if (digestMismatch) {
       void this.#send(
@@ -263,7 +276,7 @@ export class ScriptHost {
         ((message.protocolVersion === 6 ||
           message.protocolVersion === 7 ||
           message.protocolVersion === 8 ||
-          (message.protocolVersion === 9 || message.protocolVersion === 10 || message.protocolVersion === 11)) &&
+          (message.protocolVersion === 9 || message.protocolVersion === 10 || message.protocolVersion === 11 || message.protocolVersion === 12)) &&
           (existing.sourceMap !== message.sourceMap ||
             existing.sourceMapDigest !== message.sourceMapDigest)))
     ) {
@@ -276,7 +289,7 @@ export class ScriptHost {
       (message.protocolVersion === 6 ||
       message.protocolVersion === 7 ||
       message.protocolVersion === 8 ||
-      (message.protocolVersion === 9 || message.protocolVersion === 10 || message.protocolVersion === 11)
+      (message.protocolVersion === 9 || message.protocolVersion === 10 || message.protocolVersion === 11 || message.protocolVersion === 12)
         ? Buffer.byteLength(message.sourceMap, 'utf8')
         : 0);
     const individualLimitExceeded =
@@ -284,7 +297,7 @@ export class ScriptHost {
       ((message.protocolVersion === 6 ||
         message.protocolVersion === 7 ||
         message.protocolVersion === 8 ||
-        (message.protocolVersion === 9 || message.protocolVersion === 10 || message.protocolVersion === 11)) &&
+        (message.protocolVersion === 9 || message.protocolVersion === 10 || message.protocolVersion === 11 || message.protocolVersion === 12)) &&
         Buffer.byteLength(message.sourceMap, 'utf8') >
           MAX_MODULE_ARTIFACT_BYTES);
     if (
@@ -308,7 +321,7 @@ export class ScriptHost {
         ...(message.protocolVersion === 6 ||
         message.protocolVersion === 7 ||
         message.protocolVersion === 8 ||
-        (message.protocolVersion === 9 || message.protocolVersion === 10 || message.protocolVersion === 11)
+        (message.protocolVersion === 9 || message.protocolVersion === 10 || message.protocolVersion === 11 || message.protocolVersion === 12)
           ? {
               sourceMap: message.sourceMap,
               sourceMapDigest: message.sourceMapDigest,
@@ -337,6 +350,8 @@ export class ScriptHost {
     this.#pendingFetchAcks.clear();
     this.#activeFetches.clear();
     this.#closedFetchAcks.clear();
+    this.#pendingProgressAcks.clear();
+    this.#closedProgressAcks.clear();
     this.#moduleBundles.clear();
     this.#moduleCacheBytes = 0;
   }
@@ -395,6 +410,23 @@ export class ScriptHost {
       messageType: 'fetch_observation_ack',
       requestId: message.requestId,
       ack: message,
+    } satisfies ScriptWorkerInbound);
+  }
+
+  #progressAck(message: ProgressAckMessage): void {
+    const worker = this.#workers.get(message.requestId);
+    const pending = this.#pendingProgressAcks.get(message.requestId);
+    if (worker === undefined || pending === undefined || !pending.delete(message.frameSequence)) {
+      const key = `${message.requestId}\0${message.frameSequence}`;
+      if (this.#closedProgressAcks.delete(key)) return;
+      throw new MessageProtocolError(
+        `Progress acknowledgement references unknown frame ${message.frameSequence}.`
+      );
+    }
+    worker.postMessage({
+      messageType: 'progress_ack',
+      requestId: message.requestId,
+      frameSequence: message.frameSequence,
     } satisfies ScriptWorkerInbound);
   }
 
@@ -527,7 +559,7 @@ export class ScriptHost {
           request.protocolVersion === 6 ||
           request.protocolVersion === 7 ||
           request.protocolVersion === 8 ||
-          (request.protocolVersion === 9 || request.protocolVersion === 10 || request.protocolVersion === 11)) &&
+          (request.protocolVersion === 9 || request.protocolVersion === 10 || request.protocolVersion === 11 || request.protocolVersion === 12)) &&
         containsKnownSecret(
           response.result,
           Object.values(request.bindings.secrets)
@@ -554,7 +586,7 @@ export class ScriptHost {
         request.protocolVersion === 6 ||
         request.protocolVersion === 7 ||
         request.protocolVersion === 8 ||
-        (request.protocolVersion === 9 || request.protocolVersion === 10 || request.protocolVersion === 11)) &&
+        (request.protocolVersion === 9 || request.protocolVersion === 10 || request.protocolVersion === 11 || request.protocolVersion === 12)) &&
       includesSecret
     ) {
       await this.#send(
@@ -639,6 +671,9 @@ export class ScriptHost {
           ?.keys() ?? []) {
           this.#closedFetchAcks.add(`${request.invocationId}\0${requestId}`);
         }
+        for (const sequence of this.#pendingProgressAcks.get(request.invocationId) ?? []) {
+          this.#closedProgressAcks.add(`${request.invocationId}\0${sequence}`);
+        }
         while (this.#closedCalls.size > 4_096) {
           const oldest = this.#closedCalls.values().next().value;
           if (oldest === undefined) break;
@@ -649,9 +684,15 @@ export class ScriptHost {
           if (oldest === undefined) break;
           this.#closedFetchAcks.delete(oldest);
         }
+        while (this.#closedProgressAcks.size > 4_096) {
+          const oldest = this.#closedProgressAcks.values().next().value;
+          if (oldest === undefined) break;
+          this.#closedProgressAcks.delete(oldest);
+        }
         this.#pendingCalls.delete(request.invocationId);
         this.#pendingFetchAcks.delete(request.invocationId);
         this.#activeFetches.delete(request.invocationId);
+        this.#pendingProgressAcks.delete(request.invocationId);
         profileSync('host', 'host.terminate_worker', measurements => {
           identifyInvocation(measurements, request);
           worker.terminate();
@@ -669,6 +710,7 @@ export class ScriptHost {
       this.#pendingCalls.set(request.invocationId, new Set());
       this.#pendingFetchAcks.set(request.invocationId, new Map());
       this.#activeFetches.set(request.invocationId, new Set());
+      this.#pendingProgressAcks.set(request.invocationId, new Set());
       worker.onmessage = (event: MessageEvent<ScriptWorkerOutbound>) => {
         const message = event.data;
         profileSync(
@@ -686,7 +728,8 @@ export class ScriptHost {
         if (message.messageType === 'completed') {
           if (
             (this.#pendingFetchAcks.get(request.invocationId)?.size ?? 0) > 0 ||
-            (this.#activeFetches.get(request.invocationId)?.size ?? 0) > 0
+            (this.#activeFetches.get(request.invocationId)?.size ?? 0) > 0 ||
+            (this.#pendingProgressAcks.get(request.invocationId)?.size ?? 0) > 0
           ) {
             finish({
               kind: 'crashed',
@@ -696,6 +739,74 @@ export class ScriptHost {
             return;
           }
           finish({ kind: 'response', response: message.response });
+          return;
+        }
+        if (message.messageType === 'script_log') {
+          if (
+            request.protocolVersion !== 12 ||
+            message.requestId !== request.invocationId ||
+            !Number.isSafeInteger(message.frameSequence) ||
+            message.frameSequence < 1 ||
+            !['debug', 'info', 'warn', 'error'].includes(message.level) ||
+            typeof message.text !== 'string' ||
+            Buffer.byteLength(message.text, 'utf8') > 4_096 ||
+            message.text.includes('\0')
+          ) {
+            finish({
+              kind: 'crashed',
+              message: 'The isolated script Worker emitted an invalid script-log frame.',
+            });
+            return;
+          }
+          void this.#send({
+            protocol: 'woml.script-host',
+            protocolVersion: 12,
+            messageType: 'script_log',
+            requestId: message.requestId,
+            frameSequence: message.frameSequence,
+            level: message.level,
+            text: message.text,
+          }).catch(() => {
+            finish({ kind: 'crashed', message: 'Script output could not be sent to Rust.' });
+          });
+          return;
+        }
+        if (message.messageType === 'progress_report') {
+          if (
+            request.protocolVersion !== 12 ||
+            message.requestId !== request.invocationId ||
+            !Number.isSafeInteger(message.frameSequence) ||
+            message.frameSequence < 1
+          ) {
+            finish({
+              kind: 'crashed',
+              message: 'The isolated script Worker emitted an invalid progress frame.',
+            });
+            return;
+          }
+          const pending = this.#pendingProgressAcks.get(request.invocationId);
+          if (pending === undefined || pending.has(message.frameSequence)) {
+            finish({
+              kind: 'crashed',
+              message: 'The isolated script Worker reused a progress frame sequence.',
+            });
+            return;
+          }
+          pending.add(message.frameSequence);
+          void this.#send({
+            protocol: 'woml.script-host',
+            protocolVersion: 12,
+            messageType: 'progress_report',
+            requestId: message.requestId,
+            frameSequence: message.frameSequence,
+            progressId: message.progressId,
+            ...(message.current === undefined ? {} : { current: message.current }),
+            ...(message.total === undefined ? {} : { total: message.total }),
+            ...(message.unit === undefined ? {} : { unit: message.unit }),
+            ...(message.message === undefined ? {} : { message: message.message }),
+          }).catch(() => {
+            finish({ kind: 'crashed', message: 'Progress could not be sent to Rust.' });
+          });
           return;
         }
         if (message.messageType === 'fetch_observation') {
@@ -708,7 +819,8 @@ export class ScriptHost {
               request.protocolVersion !== 8 &&
               request.protocolVersion !== 9 &&
               request.protocolVersion !== 10 &&
-              request.protocolVersion !== 11) ||
+              request.protocolVersion !== 11 &&
+              request.protocolVersion !== 12) ||
             observation.invocationId !== request.invocationId
           ) {
             finish({
@@ -761,7 +873,8 @@ export class ScriptHost {
             request.protocolVersion !== 8 &&
             request.protocolVersion !== 9 &&
             request.protocolVersion !== 10 &&
-            request.protocolVersion !== 11) ||
+            request.protocolVersion !== 11 &&
+            request.protocolVersion !== 12) ||
           call.invocationId !== request.invocationId ||
           call.runId !== request.runId ||
           call.nodeId !== request.nodeId ||
@@ -825,7 +938,7 @@ export class ScriptHost {
           request.protocolVersion === 6 ||
           request.protocolVersion === 7 ||
           request.protocolVersion === 8 ||
-          (request.protocolVersion === 9 || request.protocolVersion === 10 || request.protocolVersion === 11)
+          (request.protocolVersion === 9 || request.protocolVersion === 10 || request.protocolVersion === 11 || request.protocolVersion === 12)
             ? request.attempt
             : undefined;
         profileSync('host', 'host.post_worker_request', measurements => {
@@ -838,6 +951,7 @@ export class ScriptHost {
           worker.postMessage({
             messageType: 'execute',
             request: {
+            protocolVersion: request.protocolVersion,
             invocationId: request.invocationId,
             runId: request.runId,
             nodeId: request.nodeId,
@@ -846,7 +960,7 @@ export class ScriptHost {
             context: request.context,
             ...(request.protocolVersion === 7 ||
             request.protocolVersion === 8 ||
-            (request.protocolVersion === 9 || request.protocolVersion === 10 || request.protocolVersion === 11)
+            (request.protocolVersion === 9 || request.protocolVersion === 10 || request.protocolVersion === 11 || request.protocolVersion === 12)
               ? {
                   mode: request.mode,
                   ...(request.mode === 'lifecycle'
@@ -854,7 +968,7 @@ export class ScriptHost {
                     : {}),
                 }
               : {}),
-            ...((request.protocolVersion === 8 || (request.protocolVersion === 9 || request.protocolVersion === 10 || request.protocolVersion === 11)) &&
+            ...((request.protocolVersion === 8 || (request.protocolVersion === 9 || request.protocolVersion === 10 || request.protocolVersion === 11 || request.protocolVersion === 12)) &&
             request.reusable !== undefined
               ? {
                   reusable: request.reusable,
@@ -869,14 +983,14 @@ export class ScriptHost {
             request.protocolVersion === 6 ||
             request.protocolVersion === 7 ||
             request.protocolVersion === 8 ||
-            (request.protocolVersion === 9 || request.protocolVersion === 10 || request.protocolVersion === 11)
+            (request.protocolVersion === 9 || request.protocolVersion === 10 || request.protocolVersion === 11 || request.protocolVersion === 12)
               ? { bindings: request.bindings }
               : {}),
             ...(request.protocolVersion === 5 ||
             request.protocolVersion === 6 ||
             request.protocolVersion === 7 ||
             request.protocolVersion === 8 ||
-            (request.protocolVersion === 9 || request.protocolVersion === 10 || request.protocolVersion === 11)
+            (request.protocolVersion === 9 || request.protocolVersion === 10 || request.protocolVersion === 11 || request.protocolVersion === 12)
               ? {
                   modules: request.modules.map(module => {
                     const artifact = this.#moduleBundles.get(
@@ -893,7 +1007,7 @@ export class ScriptHost {
                       ...(request.protocolVersion === 6 ||
                       request.protocolVersion === 7 ||
                       request.protocolVersion === 8 ||
-                      (request.protocolVersion === 9 || request.protocolVersion === 10 || request.protocolVersion === 11)
+                      (request.protocolVersion === 9 || request.protocolVersion === 10 || request.protocolVersion === 11 || request.protocolVersion === 12)
                         ? {
                             sourceMap: artifact.sourceMap,
                             sourceMapDigest: artifact.sourceMapDigest,

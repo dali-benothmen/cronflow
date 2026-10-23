@@ -32,6 +32,7 @@ services.events
 services.workflows
 services.state
 services.process
+services.progress
 services.telegram
 services.discord
 services.whatsapp
@@ -82,6 +83,7 @@ step. See [Lifecycle and Local Run Control](woml-lifecycle-and-run-control.md).
 | Start exact background workflow work | `services.workflows.start()` | Durable child run ID without waiting for completion |
 | Small workflow-owned correctness data | `services.state` | Versioned durable JSON state shared by future runs of the same workflow ID |
 | Run an approved local or infrastructure tool | `services.process.run()` | Rust-supervised literal arguments, policy, containment, bounded output, and fail-closed recovery |
+| Report bounded current-step progress | `services.progress.report()` | Coalesced operational progress that never becomes workflow state |
 | Send a Telegram message or reply | `services.telegram.send()` | Supervised Bot API delivery with a stable result |
 | Send a Discord message or reply | `services.discord.send()` | Supervised REST delivery using a shared bot identity |
 | Send an approved WhatsApp template | `services.whatsapp.send()` | Supervised official Cloud API template delivery |
@@ -120,6 +122,12 @@ woml test examples/storageWorkflow.woml
 woml test examples/cacheWorkflow.woml
 woml test examples/process/project-checks.woml --allow-process bun
 ```
+
+Add `stream: true` to an approved process request when operators need its
+stdout/stderr before completion. Use `services.progress.report()` when the
+script can provide a named current/total/message lane. The complete API,
+following commands, retention behavior, and security limits are documented in
+[Streaming Output and Progress](woml-streaming-output-and-progress.md).
 
 The HTTP example needs internet access. PostgreSQL additionally needs
 `POSTGRES_URL` configured with `woml secrets set POSTGRES_URL`:

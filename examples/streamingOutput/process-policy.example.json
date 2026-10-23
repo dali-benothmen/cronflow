@@ -1,0 +1,25 @@
+{
+  "contract": "woml.process-policy",
+  "contractVersion": 1,
+  "enabled": true,
+  "modes": { "foreground": true, "background": true },
+  "projectRoot": "../..",
+  "executables": [
+    {
+      "alias": "terraform",
+      "path": "/replace/with/the/absolute/path/to/terraform"
+    },
+    {
+      "alias": "kubectl",
+      "path": "/replace/with/the/absolute/path/to/kubectl"
+    }
+  ],
+  "workingDirectories": ["."],
+  "environment": { "inherit": [], "allow": [] },
+  "limits": {
+    "maxTimeoutMs": 1200000,
+    "maxOutputBytes": 262144,
+    "maxStreamBytes": 16777216,
+    "maxConcurrent": 2
+  }
+}

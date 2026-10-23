@@ -78,6 +78,24 @@ describe('Artifact Policy v1 preflight', () => {
     );
   });
 
+  test('accepts only an explicit bounded operational-output rollover grant', async () => {
+    const { root, policy } = await fixture();
+    const prepared = await preflightArtifactPolicy({
+      ...policy,
+      operationalOutput: { enabled: true, retentionMs: 86_400_000 },
+    }, root, 'foreground');
+    expect(prepared.operationalOutput).toEqual({
+      enabled: true,
+      retentionMs: 86_400_000,
+    });
+    await expect(preflightArtifactPolicy({
+      ...policy,
+      operationalOutput: { enabled: false, retentionMs: 86_400_000 },
+    }, root, 'foreground')).rejects.toMatchObject({
+      code: 'WOML_ARTIFACT_POLICY_INVALID',
+    });
+  });
+
   test('rejects background use when policy grants foreground only', async () => {
     const { root, policy } = await fixture();
     await expect(

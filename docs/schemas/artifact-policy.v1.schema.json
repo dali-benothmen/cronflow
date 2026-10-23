@@ -80,6 +80,15 @@
         "minimumSecretBytes": { "const": 8 }
       }
     },
+    "operationalOutput": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["enabled", "retentionMs"],
+      "properties": {
+        "enabled": { "const": true },
+        "retentionMs": { "type": "integer", "minimum": 3600000, "maximum": 31536000000 }
+      }
+    },
     "backend": { "$ref": "https://woml.dev/schemas/artifact-backend/v1" }
   }
 }

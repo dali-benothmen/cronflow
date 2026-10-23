@@ -5,7 +5,7 @@ use std::{
   io,
   path::{Component, Path, PathBuf},
   process::{ExitStatus, Stdio},
-  sync::Arc,
+  sync::{Arc, Mutex},
   time::{Duration, Instant},
 };
 
@@ -16,7 +16,7 @@ use thiserror::Error;
 use tokio::{
   io::{AsyncRead, AsyncReadExt},
   process::{Child, Command},
-  sync::{OwnedSemaphorePermit, Semaphore},
+  sync::{Notify, OwnedSemaphorePermit, Semaphore},
   task::JoinHandle,
 };
 
@@ -25,13 +25,21 @@ const PROCESS_PIPE_DRAIN_GRACE: Duration = Duration::from_secs(1);
 
 use crate::{
   CapabilityCallRequest, CapabilityCancellationToken, CapabilityDescriptor, CapabilityEffect,
-  CapabilityFailure, CapabilityFailureKind, CapabilityHandler,
+  CapabilityFailure, CapabilityFailureKind, CapabilityHandler, LazyOperationalOutputStore,
+  OperationalBodyV1, OperationalCloseStatusV1, OperationalIdentityV1, OperationalOutputStore,
+  OperationalRecordDraftV1, OperationalSourceV1,
 };
 
 pub const PROCESS_CONTRACT: &str = "woml.process";
 pub const PROCESS_CONTRACT_VERSION: u32 = 1;
+pub const PROCESS_CONTRACT_VERSION_V2: u32 = 2;
 pub const PROCESS_POLICY_CONTRACT: &str = "woml.process-policy";
 pub const PROCESS_POLICY_CONTRACT_VERSION: u32 = 1;
+const MAX_PROCESS_STREAM_BYTES: usize = 256 * 1024 * 1024;
+
+fn default_process_stream_bytes() -> usize {
+  crate::DEFAULT_OPERATIONAL_INLINE_RUN_BYTES as usize
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(rename_all = "lowercase")]
@@ -80,6 +88,8 @@ pub struct ProcessPolicyEnvironment {
 pub struct ProcessPolicyLimits {
   pub max_timeout_ms: u64,
   pub max_output_bytes: usize,
+  #[serde(default = "default_process_stream_bytes")]
+  pub max_stream_bytes: usize,
   pub max_concurrent: usize,
 }
 
@@ -121,11 +131,13 @@ struct ProcessRunRequest {
   timeout_ms: u64,
   accept_exit_codes: Vec<i32>,
   output: ProcessOutputRequest,
+  #[serde(default)]
+  stream: bool,
 }
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
-struct ProcessRunResult {
+struct ProcessRunResultV1 {
   contract: &'static str,
   contract_version: u32,
   kind: &'static str,
@@ -138,6 +150,28 @@ struct ProcessRunResult {
   stdout_truncated: bool,
   stderr_truncated: bool,
   duration_ms: f64,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ProcessRunResultV2 {
+  contract: &'static str,
+  contract_version: u32,
+  kind: &'static str,
+  exit_code: Option<i32>,
+  signal: Option<String>,
+  stdout: String,
+  stderr: String,
+  stdout_bytes: u64,
+  stderr_bytes: u64,
+  stdout_truncated: bool,
+  stderr_truncated: bool,
+  duration_ms: f64,
+  streamed: bool,
+  stream_start_sequence: Option<u64>,
+  stream_end_sequence: Option<u64>,
+  stream_truncated: bool,
+  stream_artifact: Option<Value>,
 }
 
 #[derive(Debug)]
@@ -174,6 +208,9 @@ struct ExecutableIdentity {
 pub struct ManagedProcessHandler {
   policy: Arc<PreparedProcessPolicy>,
   concurrency: Arc<Semaphore>,
+  output_store: Arc<Mutex<Option<Arc<LazyOperationalOutputStore>>>>,
+  output_artifacts: Arc<Mutex<Option<Arc<crate::ManagedArtifactPutHandler>>>>,
+  resolved_secrets: Arc<BTreeMap<String, String>>,
 }
 
 impl ManagedProcessHandler {
@@ -186,7 +223,59 @@ impl ManagedProcessHandler {
     Ok(Self {
       policy: Arc::new(prepared),
       concurrency: Arc::new(Semaphore::new(max_concurrent)),
+      output_store: Arc::new(Mutex::new(None)),
+      output_artifacts: Arc::new(Mutex::new(None)),
+      resolved_secrets: Arc::new(BTreeMap::new()),
     })
+  }
+
+  pub fn new_with_secrets(
+    policy: ProcessPolicyV1,
+    mode: ProcessRuntimeMode,
+    resolved_secrets: Arc<BTreeMap<String, String>>,
+  ) -> Result<Self, ProcessPolicyError> {
+    let mut handler = Self::new(policy, mode)?;
+    handler.resolved_secrets = resolved_secrets;
+    Ok(handler)
+  }
+
+  pub fn configure_output_store(
+    &self,
+    store: Arc<LazyOperationalOutputStore>,
+  ) -> Result<(), ProcessPolicyError> {
+    let mut configured = self.output_store.lock().map_err(|_| {
+      ProcessPolicyError::Invalid("the operational-output authority is unavailable".to_string())
+    })?;
+    if let Some(existing) = configured.as_ref() {
+      if !Arc::ptr_eq(existing, &store) {
+        return Err(ProcessPolicyError::Invalid(
+          "the process handler is already bound to another operational-output authority"
+            .to_string(),
+        ));
+      }
+      return Ok(());
+    }
+    *configured = Some(store);
+    Ok(())
+  }
+
+  pub(crate) fn configure_output_artifacts(
+    &self,
+    handler: Arc<crate::ManagedArtifactPutHandler>,
+  ) -> Result<(), ProcessPolicyError> {
+    let mut configured = self.output_artifacts.lock().map_err(|_| {
+      ProcessPolicyError::Invalid("the operational artifact authority is unavailable".to_string())
+    })?;
+    if let Some(existing) = configured.as_ref() {
+      if !Arc::ptr_eq(existing, &handler) {
+        return Err(ProcessPolicyError::Invalid(
+          "the process handler is already bound to another artifact authority".to_string(),
+        ));
+      }
+      return Ok(());
+    }
+    *configured = Some(handler);
+    Ok(())
   }
 
   fn parse_and_authorize(&self, input: &Value) -> Result<AuthorizedProcess, CapabilityFailure> {
@@ -407,6 +496,7 @@ impl CapabilityHandler for ManagedProcessHandler {
         "stderrMode".to_string(),
         Value::String(output_mode_name(request.output.stderr).to_string()),
       ),
+      ("stream".to_string(), Value::Bool(request.stream)),
     ])
   }
 
@@ -475,7 +565,65 @@ impl CapabilityHandler for ManagedProcessHandler {
           "The runtime process concurrency limit has been reached.",
         )
       })?;
-      execute_process(authorized, policy, cancellation, permit).await
+      execute_process(authorized, policy, cancellation, permit, None).await
+    })
+  }
+
+  fn execute_request_scoped(
+    &self,
+    request: &CapabilityCallRequest,
+    workflow_scope: Option<String>,
+    cancellation: CapabilityCancellationToken,
+  ) -> BoxFuture<'static, Result<Value, CapabilityFailure>> {
+    let authorized = match self.parse_and_authorize(&request.input) {
+      Ok(authorized) => authorized,
+      Err(error) => return Box::pin(async move { Err(error) }),
+    };
+    let stream = if authorized.request.stream {
+      let Some(workflow_id) = workflow_scope else {
+        return Box::pin(async move { Err(output_authority_failure(false)) });
+      };
+      let store = match self.output_store.lock() {
+        Ok(configured) => configured.clone(),
+        Err(_) => None,
+      };
+      let Some(store) = store else {
+        return Box::pin(async move { Err(output_authority_failure(false)) });
+      };
+      Some(ProcessStreamTarget {
+        store,
+        identity: OperationalIdentityV1 {
+          workflow_id,
+          run_id: request.run_id.clone(),
+          node_id: Some(request.node_id.clone()),
+          attempt: Some(request.attempt_number),
+          invocation_id: Some(request.invocation_id.clone()),
+          phase: if request.invocation_id.starts_with("corr_") {
+            crate::OperationalExecutionPhaseV1::Corrective
+          } else {
+            crate::OperationalExecutionPhaseV1::Forward
+          },
+        },
+        resolved_secrets: Arc::clone(&self.resolved_secrets),
+        artifact_handler: self
+          .output_artifacts
+          .lock()
+          .ok()
+          .and_then(|value| value.clone()),
+      })
+    } else {
+      None
+    };
+    let policy = Arc::clone(&self.policy);
+    let concurrency = Arc::clone(&self.concurrency);
+    Box::pin(async move {
+      let permit = concurrency.try_acquire_owned().map_err(|_| {
+        rejected(
+          "WOML_PROCESS_CONCURRENCY_LIMIT",
+          "The runtime process concurrency limit has been reached.",
+        )
+      })?;
+      execute_process(authorized, policy, cancellation, permit, stream).await
     })
   }
 }
@@ -494,11 +642,60 @@ struct CapturedOutput {
   truncated: bool,
 }
 
+#[derive(Debug, Default)]
+struct ProcessStreamState {
+  start_sequence: Option<u64>,
+  end_sequence: Option<u64>,
+  truncated: bool,
+  retained_bytes: u64,
+  artifact_writer: Option<crate::artifacts::OperationalArtifactWriter>,
+  artifact: Option<crate::ArtifactReferenceV1>,
+}
+
+#[derive(Debug, Default)]
+struct ProcessStreamFailure {
+  failure: Mutex<Option<CapabilityFailure>>,
+  notify: Notify,
+}
+
+impl ProcessStreamFailure {
+  fn report(&self, failure: CapabilityFailure) {
+    if let Ok(mut stored) = self.failure.lock() {
+      if stored.is_none() {
+        *stored = Some(failure);
+        self.notify.notify_one();
+      }
+    }
+  }
+
+  fn take(&self) -> Option<CapabilityFailure> {
+    self.failure.lock().ok()?.take()
+  }
+}
+
+#[derive(Debug, Clone)]
+struct ProcessStreamTarget {
+  store: Arc<LazyOperationalOutputStore>,
+  identity: OperationalIdentityV1,
+  resolved_secrets: Arc<BTreeMap<String, String>>,
+  artifact_handler: Option<Arc<crate::ManagedArtifactPutHandler>>,
+}
+
+#[derive(Debug, Clone)]
+struct ActiveProcessStream {
+  store: Arc<OperationalOutputStore>,
+  identity: OperationalIdentityV1,
+  state: Arc<Mutex<ProcessStreamState>>,
+  failure: Arc<ProcessStreamFailure>,
+  max_retained_bytes: u64,
+}
+
 async fn execute_process(
   authorized: AuthorizedProcess,
   policy: Arc<PreparedProcessPolicy>,
   cancellation: CapabilityCancellationToken,
   _permit: OwnedSemaphorePermit,
+  stream_target: Option<ProcessStreamTarget>,
 ) -> Result<Value, CapabilityFailure> {
   let started = Instant::now();
   let request = authorized.request;
@@ -506,13 +703,49 @@ async fn execute_process(
   // inherited values are sensitive at this boundary. The Bun worker separately
   // redacts resolved WOML secrets because secret provenance intentionally does
   // not cross the Process v1 contract.
-  let sensitive_values = sensitive_environment_values(&policy);
+  let sensitive_values = sensitive_environment_values(
+    &policy,
+    &request.env,
+    stream_target
+      .as_ref()
+      .map(|target| target.resolved_secrets.as_ref()),
+  );
   let redaction_lookahead = sensitive_values
     .iter()
     .map(String::len)
     .max()
     .unwrap_or(0)
     .saturating_sub(1);
+  let stream = match stream_target {
+    Some(target) => {
+      let artifact_writer = target.artifact_handler.as_ref().and_then(|handler| {
+        handler
+          .begin_operational_output(
+            &target.identity.workflow_id,
+            &target.identity.run_id,
+            target.identity.node_id.as_deref()?,
+            target.identity.attempt?,
+            target.identity.invocation_id.as_deref()?,
+          )
+          .ok()
+          .flatten()
+      });
+      Some(ActiveProcessStream {
+        store: target
+          .store
+          .activate()
+          .map_err(|_| output_authority_failure(false))?,
+        identity: target.identity,
+        state: Arc::new(Mutex::new(ProcessStreamState {
+          artifact_writer,
+          ..ProcessStreamState::default()
+        })),
+        failure: Arc::new(ProcessStreamFailure::default()),
+        max_retained_bytes: policy.limits.max_stream_bytes as u64,
+      })
+    }
+    None => None,
+  };
   let mut command = Command::new(&authorized.executable);
   command
     .args(&request.args)
@@ -575,12 +808,20 @@ async fn execute_process(
     request.output.stdout,
     request.output.max_bytes,
     redaction_lookahead,
+    sensitive_values.clone(),
+    stream
+      .clone()
+      .map(|target| (target, OperationalSourceV1::Stdout)),
   ));
   let stderr_task = tokio::spawn(drain_output(
     stderr,
     request.output.stderr,
     request.output.max_bytes,
     redaction_lookahead,
+    sensitive_values.clone(),
+    stream
+      .clone()
+      .map(|target| (target, OperationalSourceV1::Stderr)),
   ));
   let timeout = tokio::time::sleep(Duration::from_millis(request.timeout_ms));
   tokio::pin!(timeout);
@@ -590,6 +831,7 @@ async fn execute_process(
       let _ = terminate_process_tree(&mut child, &mut containment).await;
       let _ = collect_output_task(stdout_task).await;
       let _ = collect_output_task(stderr_task).await;
+      close_process_stream(stream.as_ref(), OperationalCloseStatusV1::Cancelled, Some("WOML_PROCESS_CANCELLED"))?;
       return Err(failure(
         CapabilityFailureKind::Cancelled,
         "WOML_PROCESS_CANCELLED",
@@ -603,6 +845,7 @@ async fn execute_process(
       let _ = terminate_process_tree(&mut child, &mut containment).await;
       let _ = collect_output_task(stdout_task).await;
       let _ = collect_output_task(stderr_task).await;
+      close_process_stream(stream.as_ref(), OperationalCloseStatusV1::TimedOut, Some("WOML_PROCESS_TIMED_OUT"))?;
       return Err(failure(
         CapabilityFailureKind::TimedOut,
         "WOML_PROCESS_TIMED_OUT",
@@ -611,6 +854,17 @@ async fn execute_process(
         true,
         Some(safe_duration(started)),
       ));
+    }
+    failure = wait_for_process_stream_failure(stream.as_ref()), if stream.is_some() => {
+      let _ = terminate_process_tree(&mut child, &mut containment).await;
+      let _ = collect_output_task(stdout_task).await;
+      let _ = collect_output_task(stderr_task).await;
+      let _ = close_process_stream(
+        stream.as_ref(),
+        OperationalCloseStatusV1::Interrupted,
+        Some("WOML_PROCESS_OUTPUT_AUTHORITY_FAILED"),
+      );
+      return Err(failure);
     }
     status = child.wait() => status.map_err(|_| failure(
       CapabilityFailureKind::HandlerCrashed,
@@ -638,7 +892,33 @@ async fn execute_process(
   let exit_code = status.code();
   let signal = exit_signal(&status);
   let duration_ms = started.elapsed().as_secs_f64() * 1_000.0;
-  let result = ProcessRunResult {
+  let stream_status = if exit_code.is_some_and(|code| request.accept_exit_codes.contains(&code)) {
+    OperationalCloseStatusV1::Succeeded
+  } else {
+    OperationalCloseStatusV1::Failed
+  };
+  close_process_stream(
+    stream.as_ref(),
+    stream_status,
+    if matches!(stream_status, OperationalCloseStatusV1::Succeeded) {
+      None
+    } else if exit_code.is_none() {
+      Some("WOML_PROCESS_SIGNALLED")
+    } else {
+      Some("WOML_PROCESS_EXIT_CODE")
+    },
+  )?;
+  let stream_state = stream.as_ref().and_then(|stream| {
+    stream.state.lock().ok().map(|state| {
+      (
+        state.start_sequence,
+        state.end_sequence,
+        state.truncated,
+        state.artifact.clone(),
+      )
+    })
+  });
+  let result = ProcessRunResultV1 {
     contract: PROCESS_CONTRACT,
     contract_version: PROCESS_CONTRACT_VERSION,
     kind: "result",
@@ -690,7 +970,34 @@ async fn execute_process(
       Some(details),
     ));
   }
-  serde_json::to_value(result).map_err(|_| output_failure())
+  if request.contract_version == PROCESS_CONTRACT_VERSION_V2 {
+    let (stream_start_sequence, stream_end_sequence, stream_truncated, stream_artifact) =
+      stream_state.unwrap_or((None, None, false, None));
+    serde_json::to_value(ProcessRunResultV2 {
+      contract: PROCESS_CONTRACT,
+      contract_version: PROCESS_CONTRACT_VERSION_V2,
+      kind: "result",
+      exit_code: result.exit_code,
+      signal: result.signal,
+      stdout: result.stdout,
+      stderr: result.stderr,
+      stdout_bytes: result.stdout_bytes,
+      stderr_bytes: result.stderr_bytes,
+      stdout_truncated: result.stdout_truncated,
+      stderr_truncated: result.stderr_truncated,
+      duration_ms: result.duration_ms,
+      streamed: request.stream,
+      stream_start_sequence,
+      stream_end_sequence,
+      stream_truncated,
+      stream_artifact: stream_artifact
+        .map(|artifact| serde_json::to_value(artifact).map_err(|_| output_failure()))
+        .transpose()?,
+    })
+    .map_err(|_| output_failure())
+  } else {
+    serde_json::to_value(result).map_err(|_| output_failure())
+  }
 }
 
 async fn collect_output_task(
@@ -710,6 +1017,20 @@ async fn collect_output_task(
         None,
       ))
     }
+  }
+}
+
+async fn wait_for_process_stream_failure(
+  stream: Option<&ActiveProcessStream>,
+) -> CapabilityFailure {
+  let Some(stream) = stream else {
+    return std::future::pending().await;
+  };
+  loop {
+    if let Some(failure) = stream.failure.take() {
+      return failure;
+    }
+    stream.failure.notify.notified().await;
   }
 }
 
@@ -933,6 +1254,8 @@ async fn drain_output<R: AsyncRead + Unpin>(
   mode: OutputMode,
   max_bytes: usize,
   redaction_lookahead: usize,
+  sensitive_values: Vec<String>,
+  stream: Option<(ActiveProcessStream, OperationalSourceV1)>,
 ) -> Result<CapturedOutput, CapabilityFailure> {
   let capture_limit = max_bytes.saturating_add(redaction_lookahead);
   let mut captured = Vec::with_capacity(match mode {
@@ -941,6 +1264,9 @@ async fn drain_output<R: AsyncRead + Unpin>(
   });
   let mut total = 0_u64;
   let mut buffer = [0_u8; 8192];
+  let mut stream_decoder = stream
+    .as_ref()
+    .map(|_| IncrementalTextRedactor::new(&sensitive_values));
   loop {
     let read = reader
       .read(&mut buffer)
@@ -954,6 +1280,22 @@ async fn drain_output<R: AsyncRead + Unpin>(
       let remaining = capture_limit - captured.len();
       captured.extend_from_slice(&buffer[..read.min(remaining)]);
     }
+    if let (Some((target, source)), Some(decoder)) = (&stream, &mut stream_decoder) {
+      if let Some(text) = decoder.push(&buffer[..read], false) {
+        if let Err(error) = append_process_text(target, *source, &text) {
+          target.failure.report(error.clone());
+          return Err(error);
+        }
+      }
+    }
+  }
+  if let (Some((target, source)), Some(decoder)) = (&stream, &mut stream_decoder) {
+    if let Some(text) = decoder.push(&[], true) {
+      if let Err(error) = append_process_text(target, *source, &text) {
+        target.failure.report(error.clone());
+        return Err(error);
+      }
+    }
   }
   Ok(CapturedOutput {
     text: String::from_utf8_lossy(&captured).into_owned(),
@@ -962,16 +1304,258 @@ async fn drain_output<R: AsyncRead + Unpin>(
   })
 }
 
-fn sensitive_environment_values(policy: &PreparedProcessPolicy) -> Vec<String> {
+fn sensitive_environment_values(
+  policy: &PreparedProcessPolicy,
+  request_environment: &BTreeMap<String, String>,
+  resolved_secrets: Option<&BTreeMap<String, String>>,
+) -> Vec<String> {
   let mut values = policy
     .inherited_environment
     .values()
     .filter(|value| !value.is_empty())
     .cloned()
     .collect::<Vec<_>>();
+  values.extend(
+    request_environment
+      .values()
+      .filter(|value| !value.is_empty())
+      .cloned(),
+  );
+  if let Some(resolved_secrets) = resolved_secrets {
+    values.extend(
+      resolved_secrets
+        .values()
+        .filter(|value| !value.is_empty())
+        .cloned(),
+    );
+  }
   values.sort_by_key(|value| std::cmp::Reverse(value.len()));
   values.dedup();
   values
+}
+
+#[derive(Debug)]
+struct IncrementalTextRedactor {
+  pending_bytes: Vec<u8>,
+  pending_text: String,
+  secrets: Vec<String>,
+  lookahead: usize,
+}
+
+impl IncrementalTextRedactor {
+  fn new(secrets: &[String]) -> Self {
+    Self {
+      pending_bytes: Vec::new(),
+      pending_text: String::new(),
+      secrets: secrets.to_vec(),
+      lookahead: secrets
+        .iter()
+        .map(String::len)
+        .max()
+        .unwrap_or(1)
+        .saturating_sub(1),
+    }
+  }
+
+  fn push(&mut self, bytes: &[u8], eof: bool) -> Option<String> {
+    self.pending_bytes.extend_from_slice(bytes);
+    loop {
+      match std::str::from_utf8(&self.pending_bytes) {
+        Ok(value) => {
+          self.pending_text.push_str(value);
+          self.pending_bytes.clear();
+          break;
+        }
+        Err(error) => {
+          let valid = error.valid_up_to();
+          if valid > 0 {
+            let prefix = String::from_utf8_lossy(&self.pending_bytes[..valid]);
+            self.pending_text.push_str(&prefix);
+            self.pending_bytes.drain(..valid);
+          }
+          match error.error_len() {
+            Some(length) => {
+              self.pending_text.push('\u{fffd}');
+              self
+                .pending_bytes
+                .drain(..length.min(self.pending_bytes.len()));
+            }
+            None => break,
+          }
+        }
+      }
+    }
+    if eof && !self.pending_bytes.is_empty() {
+      self
+        .pending_text
+        .push_str(&String::from_utf8_lossy(&self.pending_bytes));
+      self.pending_bytes.clear();
+    }
+    for secret in &self.secrets {
+      self.pending_text = self.pending_text.replace(secret, "[redacted]");
+    }
+    let emit_bytes = if eof {
+      self.pending_text.len()
+    } else {
+      self.pending_text.len().saturating_sub(self.lookahead)
+    };
+    let mut boundary = emit_bytes;
+    while boundary > 0 && !self.pending_text.is_char_boundary(boundary) {
+      boundary -= 1;
+    }
+    if boundary == 0 {
+      return None;
+    }
+    let emitted = self.pending_text[..boundary].to_string();
+    self.pending_text.drain(..boundary);
+    (!emitted.is_empty()).then_some(emitted)
+  }
+}
+
+fn append_process_text(
+  target: &ActiveProcessStream,
+  source: OperationalSourceV1,
+  text: &str,
+) -> Result<(), CapabilityFailure> {
+  let mut remaining = text;
+  while !remaining.is_empty() {
+    let mut end = remaining.len().min(crate::MAX_OPERATIONAL_CHUNK_BYTES);
+    while end > 0 && !remaining.is_char_boundary(end) {
+      end -= 1;
+    }
+    if end == 0 {
+      return Err(output_authority_failure(true));
+    }
+    append_process_output(target, source, remaining[..end].to_string())?;
+    remaining = &remaining[end..];
+  }
+  Ok(())
+}
+
+fn append_process_output(
+  target: &ActiveProcessStream,
+  source: OperationalSourceV1,
+  text: String,
+) -> Result<(), CapabilityFailure> {
+  let byte_count = text.len() as u64;
+  let mut state = target
+    .state
+    .lock()
+    .map_err(|_| output_authority_failure(true))?;
+  if let Some(writer) = state.artifact_writer.as_mut() {
+    let source_name = match source {
+      OperationalSourceV1::Stdout => "stdout",
+      OperationalSourceV1::Stderr => "stderr",
+      OperationalSourceV1::Script => "script",
+      OperationalSourceV1::Runtime => "runtime",
+    };
+    let _ = writer.append_redacted(source_name, &text);
+  }
+  if state.truncated {
+    return Ok(());
+  }
+  if state.retained_bytes.saturating_add(byte_count) > target.max_retained_bytes {
+    let record = target
+      .store
+      .append(OperationalRecordDraftV1 {
+        identity: target.identity.clone(),
+        body: OperationalBodyV1::Truncated {
+          source,
+          dropped_bytes: byte_count,
+          reason: "inline_run_budget".to_string(),
+        },
+      })
+      .map_err(|_| output_authority_failure(true))?;
+    state.start_sequence.get_or_insert(record.sequence);
+    state.end_sequence = Some(record.sequence);
+    state.truncated = true;
+    return Ok(());
+  }
+  let record = target
+    .store
+    .append(OperationalRecordDraftV1 {
+      identity: target.identity.clone(),
+      body: OperationalBodyV1::Output {
+        source,
+        level: None,
+        text,
+        byte_count,
+      },
+    })
+    .map_err(|_| output_authority_failure(true))?;
+  state.retained_bytes = state.retained_bytes.saturating_add(byte_count);
+  state.start_sequence.get_or_insert(record.sequence);
+  state.end_sequence = Some(record.sequence);
+  Ok(())
+}
+
+fn close_process_stream(
+  stream: Option<&ActiveProcessStream>,
+  status: OperationalCloseStatusV1,
+  reason_code: Option<&str>,
+) -> Result<(), CapabilityFailure> {
+  let Some(stream) = stream else {
+    return Ok(());
+  };
+  let (writer, publish) = {
+    let mut state = stream
+      .state
+      .lock()
+      .map_err(|_| output_authority_failure(true))?;
+    (state.artifact_writer.take(), state.truncated)
+  };
+  if let Some(writer) = writer {
+    if let Ok(Some(artifact)) = writer.finish(publish) {
+      let record = stream
+        .store
+        .append(OperationalRecordDraftV1 {
+          identity: stream.identity.clone(),
+          body: OperationalBodyV1::Artifact {
+            artifact_id: artifact.id.clone(),
+            name: artifact.name.clone(),
+            size: artifact.size,
+            sha256: artifact.sha256.clone(),
+            content_type: artifact.content_type.clone(),
+          },
+        })
+        .map_err(|_| output_authority_failure(true))?;
+      let mut state = stream
+        .state
+        .lock()
+        .map_err(|_| output_authority_failure(true))?;
+      state.start_sequence.get_or_insert(record.sequence);
+      state.end_sequence = Some(record.sequence);
+      state.artifact = Some(artifact);
+    }
+  }
+  let record = stream
+    .store
+    .append(OperationalRecordDraftV1 {
+      identity: stream.identity.clone(),
+      body: OperationalBodyV1::Closed {
+        status,
+        reason_code: reason_code.map(str::to_string),
+      },
+    })
+    .map_err(|_| output_authority_failure(true))?;
+  let mut state = stream
+    .state
+    .lock()
+    .map_err(|_| output_authority_failure(true))?;
+  state.start_sequence.get_or_insert(record.sequence);
+  state.end_sequence = Some(record.sequence);
+  Ok(())
+}
+
+fn output_authority_failure(ambiguous: bool) -> CapabilityFailure {
+  failure(
+    CapabilityFailureKind::TransportFailed,
+    "WOML_PROCESS_OUTPUT_AUTHORITY_FAILED",
+    "The operational-output authority could not accept streamed process output.",
+    false,
+    ambiguous,
+    None,
+  )
 }
 
 fn redact_and_bound_output(
@@ -995,10 +1579,20 @@ fn redact_and_bound_output(
 
 fn parse_request(input: &Value) -> Result<ProcessRunRequest, CapabilityFailure> {
   let request: ProcessRunRequest = serde_json::from_value(input.clone()).map_err(|_| {
-    invalid_input("Process input does not match the frozen Process v1 request contract.")
+    invalid_input(
+      "Process input does not match the frozen Process v1 or Process v2 request contract.",
+    )
   })?;
+  let has_stream = input
+    .as_object()
+    .is_some_and(|object| object.contains_key("stream"));
+  let version_shape_valid = match request.contract_version {
+    PROCESS_CONTRACT_VERSION => !has_stream,
+    PROCESS_CONTRACT_VERSION_V2 => has_stream,
+    _ => false,
+  };
   if request.contract != PROCESS_CONTRACT
-    || request.contract_version != PROCESS_CONTRACT_VERSION
+    || !version_shape_valid
     || request.kind != "request"
     || request.args.len() > 256
     || request.env.len() > 128
@@ -1010,7 +1604,7 @@ fn parse_request(input: &Value) -> Result<ProcessRunRequest, CapabilityFailure> 
     || request.output.max_bytes > 262_144
   {
     return Err(invalid_input(
-      "Process input does not match the frozen Process v1 request contract.",
+      "Process input does not match the frozen Process v1 or Process v2 request contract.",
     ));
   }
   validate_alias_failure(&request.executable)?;
@@ -1151,11 +1745,14 @@ fn validate_limits(limits: &ProcessPolicyLimits) -> Result<(), ProcessPolicyErro
     || limits.max_timeout_ms > 86_400_000
     || limits.max_output_bytes == 0
     || limits.max_output_bytes > 262_144
+    || limits.max_stream_bytes == 0
+    || limits.max_stream_bytes > MAX_PROCESS_STREAM_BYTES
     || limits.max_concurrent == 0
     || limits.max_concurrent > 64
   {
     return Err(ProcessPolicyError::Invalid(
-      "timeout, output, or concurrency limits are outside Process Policy v1 bounds".to_string(),
+      "timeout, captured-output, streamed-output, or concurrency limits are outside Process Policy v1 bounds"
+        .to_string(),
     ));
   }
   Ok(())
@@ -1468,6 +2065,7 @@ mod tests {
       limits: ProcessPolicyLimits {
         max_timeout_ms: 5_000,
         max_output_bytes: 1_024,
+        max_stream_bytes: crate::DEFAULT_OPERATIONAL_INLINE_RUN_BYTES as usize,
         max_concurrent: 1,
       },
     }
@@ -1504,7 +2102,7 @@ mod tests {
 
   #[test]
   fn fixture_child() {
-    if std::env::var("WOML_PROCESS_FIXTURE").as_deref() != Ok("1") {
+    if std::env::var("WOML_PROCESS_FIXTURE").as_deref() != Ok("woml-process-fixture-active") {
       return;
     }
     if let Ok(role) = std::env::var("WOML_PROCESS_FIXTURE_TREE") {
@@ -1514,7 +2112,7 @@ mod tests {
         std::process::Command::new(std::env::current_exe().expect("fixture executable"))
           .args(["--exact", "process::tests::fixture_child", "--nocapture"])
           .env_clear()
-          .env("WOML_PROCESS_FIXTURE", "1")
+          .env("WOML_PROCESS_FIXTURE", "woml-process-fixture-active")
           .env("WOML_PROCESS_FIXTURE_TREE", "grandchild")
           .env("WOML_PROCESS_FIXTURE_HEARTBEAT", &heartbeat)
           .stdin(Stdio::null())
@@ -1536,7 +2134,7 @@ mod tests {
         std::thread::sleep(Duration::from_millis(10));
       }
     }
-    if std::env::var("WOML_PROCESS_FIXTURE_CWD").as_deref() == Ok("1") {
+    if std::env::var("WOML_PROCESS_FIXTURE_CWD").as_deref() == Ok("report-current-directory") {
       print!(
         "{}",
         std::env::current_dir()
@@ -1575,7 +2173,7 @@ mod tests {
       .execute(
         request(
           json!({
-            "WOML_PROCESS_FIXTURE": "1",
+            "WOML_PROCESS_FIXTURE": "woml-process-fixture-active",
             "WOML_PROCESS_FIXTURE_TEXT": "abcdefghijklmnopqrstuvwxyz"
           }),
           10,
@@ -1593,6 +2191,91 @@ mod tests {
   }
 
   #[tokio::test]
+  async fn process_v2_streams_redacted_output_and_preserves_bounded_capture() {
+    let directory = temporary_directory("stream-v2");
+    let output_path = directory.join("output.sqlite");
+    let secrets = Arc::new(BTreeMap::from([(
+      "token".to_string(),
+      "stream-secret-42".to_string(),
+    )]));
+    let handler =
+      ManagedProcessHandler::new_with_secrets(policy(), ProcessRuntimeMode::Foreground, secrets)
+        .expect("valid Process policy");
+    handler
+      .configure_output_store(Arc::new(LazyOperationalOutputStore::new(
+        &output_path,
+        "deployment-process-v2",
+      )))
+      .expect("configure output store");
+    let mut input = request(
+      json!({
+        "WOML_PROCESS_FIXTURE": "woml-process-fixture-active",
+        "WOML_PROCESS_FIXTURE_TEXT": "before-stream-secret-42-after"
+      }),
+      128,
+      vec![0],
+    );
+    input["contractVersion"] = json!(PROCESS_CONTRACT_VERSION_V2);
+    input["stream"] = json!(true);
+    let call = CapabilityCallRequest {
+      contract: crate::CAPABILITY_CALL_CONTRACT.to_string(),
+      contract_version: crate::CAPABILITY_CALL_CONTRACT_VERSION,
+      message_type: "request".to_string(),
+      invocation_id: "inv-process-v2".to_string(),
+      call_id: "call-process-v2".to_string(),
+      run_id: "run-process-v2".to_string(),
+      node_id: "runCommand".to_string(),
+      attempt_number: 1,
+      capability: "process".to_string(),
+      operation: "run".to_string(),
+      input_contract_version: 1,
+      result_contract_version: 1,
+      identity: crate::CapabilityCallIdentity {
+        mode: crate::capability::CapabilityIdentityMode::Named,
+        step_idempotency_key: format!("sha256:{}", "1".repeat(64)),
+        operation_name: "process.run.fixture".to_string(),
+        operation_key: format!("sha256:{}", "2".repeat(64)),
+        provider_idempotency_key: None,
+      },
+      limits: crate::CapabilityCallLimits::default(),
+      input,
+    };
+    let result = handler
+      .execute_request_scoped(
+        &call,
+        Some("process-stream-workflow".to_string()),
+        CapabilityCancellationToken::default(),
+      )
+      .await
+      .expect("Process v2 succeeds");
+    assert_eq!(result["contractVersion"], PROCESS_CONTRACT_VERSION_V2);
+    assert_eq!(result["streamed"], true);
+    assert!(result["stdout"].as_str().unwrap().contains("[redacted]"));
+    assert!(!result["stdout"]
+      .as_str()
+      .unwrap()
+      .contains("stream-secret-42"));
+
+    let store = OperationalOutputStore::open(&output_path, "deployment-process-v2")
+      .expect("reopen output store");
+    let records = store
+      .read_run_page("run-process-v2", 0, 100)
+      .expect("stream replay")
+      .records;
+    let encoded = serde_json::to_string(&records).expect("record JSON");
+    assert!(encoded.contains("[redacted]"));
+    assert!(!encoded.contains("stream-secret-42"));
+    assert!(matches!(
+      records.last().map(|record| &record.body),
+      Some(OperationalBodyV1::Closed {
+        status: OperationalCloseStatusV1::Succeeded,
+        ..
+      })
+    ));
+    let _ = std::fs::remove_dir_all(directory);
+  }
+
+  #[tokio::test]
   async fn inherited_environment_values_are_redacted_from_captured_output() {
     let mut configured = policy();
     configured.environment.inherit = vec!["PATH".to_string()];
@@ -1602,7 +2285,7 @@ mod tests {
       .execute(
         request(
           json!({
-            "WOML_PROCESS_FIXTURE": "1",
+            "WOML_PROCESS_FIXTURE": "woml-process-fixture-active",
             "WOML_PROCESS_FIXTURE_PRINT_ENV": "PATH"
           }),
           1_024,
@@ -1629,7 +2312,7 @@ mod tests {
       .execute(
         request(
           json!({
-            "WOML_PROCESS_FIXTURE": "1",
+            "WOML_PROCESS_FIXTURE": "woml-process-fixture-active",
             "WOML_PROCESS_FIXTURE_ENV_NAME": "HOME"
           }),
           128,
@@ -1652,7 +2335,7 @@ mod tests {
       .execute(
         request(
           json!({
-            "WOML_PROCESS_FIXTURE": "1",
+            "WOML_PROCESS_FIXTURE": "woml-process-fixture-active",
             "WOML_PROCESS_FIXTURE_ENV_NAME": "PATH"
           }),
           128,
@@ -1676,7 +2359,7 @@ mod tests {
       .execute(
         request(
           json!({
-            "WOML_PROCESS_FIXTURE": "1",
+            "WOML_PROCESS_FIXTURE": "woml-process-fixture-active",
             "WOML_PROCESS_FIXTURE_TEXT": "approved-binary-ran",
             "PATH": "/definitely/not/the/operator/path"
           }),
@@ -1702,8 +2385,8 @@ mod tests {
       .execute(
         request(
           json!({
-            "WOML_PROCESS_FIXTURE": "1",
-            "WOML_PROCESS_FIXTURE_CWD": "1"
+            "WOML_PROCESS_FIXTURE": "woml-process-fixture-active",
+            "WOML_PROCESS_FIXTURE_CWD": "report-current-directory"
           }),
           512,
           vec![0],
@@ -1880,7 +2563,7 @@ mod tests {
       .execute(
         request(
           json!({
-            "WOML_PROCESS_FIXTURE": "1",
+            "WOML_PROCESS_FIXTURE": "woml-process-fixture-active",
             "WOML_PROCESS_FIXTURE_TEXT": "sensitive output",
             "WOML_PROCESS_FIXTURE_EXIT": "7"
           }),
@@ -1916,7 +2599,11 @@ mod tests {
   fn runtime_policy_caps_the_effective_process_timeout() {
     let handler =
       ManagedProcessHandler::new(policy(), ProcessRuntimeMode::Foreground).expect("valid policy");
-    let mut input = request(json!({ "WOML_PROCESS_FIXTURE": "1" }), 128, vec![0]);
+    let mut input = request(
+      json!({ "WOML_PROCESS_FIXTURE": "woml-process-fixture-active" }),
+      128,
+      vec![0],
+    );
     input["timeoutMs"] = json!(10_000);
     let authorized = handler
       .parse_and_authorize(&input)
@@ -1925,12 +2612,84 @@ mod tests {
   }
 
   #[test]
+  fn process_versions_keep_v1_exact_and_accept_the_explicit_v2_shape() {
+    let v1 = request(
+      json!({ "WOML_PROCESS_FIXTURE": "woml-process-fixture-active" }),
+      128,
+      vec![0],
+    );
+    assert_eq!(
+      parse_request(&v1)
+        .expect("exact Process v1")
+        .contract_version,
+      PROCESS_CONTRACT_VERSION
+    );
+
+    let mut invalid_v1 = v1.clone();
+    invalid_v1["stream"] = json!(false);
+    assert!(parse_request(&invalid_v1).is_err());
+
+    let mut v2_disabled = v1.clone();
+    v2_disabled["contractVersion"] = json!(PROCESS_CONTRACT_VERSION_V2);
+    v2_disabled["stream"] = json!(false);
+    let parsed = parse_request(&v2_disabled).expect("explicit Process v2 without streaming");
+    assert_eq!(parsed.contract_version, PROCESS_CONTRACT_VERSION_V2);
+    assert!(!parsed.stream);
+
+    let mut v2_streaming = v2_disabled;
+    v2_streaming["stream"] = json!(true);
+    assert!(
+      parse_request(&v2_streaming)
+        .expect("explicit Process v2 streaming")
+        .stream
+    );
+  }
+
+  #[test]
+  fn incremental_stream_redaction_covers_every_secret_split_and_invalid_utf8() {
+    let secret = "token-秘密-42";
+    let expected = "before-[redacted]-after";
+    let source = format!("before-{secret}-after");
+    for split in 0..=source.len() {
+      let mut redactor = IncrementalTextRedactor::new(&[secret.to_string()]);
+      let mut output = String::new();
+      if let Some(value) = redactor.push(&source.as_bytes()[..split], false) {
+        output.push_str(&value);
+      }
+      if let Some(value) = redactor.push(&source.as_bytes()[split..], true) {
+        output.push_str(&value);
+      }
+      assert_eq!(output, expected, "secret split at byte {split}");
+      assert!(!output.contains(secret));
+    }
+
+    let multibyte = "ready 🚀 完了";
+    let mut redactor = IncrementalTextRedactor::new(&[]);
+    let mut output = String::new();
+    for byte in multibyte.as_bytes() {
+      if let Some(value) = redactor.push(&[*byte], false) {
+        output.push_str(&value);
+      }
+    }
+    if let Some(value) = redactor.push(&[], true) {
+      output.push_str(&value);
+    }
+    assert_eq!(output, multibyte);
+
+    let mut invalid = IncrementalTextRedactor::new(&[]);
+    let repaired = invalid
+      .push(&[b'a', 0xff, b'b'], true)
+      .expect("invalid bytes produce safe text");
+    assert_eq!(repaired, "a\u{fffd}b");
+  }
+
+  #[test]
   fn durable_metadata_excludes_arguments_environment_and_output() {
     let handler =
       ManagedProcessHandler::new(policy(), ProcessRuntimeMode::Foreground).expect("valid policy");
     let input = request(
       json!({
-        "WOML_PROCESS_FIXTURE": "1",
+        "WOML_PROCESS_FIXTURE": "woml-process-fixture-active",
         "WOML_PROCESS_FIXTURE_TEXT": "never-persist-this-secret"
       }),
       128,
@@ -1959,7 +2718,7 @@ mod tests {
   fn tree_request(path: &Path, timeout_ms: u64) -> Value {
     let mut value = request(
       json!({
-        "WOML_PROCESS_FIXTURE": "1",
+        "WOML_PROCESS_FIXTURE": "woml-process-fixture-active",
         "WOML_PROCESS_FIXTURE_TREE": "parent",
         "WOML_PROCESS_FIXTURE_HEARTBEAT": path.to_string_lossy()
       }),
@@ -2046,7 +2805,11 @@ mod tests {
     assert!(heartbeat.exists(), "first process did not start");
     let error = handler
       .execute(
-        request(json!({ "WOML_PROCESS_FIXTURE": "1" }), 128, vec![0]),
+        request(
+          json!({ "WOML_PROCESS_FIXTURE": "woml-process-fixture-active" }),
+          128,
+          vec![0],
+        ),
         CapabilityCancellationToken::default(),
       )
       .await

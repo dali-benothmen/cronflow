@@ -1,0 +1,48 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://woml.dev/schemas/operational-output-store/v1",
+  "title": "WOML Operational Output Store v1",
+  "oneOf": [
+    { "$ref": "#/$defs/inspection" },
+    { "$ref": "#/$defs/prune" }
+  ],
+  "$defs": {
+    "count": { "type": "integer", "minimum": 0, "maximum": 9007199254740991 },
+    "inspection": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["profile", "schemaVersion", "deploymentId", "nextSequence", "latestSequence", "prunedThrough", "recordCount", "retainedOutputBytes", "activeRuns", "terminalRuns", "truncatedStreams", "maxAttemptBytes", "maxRunBytes", "maxStoreBytes", "retentionMs"],
+      "properties": {
+        "profile": { "const": "woml.operational-output-store/v1" },
+        "schemaVersion": { "const": 1 },
+        "deploymentId": { "type": "string", "minLength": 1, "maxLength": 320 },
+        "nextSequence": { "type": "integer", "minimum": 1, "maximum": 9007199254740991 },
+        "earliestAvailable": { "type": "integer", "minimum": 1, "maximum": 9007199254740991 },
+        "latestSequence": { "$ref": "#/$defs/count" },
+        "prunedThrough": { "$ref": "#/$defs/count" },
+        "recordCount": { "$ref": "#/$defs/count" },
+        "retainedOutputBytes": { "$ref": "#/$defs/count" },
+        "activeRuns": { "$ref": "#/$defs/count" },
+        "terminalRuns": { "$ref": "#/$defs/count" },
+        "truncatedStreams": { "$ref": "#/$defs/count" },
+        "maxAttemptBytes": { "$ref": "#/$defs/count" },
+        "maxRunBytes": { "$ref": "#/$defs/count" },
+        "maxStoreBytes": { "$ref": "#/$defs/count" },
+        "retentionMs": { "$ref": "#/$defs/count" },
+        "lastPrunedAt": { "type": "string", "format": "date-time" }
+      }
+    },
+    "prune": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["profile", "prunedRuns", "prunedRecords", "prunedOutputBytes", "prunedThrough"],
+      "properties": {
+        "profile": { "const": "woml.operational-output-prune/v1" },
+        "prunedRuns": { "$ref": "#/$defs/count" },
+        "prunedRecords": { "$ref": "#/$defs/count" },
+        "prunedOutputBytes": { "$ref": "#/$defs/count" },
+        "prunedThrough": { "$ref": "#/$defs/count" }
+      }
+    }
+  }
+}

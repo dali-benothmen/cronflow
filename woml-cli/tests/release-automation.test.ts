@@ -51,6 +51,7 @@ describe('WOML release automation', () => {
       'frontend',
       'infrastructure-policies',
       'lock-authority',
+      'operational-output',
       'package',
       'process-containment',
       'rich-plan-approvals',

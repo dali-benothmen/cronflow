@@ -84,6 +84,15 @@ environment names, discard unneeded output, and never return
 credential-bearing output as durable step context. See
 [Running Local Tools Safely](woml-process.md).
 
+With `stream: true`, the same known-secret redaction runs incrementally across
+chunk boundaries before operational persistence. Script logs also redact known
+WOML secrets and materialized artifact paths, and terminal renderers escape
+control sequences. This does not recognize unknown, transformed, encoded, or
+application-sensitive data. Treat `.woml/output.sqlite` and any transcript
+artifact as sensitive operator data, grant rollover explicitly, and keep their
+directories owner-controlled. See
+[Streaming Output and Progress](woml-streaming-output-and-progress.md).
+
 ## Lock keys and lease safety
 
 Lock keys are operator-visible coordination identifiers. Never include secrets,

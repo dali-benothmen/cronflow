@@ -109,6 +109,11 @@ describe('Process v1 authoring contracts', () => {
       'interface WomlProcessService',
       'readonly process: WomlProcessService;',
       'readonly timeout?: number | string;',
+      'readonly stream?: boolean;',
+      'readonly streamStartSequence?: number | null;',
+      'readonly streamArtifact?: WomlArtifactReferenceV1 | null;',
+      'interface WomlProgressService',
+      'readonly progress: WomlProgressService;',
       ') => Promise<WomlProcessRunResult>;',
     ]) {
       expect(declarations).toContain(expected);

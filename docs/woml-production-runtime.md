@@ -252,6 +252,11 @@ See [WOML Retention and Storage Maintenance](woml-retention-and-maintenance.md)
 for automatic policy configuration, protected data, WAL checkpoints, and
 explicit compaction.
 
+The same prune operation plans and removes eligible records from the separate
+operational-output store. Active streams remain protected, stale followers
+receive an explicit cursor gap, and ordinary logs remain excluded from backup.
+See [Streaming Output and Progress](woml-streaming-output-and-progress.md).
+
 ## Supported release boundary
 
 Production Runtime v1 includes non-activating preflight, atomic activation,

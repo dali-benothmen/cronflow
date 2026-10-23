@@ -25,6 +25,7 @@ export interface ProcessPolicyV1 {
   readonly limits: {
     readonly maxTimeoutMs: number;
     readonly maxOutputBytes: number;
+    readonly maxStreamBytes?: number;
     readonly maxConcurrent: number;
   };
 }
@@ -310,11 +311,17 @@ export async function preflightProcessPolicy(
     environmentPattern,
     128
   );
-  const limits = strictObject(policy.limits, 'limits', [
-    'maxTimeoutMs',
-    'maxOutputBytes',
-    'maxConcurrent',
-  ]);
+  const limits = strictObject(
+    policy.limits,
+    'limits',
+    [
+      'maxTimeoutMs',
+      'maxOutputBytes',
+      'maxStreamBytes',
+      'maxConcurrent',
+    ],
+    ['maxStreamBytes']
+  );
   const maxTimeoutMs = boundedInteger(
     limits.maxTimeoutMs,
     1,
@@ -327,6 +334,15 @@ export async function preflightProcessPolicy(
     262_144,
     'maxOutputBytes'
   );
+  const maxStreamBytes =
+    limits.maxStreamBytes === undefined
+      ? undefined
+      : boundedInteger(
+          limits.maxStreamBytes,
+          1,
+          268_435_456,
+          'maxStreamBytes'
+        );
   const maxConcurrent = boundedInteger(
     limits.maxConcurrent,
     1,
@@ -342,7 +358,12 @@ export async function preflightProcessPolicy(
     executables,
     workingDirectories,
     environment: { inherit, allow },
-    limits: { maxTimeoutMs, maxOutputBytes, maxConcurrent },
+    limits: {
+      maxTimeoutMs,
+      maxOutputBytes,
+      ...(maxStreamBytes === undefined ? {} : { maxStreamBytes }),
+      maxConcurrent,
+    },
   };
 }
 
@@ -358,14 +379,18 @@ export function processGrantSummary(
 function strictObject(
   value: unknown,
   label: string,
-  allowed: readonly string[]
+  allowed: readonly string[],
+  optional: readonly string[] = []
 ): Record<string, unknown> {
   if (value === null || typeof value !== 'object' || Array.isArray(value)) {
     invalid(`The ${label} must be an object.`);
   }
   const object = value as Record<string, unknown>;
   const unknown = Object.keys(object).find(key => !allowed.includes(key));
-  if (unknown !== undefined || allowed.some(key => !(key in object))) {
+  if (
+    unknown !== undefined ||
+    allowed.some(key => !optional.includes(key) && !(key in object))
+  ) {
     invalid(`The ${label} has missing or unknown fields.`);
   }
   return object;

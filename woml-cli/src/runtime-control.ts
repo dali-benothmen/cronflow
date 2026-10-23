@@ -16,6 +16,13 @@ import {
 import { dirname, join, resolve } from 'node:path';
 
 import type { RuntimeObservabilitySurface } from './runtime-observability';
+import {
+  operationalSources,
+  type OperationalExecutionPhaseV1,
+  type OperationalSourceV1,
+  type OperationalSubjectKind,
+  type RuntimeOperationalOutputSurface,
+} from './operational-output';
 
 export interface RuntimeDescriptorV1 {
   readonly profile: 'woml.runtime-descriptor/v1';
@@ -72,6 +79,146 @@ export interface RuntimePresentationSurface {
     workflowId: string,
     limit: number
   ) => unknown | Promise<unknown>;
+}
+
+interface RuntimeOutputRoute {
+  readonly kind: 'page' | 'progress' | 'stream' | 'observe';
+  readonly subjectKind?: OperationalSubjectKind;
+  readonly subject?: string;
+  readonly after: number;
+  readonly limit: number;
+  readonly sources: ReadonlySet<OperationalSourceV1>;
+  readonly phase?: OperationalExecutionPhaseV1;
+}
+
+function runtimeOutputRoute(url: URL): RuntimeOutputRoute | undefined {
+  if (url.pathname === '/v1/output/observe') {
+    return {
+      kind: 'observe',
+      after: 0,
+      limit: 200,
+      sources: new Set(operationalSources),
+    };
+  }
+  const match = url.pathname.match(
+    /^\/v1\/output\/(stream\/)?(runs|workflows)\/([^/]+?)(\/progress)?$/
+  );
+  if (match === null) return undefined;
+  let subject: string;
+  try {
+    subject = decodeURIComponent(match[3]!);
+  } catch (error) {
+    throw new RuntimeControlError(
+      'WOML_OUTPUT_SUBJECT_INVALID',
+      'The operational-output subject is invalid.',
+      { cause: error }
+    );
+  }
+  const subjectKind = match[2] === 'runs' ? 'run' : 'workflow';
+  if (
+    (subjectKind === 'run' && !/^run_[A-Za-z0-9_-]{1,252}$/.test(subject)) ||
+    (subjectKind === 'workflow' &&
+      (!/^[a-z][a-z0-9]*(?:-[a-z0-9]+)*$/.test(subject) ||
+        subject.length > 256)) ||
+    (match[4] !== undefined && subjectKind !== 'run')
+  ) {
+    throw new RuntimeControlError(
+      'WOML_OUTPUT_SUBJECT_INVALID',
+      'The operational-output subject is invalid.'
+    );
+  }
+  const after = Number(url.searchParams.get('after') ?? '0');
+  const limit = Number(url.searchParams.get('limit') ?? '200');
+  if (
+    !Number.isSafeInteger(after) ||
+    after < 0 ||
+    !Number.isSafeInteger(limit) ||
+    limit < 1 ||
+    limit > 1_000
+  ) {
+    throw new RuntimeControlError(
+      'WOML_OUTPUT_CURSOR_INVALID',
+      'The operational-output cursor or page limit is invalid.'
+    );
+  }
+  const requestedSources = url.searchParams
+    .getAll('source')
+    .flatMap(value => value.split(','))
+    .filter(Boolean);
+  if (
+    requestedSources.some(
+      source => !operationalSources.includes(source as OperationalSourceV1)
+    )
+  ) {
+    throw new RuntimeControlError(
+      'WOML_OUTPUT_SOURCE_INVALID',
+      'The operational-output source filter is invalid.'
+    );
+  }
+  const requestedPhase = url.searchParams.get('phase');
+  if (
+    requestedPhase !== null &&
+    requestedPhase !== 'forward' &&
+    requestedPhase !== 'corrective'
+  ) {
+    throw new RuntimeControlError(
+      'WOML_OUTPUT_PHASE_INVALID',
+      'The operational-output execution-phase filter is invalid.'
+    );
+  }
+  return {
+    kind: match[1] !== undefined
+      ? 'stream'
+      : match[4] !== undefined
+        ? 'progress'
+        : 'page',
+    subjectKind,
+    subject,
+    after,
+    limit,
+    sources: new Set(
+      requestedSources.length === 0
+        ? operationalSources
+        : (requestedSources as OperationalSourceV1[])
+    ),
+    ...(requestedPhase === null
+      ? {}
+      : { phase: requestedPhase as OperationalExecutionPhaseV1 }),
+  };
+}
+
+export async function queryRuntimeOperationalOutput(
+  url: URL,
+  output: RuntimeOperationalOutputSurface
+): Promise<unknown | Response> {
+  const route = runtimeOutputRoute(url);
+  if (route === undefined) {
+    throw new RuntimeControlError(
+      'WOML_ADMIN_NOT_FOUND',
+      'The operational-output route is invalid.'
+    );
+  }
+  if (route.kind === 'observe') return await output.observe();
+  const subjectKind = route.subjectKind!;
+  const subject = route.subject!;
+  if (route.kind === 'progress') return await output.progress(subject);
+  if (route.kind === 'stream') {
+    return await output.stream({
+      subjectKind,
+      subject,
+      after: route.after,
+      sources: route.sources,
+      ...(route.phase === undefined ? {} : { phase: route.phase }),
+    });
+  }
+  return await output.page({
+    subjectKind,
+    subject,
+    after: route.after,
+    limit: route.limit,
+    sources: route.sources,
+    ...(route.phase === undefined ? {} : { phase: route.phase }),
+  });
 }
 
 export async function queryRuntimePresentation(
@@ -276,6 +423,7 @@ export function startRuntimeControl(options: {
   readonly operations?: RuntimeAdminOperations;
   readonly observability?: RuntimeObservabilitySurface;
   readonly presentations?: RuntimePresentationSurface;
+  readonly output?: RuntimeOperationalOutputSurface;
   readonly healthEnabled?: boolean;
   readonly metricsEnabled?: boolean;
 }): RuntimeControlHandle {
@@ -525,6 +673,46 @@ export function startRuntimeControl(options: {
                   ? 400
                   : 503,
             }
+          );
+        } finally {
+          inFlight -= 1;
+        }
+      }
+      if (request.method === 'GET' && url.pathname.startsWith('/v1/output/')) {
+        if (!authorized(request)) {
+          return Response.json(
+            { error: { code: 'WOML_ADMIN_UNAUTHORIZED' } },
+            { status: 401 }
+          );
+        }
+        if (options.output === undefined) {
+          return Response.json(
+            { error: { code: 'WOML_OUTPUT_API_UNAVAILABLE' } },
+            { status: 404 }
+          );
+        }
+        const limited = beginOperation();
+        if (limited !== undefined) return limited;
+        try {
+          const value = await queryRuntimeOperationalOutput(url, options.output);
+          return value instanceof Response ? value : boundedJson(value);
+        } catch (error) {
+          const candidate =
+            error instanceof Error && 'code' in error ? String(error.code) : '';
+          const code = /^WOML_[A-Z0-9_]{1,123}$/.test(candidate)
+            ? candidate
+            : 'WOML_OUTPUT_STORE_UNAVAILABLE';
+          const status =
+            code === 'WOML_OUTPUT_FOLLOWER_LIMIT'
+              ? 429
+              : code.endsWith('_INVALID')
+                ? 400
+                : code === 'WOML_OUTPUT_SUBJECT_NOT_FOUND'
+                  ? 404
+                  : 503;
+          return Response.json(
+            { error: { code } },
+            { status, headers: { 'cache-control': 'no-store' } }
           );
         } finally {
           inFlight -= 1;
@@ -803,6 +991,7 @@ export function startRuntimeControl(options: {
     createdAt = new Date();
     expiresAt = new Date(createdAt.getTime() + capabilityTtlMs);
     options.observability?.closeStreams();
+    options.output?.closeStreams();
     if (publishedDescriptorPath !== undefined) {
       const path = publishedDescriptorPath;
       descriptorWrite = descriptorWrite.then(() =>
@@ -826,6 +1015,7 @@ export function startRuntimeControl(options: {
       closed = true;
       clearTimeout(rotationTimer);
       options.observability?.closeStreams();
+      options.output?.closeStreams();
       await server.stop(true);
       await descriptorWrite.catch(() => {});
       capability = '';

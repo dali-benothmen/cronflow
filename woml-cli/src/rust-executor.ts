@@ -23,6 +23,17 @@ import { profileAsync, profileSync } from './performance-profiler';
 import type { ProcessRuntimeAuthorityV1 } from './process-policy';
 import type { ArtifactRuntimeAuthorityV1 } from './artifact-policy';
 import type { InfrastructurePolicyRuntimeAuthorityV1 } from './infrastructure-policy';
+import {
+  decodeOperationalObservationV1,
+  decodeOperationalPageV1,
+  decodeOperationalProgressV1,
+  OperationalOutputError,
+  parseOperationalOutputWakeup,
+  type OperationalOutputObservationV1,
+  type OperationalOutputWakeupV1,
+  type OperationalPageV1,
+  type OperationalProgressSnapshotV1,
+} from './operational-output';
 
 export interface ReviewerDirectoryV1 {
   readonly profile: 'woml.reviewer-directory/v1';
@@ -84,6 +95,7 @@ export interface RustExecutorOptions {
   readonly scriptTimeoutMs?: number;
   readonly trigger?: JsonObject;
   readonly onProgress?: (progress: ExecutionProgressV1) => void;
+  readonly onOperationalOutput?: (wakeup: OperationalOutputWakeupV1) => void;
   readonly resolvedSecrets?: Readonly<Record<string, string>>;
   readonly runtimeModules?: readonly RustRuntimeModuleArtifact[];
   readonly runtimeCapabilities?: RuntimeCapabilitiesV1;
@@ -1191,6 +1203,25 @@ interface NativeCore {
     status?: string
   ) => string;
   readonly observeWomlRuntime: (eventStorePath: string) => string;
+  readonly readWomlOperationalOutputPage?: (
+    eventStorePath: string,
+    runId: string | undefined,
+    after: number,
+    limit: number
+  ) => string;
+  readonly inspectWomlOperationalProgress?: (
+    eventStorePath: string,
+    runId: string
+  ) => string;
+  readonly observeWomlOperationalOutput?: (eventStorePath: string) => string;
+  readonly planWomlOperationalOutputPrune?: (
+    eventStorePath: string,
+    cutoff: string
+  ) => string;
+  readonly pruneWomlOperationalOutput?: (
+    eventStorePath: string,
+    cutoff: string
+  ) => string;
   readonly createWomlBackup: (
     eventStorePath: string,
     destinationPath: string,
@@ -1894,6 +1925,27 @@ export function parseExecutionProgress(json: string): ExecutionProgressV1 {
     return value as ExecutionProgressV1;
   }
   throw new Error('The native core returned invalid execution progress.');
+}
+
+function dispatchExecutionOrOutputProgress(
+  message: string,
+  options: Pick<RustExecutorOptions, 'onProgress' | 'onOperationalOutput'>
+): void {
+  const value: unknown = JSON.parse(message);
+  if (
+    record(value) &&
+    value.profile === 'woml.operational-output-wakeup/v1'
+  ) {
+    options.onOperationalOutput?.(parseOperationalOutputWakeup(message));
+    return;
+  }
+  options.onProgress?.(parseExecutionProgress(message));
+}
+
+function wantsNativeProgress(
+  options: Pick<RustExecutorOptions, 'onProgress' | 'onOperationalOutput'>
+): boolean {
+  return options.onProgress !== undefined || options.onOperationalOutput !== undefined;
 }
 
 export function parseTriggerProgress(json: string): TriggerProgressV1 {
@@ -2692,10 +2744,10 @@ export async function executeWorkflowWithRustDurable(
     );
   }
   const progressCallback = (message: string): void => {
-    options.onProgress?.(parseExecutionProgress(message));
+    dispatchExecutionOrOutputProgress(message, options);
   };
   const execute =
-    options.onProgress === undefined
+    !wantsNativeProgress(options)
       ? native.executeWomlWorkflowDurable
       : native.executeWomlWorkflowDurableWithProgress;
   if (typeof execute !== 'function') {
@@ -2738,7 +2790,7 @@ export async function executeWorkflowWithRustDurable(
     'napi.execute_durable',
     async measurements => {
       const result = await (
-        options.onProgress === undefined
+        !wantsNativeProgress(options)
           ? native.executeWomlWorkflowDurable(
               ...request.arguments,
               request.secretsJson,
@@ -2804,7 +2856,7 @@ export async function resumeWorkflowWithRustDurable(
       runtime.scriptHostPath,
       runtime.timeoutMs,
       eventStorePath,
-      message => options.onProgress?.(parseExecutionProgress(message)),
+      message => dispatchExecutionOrOutputProgress(message, options),
       JSON.stringify(options.resolvedSecrets ?? {}),
       JSON.stringify(options.runtimeModules ?? []),
       options.runtimeCapabilities === undefined
@@ -2865,7 +2917,7 @@ export async function executeApprovalWorkflowWithRust(
     eventStorePath,
   ] as const;
   const resultJson = await (
-    options.onProgress === undefined
+    !wantsNativeProgress(options)
       ? native.executeWomlWorkflowDurableOutcome(
           ...arguments_,
           JSON.stringify(options.resolvedSecrets ?? {}),
@@ -2876,7 +2928,7 @@ export async function executeApprovalWorkflowWithRust(
         )
       : native.executeWomlWorkflowDurableOutcomeWithProgress(
           ...arguments_,
-          message => options.onProgress?.(parseExecutionProgress(message)),
+          message => dispatchExecutionOrOutputProgress(message, options),
           JSON.stringify(options.resolvedSecrets ?? {}),
           JSON.stringify(options.runtimeModules ?? []),
           options.runtimeCapabilities === undefined
@@ -2908,7 +2960,7 @@ export async function resumeApprovalWorkflowWithRust(
     eventStorePath,
   ] as const;
   const resultJson = await (
-    options.onProgress === undefined
+    !wantsNativeProgress(options)
       ? native.resumeWomlWorkflowDurableOutcome(
           ...arguments_,
           JSON.stringify(options.resolvedSecrets ?? {}),
@@ -2919,7 +2971,7 @@ export async function resumeApprovalWorkflowWithRust(
         )
       : native.resumeWomlWorkflowDurableOutcomeWithProgress(
           ...arguments_,
-          message => options.onProgress?.(parseExecutionProgress(message)),
+          message => dispatchExecutionOrOutputProgress(message, options),
           JSON.stringify(options.resolvedSecrets ?? {}),
           JSON.stringify(options.runtimeModules ?? []),
           options.runtimeCapabilities === undefined
@@ -3211,6 +3263,15 @@ export async function startWebhookRuntimeWithRust(
           options.signalIngressToken,
           message => {
             const decoded: unknown = JSON.parse(message);
+            if (
+              record(decoded) &&
+              decoded.profile === 'woml.operational-output-wakeup/v1'
+            ) {
+              options.onOperationalOutput?.(
+                parseOperationalOutputWakeup(message)
+              );
+              return;
+            }
             if (
               record(decoded) &&
               decoded.contract === 'woml.schedule-progress'
@@ -3926,6 +3987,203 @@ export function observeRuntimeWithRust(
     );
   }
   return value as unknown as RustRuntimeObservationV1;
+}
+
+function callOperationalOutputNative<T>(
+  call: () => string,
+  decode: (json: string) => T
+): T {
+  try {
+    return decode(call());
+  } catch (error) {
+    if (error instanceof OperationalOutputError) throw error;
+    const message = error instanceof Error ? error.message : String(error);
+    const code = message.match(/\b(WOML_OUTPUT_[A-Z0-9_]+)\b/)?.[1];
+    throw new OperationalOutputError(
+      code ?? 'WOML_OUTPUT_STORE_UNAVAILABLE',
+      code === undefined
+        ? 'The operational-output store is unavailable.'
+        : message,
+      { cause: error }
+    );
+  }
+}
+
+export function readOperationalOutputPageWithRust(
+  eventStorePath: string,
+  request: {
+    readonly runId?: string;
+    readonly after?: number;
+    readonly limit?: number;
+  } = {},
+  options: Pick<RustExecutorOptions, 'nativeCorePath'> = {}
+): OperationalPageV1 {
+  const after = request.after ?? 0;
+  const limit = request.limit ?? 200;
+  if (
+    eventStorePath.length === 0 ||
+    (request.runId !== undefined && request.runId.length === 0) ||
+    !Number.isSafeInteger(after) ||
+    after < 0 ||
+    !Number.isSafeInteger(limit) ||
+    limit < 1 ||
+    limit > 1_000
+  ) {
+    throw new OperationalOutputError(
+      'WOML_OUTPUT_CURSOR_INVALID',
+      'Operational-output replay requires a valid store, cursor, and limit.'
+    );
+  }
+  const nativePath = options.nativeCorePath ?? defaultNativeCorePath();
+  const native = loadNativeCore(nativePath);
+  if (typeof native.readWomlOperationalOutputPage !== 'function') {
+    throw new OperationalOutputError(
+      'WOML_OUTPUT_API_UNAVAILABLE',
+      `Native core at "${nativePath}" does not expose operational-output replay; rebuild the Rust addon.`
+    );
+  }
+  return callOperationalOutputNative(
+    () =>
+      native.readWomlOperationalOutputPage!(
+        eventStorePath,
+        request.runId,
+        after,
+        limit
+      ),
+    decodeOperationalPageV1
+  );
+}
+
+export function inspectOperationalProgressWithRust(
+  eventStorePath: string,
+  runId: string,
+  options: Pick<RustExecutorOptions, 'nativeCorePath'> = {}
+): readonly OperationalProgressSnapshotV1[] {
+  if (eventStorePath.length === 0 || runId.length === 0) {
+    throw new OperationalOutputError(
+      'WOML_OUTPUT_SUBJECT_INVALID',
+      'Operational progress requires a store path and run ID.'
+    );
+  }
+  const nativePath = options.nativeCorePath ?? defaultNativeCorePath();
+  const native = loadNativeCore(nativePath);
+  if (typeof native.inspectWomlOperationalProgress !== 'function') {
+    throw new OperationalOutputError(
+      'WOML_OUTPUT_API_UNAVAILABLE',
+      `Native core at "${nativePath}" does not expose operational progress; rebuild the Rust addon.`
+    );
+  }
+  return callOperationalOutputNative(
+    () => native.inspectWomlOperationalProgress!(eventStorePath, runId),
+    decodeOperationalProgressV1
+  );
+}
+
+export function observeOperationalOutputWithRust(
+  eventStorePath: string,
+  options: Pick<RustExecutorOptions, 'nativeCorePath'> = {}
+): OperationalOutputObservationV1 {
+  if (eventStorePath.length === 0) {
+    throw new OperationalOutputError(
+      'WOML_OUTPUT_STORE_UNAVAILABLE',
+      'Operational-output observation requires a store path.'
+    );
+  }
+  const nativePath = options.nativeCorePath ?? defaultNativeCorePath();
+  const native = loadNativeCore(nativePath);
+  if (typeof native.observeWomlOperationalOutput !== 'function') {
+    throw new OperationalOutputError(
+      'WOML_OUTPUT_API_UNAVAILABLE',
+      `Native core at "${nativePath}" does not expose operational-output observation; rebuild the Rust addon.`
+    );
+  }
+  return callOperationalOutputNative(
+    () => native.observeWomlOperationalOutput!(eventStorePath),
+    decodeOperationalObservationV1
+  );
+}
+
+export interface OperationalOutputPrunePlanV1 {
+  readonly profile: 'woml.operational-output-prune-plan/v1';
+  readonly eligibleRuns: number;
+  readonly eligibleRecords: number;
+  readonly eligibleOutputBytes: number;
+}
+
+export interface OperationalOutputPruneResultV1 {
+  readonly profile: 'woml.operational-output-prune/v1';
+  readonly prunedRuns: number;
+  readonly prunedRecords: number;
+  readonly prunedOutputBytes: number;
+  readonly prunedThrough: number;
+}
+
+function decodeOutputRetention<T>(
+  json: string,
+  profile: string,
+  fields: readonly string[]
+): T {
+  const value: unknown = JSON.parse(json);
+  if (
+    value === null ||
+    typeof value !== 'object' ||
+    Array.isArray(value) ||
+    (value as Record<string, unknown>).profile !== profile ||
+    !fields.every(field => {
+      const candidate = (value as Record<string, unknown>)[field];
+      return Number.isSafeInteger(candidate) && Number(candidate) >= 0;
+    })
+  ) {
+    throw new OperationalOutputError(
+      'WOML_OUTPUT_PROTOCOL_INVALID',
+      'The native core returned invalid operational-output retention data.'
+    );
+  }
+  return value as T;
+}
+
+export function planOperationalOutputPruneWithRust(
+  eventStorePath: string,
+  cutoff: string,
+  options: Pick<RustExecutorOptions, 'nativeCorePath'> = {}
+): OperationalOutputPrunePlanV1 {
+  const native = loadNativeCore(options.nativeCorePath ?? defaultNativeCorePath());
+  if (typeof native.planWomlOperationalOutputPrune !== 'function') {
+    throw new OperationalOutputError(
+      'WOML_OUTPUT_API_UNAVAILABLE',
+      'The native core does not expose operational-output retention planning.'
+    );
+  }
+  return callOperationalOutputNative(
+    () => native.planWomlOperationalOutputPrune!(eventStorePath, cutoff),
+    json => decodeOutputRetention<OperationalOutputPrunePlanV1>(
+      json,
+      'woml.operational-output-prune-plan/v1',
+      ['eligibleRuns', 'eligibleRecords', 'eligibleOutputBytes']
+    )
+  );
+}
+
+export function pruneOperationalOutputWithRust(
+  eventStorePath: string,
+  cutoff: string,
+  options: Pick<RustExecutorOptions, 'nativeCorePath'> = {}
+): OperationalOutputPruneResultV1 {
+  const native = loadNativeCore(options.nativeCorePath ?? defaultNativeCorePath());
+  if (typeof native.pruneWomlOperationalOutput !== 'function') {
+    throw new OperationalOutputError(
+      'WOML_OUTPUT_API_UNAVAILABLE',
+      'The native core does not expose operational-output pruning.'
+    );
+  }
+  return callOperationalOutputNative(
+    () => native.pruneWomlOperationalOutput!(eventStorePath, cutoff),
+    json => decodeOutputRetention<OperationalOutputPruneResultV1>(
+      json,
+      'woml.operational-output-prune/v1',
+      ['prunedRuns', 'prunedRecords', 'prunedOutputBytes', 'prunedThrough']
+    )
+  );
 }
 
 function decodeBackupNativeError(error: unknown): never {
@@ -5639,7 +5897,7 @@ export async function resumeStoredRunWithRust(
       runtime.scriptHostPath,
       runtime.timeoutMs,
       eventStorePath,
-      message => options.onProgress?.(parseExecutionProgress(message)),
+      message => dispatchExecutionOrOutputProgress(message, options),
       JSON.stringify(options.resolvedSecrets ?? {}),
       options.runtimeCapabilities === undefined
         ? undefined
