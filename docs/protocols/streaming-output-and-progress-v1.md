@@ -1,6 +1,6 @@
 # WOML Streaming Output and Progress v1
 
-**Status:** SOP0–SOP3 implemented on 2026-10-23
+**Status:** SOP0–SOP7 implemented on 2026-10-23
 **Authority:** Rust core  
 **Durability class:** Operational, bounded, and explicitly non-authoritative
 
@@ -198,6 +198,52 @@ produces a bounded operator diagnostic; it does not rewrite business history.
 If a workflow explicitly requests a fail-on-output-loss policy, the producing
 operation fails through the normal durable capability path. Ambiguous output
 persistence never implies an ambiguous business effect.
+
+## Truncation, artifact rollover, and retention
+
+Output Store v1 enforces per-attempt, per-run, and total-store byte ceilings.
+The first byte range that exceeds a lane's inline ceiling produces exactly one
+`truncated` record. Later bytes are still drained from the producer but are not
+written repeatedly to SQLite, so a noisy child cannot deadlock or manufacture
+an unbounded sequence of truncation markers.
+
+Complete redacted process output can roll over to Durable Artifacts only when
+Artifact Policy v1 includes the exact `operationalOutput` grant. The runtime
+stages ordered NDJSON directly in the configured artifact backend, applies the
+artifact quota and retention rules, publishes atomically, and stores only an
+immutable Artifact Reference v1 in the operational stream. A missing grant,
+quota denial, scan failure, or unavailable backend never falls back to an
+unreviewed directory; inline output remains explicitly truncated.
+
+`woml prune --before <duration>` plans and prunes both durable terminal-run
+history and eligible operational output. Active runs are never candidates.
+Pruning is bounded and idempotent, records the last successful prune time for
+operators, and advances replay watermarks so stale followers receive an
+explicit gap. Automatic retention applies the seven-day operational-output
+default. Ordinary output remains excluded from `woml backup`; artifacts use
+their own backup and retention contracts.
+
+## Composition and operator behavior
+
+Operational identity includes run, node, attempt, invocation, and execution
+phase. Retries therefore receive distinct streams, loop iterations keep their
+compiled node identity, child workflows remain isolated under their own run
+IDs, and saga compensation is labelled `corrective`. Operators can select the
+forward or corrective phase with `woml logs <run-id> --phase forward` or
+`--phase corrective`.
+
+Committed records survive runtime restart. Recovery closes open attempt lanes
+as `interrupted` without inventing output that was never committed. A terminal
+run receives a run-level closure record after durable settlement. Store
+observation reports body-free health facts: record and byte totals, active and
+terminal runs, truncation count, configured budgets, follower count through
+runtime observability, and the last prune time.
+
+The reviewed end-to-end example is
+[`examples/streamingOutput/terraformRelease.woml`](../../examples/streamingOutput/terraformRelease.woml).
+It combines an immutable Terraform plan, rich approval, a production lease,
+streamed apply and health output, compensation, cleanup, and optional governed
+transcript rollover.
 
 ## Compatibility and non-goals
 

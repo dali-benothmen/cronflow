@@ -60,7 +60,11 @@
     "retainedOutputBytes": 26,
     "activeRuns": 1,
     "terminalRuns": 0,
-    "truncatedStreams": 0
+    "truncatedStreams": 0,
+    "maxAttemptBytes": 16777216,
+    "maxRunBytes": 16777216,
+    "maxStoreBytes": 1073741824,
+    "retentionMs": 604800000
   },
   "processV2": {
     "contract": "woml.process",

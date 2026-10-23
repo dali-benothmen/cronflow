@@ -209,6 +209,7 @@ pub struct ManagedProcessHandler {
   policy: Arc<PreparedProcessPolicy>,
   concurrency: Arc<Semaphore>,
   output_store: Arc<Mutex<Option<Arc<LazyOperationalOutputStore>>>>,
+  output_artifacts: Arc<Mutex<Option<Arc<crate::ManagedArtifactPutHandler>>>>,
   resolved_secrets: Arc<BTreeMap<String, String>>,
 }
 
@@ -223,6 +224,7 @@ impl ManagedProcessHandler {
       policy: Arc::new(prepared),
       concurrency: Arc::new(Semaphore::new(max_concurrent)),
       output_store: Arc::new(Mutex::new(None)),
+      output_artifacts: Arc::new(Mutex::new(None)),
       resolved_secrets: Arc::new(BTreeMap::new()),
     })
   }
@@ -254,6 +256,25 @@ impl ManagedProcessHandler {
       return Ok(());
     }
     *configured = Some(store);
+    Ok(())
+  }
+
+  pub(crate) fn configure_output_artifacts(
+    &self,
+    handler: Arc<crate::ManagedArtifactPutHandler>,
+  ) -> Result<(), ProcessPolicyError> {
+    let mut configured = self.output_artifacts.lock().map_err(|_| {
+      ProcessPolicyError::Invalid("the operational artifact authority is unavailable".to_string())
+    })?;
+    if let Some(existing) = configured.as_ref() {
+      if !Arc::ptr_eq(existing, &handler) {
+        return Err(ProcessPolicyError::Invalid(
+          "the process handler is already bound to another artifact authority".to_string(),
+        ));
+      }
+      return Ok(());
+    }
+    *configured = Some(handler);
     Ok(())
   }
 
@@ -577,8 +598,18 @@ impl CapabilityHandler for ManagedProcessHandler {
           node_id: Some(request.node_id.clone()),
           attempt: Some(request.attempt_number),
           invocation_id: Some(request.invocation_id.clone()),
+          phase: if request.invocation_id.starts_with("corr_") {
+            crate::OperationalExecutionPhaseV1::Corrective
+          } else {
+            crate::OperationalExecutionPhaseV1::Forward
+          },
         },
         resolved_secrets: Arc::clone(&self.resolved_secrets),
+        artifact_handler: self
+          .output_artifacts
+          .lock()
+          .ok()
+          .and_then(|value| value.clone()),
       })
     } else {
       None
@@ -617,8 +648,8 @@ struct ProcessStreamState {
   end_sequence: Option<u64>,
   truncated: bool,
   retained_bytes: u64,
-  stdout_truncated: bool,
-  stderr_truncated: bool,
+  artifact_writer: Option<crate::artifacts::OperationalArtifactWriter>,
+  artifact: Option<crate::ArtifactReferenceV1>,
 }
 
 #[derive(Debug, Default)]
@@ -647,6 +678,7 @@ struct ProcessStreamTarget {
   store: Arc<LazyOperationalOutputStore>,
   identity: OperationalIdentityV1,
   resolved_secrets: Arc<BTreeMap<String, String>>,
+  artifact_handler: Option<Arc<crate::ManagedArtifactPutHandler>>,
 }
 
 #[derive(Debug, Clone)]
@@ -685,16 +717,33 @@ async fn execute_process(
     .unwrap_or(0)
     .saturating_sub(1);
   let stream = match stream_target {
-    Some(target) => Some(ActiveProcessStream {
-      store: target
-        .store
-        .activate()
-        .map_err(|_| output_authority_failure(false))?,
-      identity: target.identity,
-      state: Arc::new(Mutex::new(ProcessStreamState::default())),
-      failure: Arc::new(ProcessStreamFailure::default()),
-      max_retained_bytes: policy.limits.max_stream_bytes as u64,
-    }),
+    Some(target) => {
+      let artifact_writer = target.artifact_handler.as_ref().and_then(|handler| {
+        handler
+          .begin_operational_output(
+            &target.identity.workflow_id,
+            &target.identity.run_id,
+            target.identity.node_id.as_deref()?,
+            target.identity.attempt?,
+            target.identity.invocation_id.as_deref()?,
+          )
+          .ok()
+          .flatten()
+      });
+      Some(ActiveProcessStream {
+        store: target
+          .store
+          .activate()
+          .map_err(|_| output_authority_failure(false))?,
+        identity: target.identity,
+        state: Arc::new(Mutex::new(ProcessStreamState {
+          artifact_writer,
+          ..ProcessStreamState::default()
+        })),
+        failure: Arc::new(ProcessStreamFailure::default()),
+        max_retained_bytes: policy.limits.max_stream_bytes as u64,
+      })
+    }
     None => None,
   };
   let mut command = Command::new(&authorized.executable);
@@ -860,11 +909,14 @@ async fn execute_process(
     },
   )?;
   let stream_state = stream.as_ref().and_then(|stream| {
-    stream
-      .state
-      .lock()
-      .ok()
-      .map(|state| (state.start_sequence, state.end_sequence, state.truncated))
+    stream.state.lock().ok().map(|state| {
+      (
+        state.start_sequence,
+        state.end_sequence,
+        state.truncated,
+        state.artifact.clone(),
+      )
+    })
   });
   let result = ProcessRunResultV1 {
     contract: PROCESS_CONTRACT,
@@ -919,8 +971,8 @@ async fn execute_process(
     ));
   }
   if request.contract_version == PROCESS_CONTRACT_VERSION_V2 {
-    let (stream_start_sequence, stream_end_sequence, stream_truncated) =
-      stream_state.unwrap_or((None, None, false));
+    let (stream_start_sequence, stream_end_sequence, stream_truncated, stream_artifact) =
+      stream_state.unwrap_or((None, None, false, None));
     serde_json::to_value(ProcessRunResultV2 {
       contract: PROCESS_CONTRACT,
       contract_version: PROCESS_CONTRACT_VERSION_V2,
@@ -938,7 +990,9 @@ async fn execute_process(
       stream_start_sequence,
       stream_end_sequence,
       stream_truncated,
-      stream_artifact: None,
+      stream_artifact: stream_artifact
+        .map(|artifact| serde_json::to_value(artifact).map_err(|_| output_failure()))
+        .transpose()?,
     })
     .map_err(|_| output_failure())
   } else {
@@ -1352,7 +1406,7 @@ impl IncrementalTextRedactor {
     if boundary == 0 {
       return None;
     }
-    let mut emitted = self.pending_text[..boundary].to_string();
+    let emitted = self.pending_text[..boundary].to_string();
     self.pending_text.drain(..boundary);
     (!emitted.is_empty()).then_some(emitted)
   }
@@ -1388,12 +1442,16 @@ fn append_process_output(
     .state
     .lock()
     .map_err(|_| output_authority_failure(true))?;
-  let source_was_truncated = match source {
-    OperationalSourceV1::Stdout => state.stdout_truncated,
-    OperationalSourceV1::Stderr => state.stderr_truncated,
-    OperationalSourceV1::Script | OperationalSourceV1::Runtime => false,
-  };
-  if source_was_truncated {
+  if let Some(writer) = state.artifact_writer.as_mut() {
+    let source_name = match source {
+      OperationalSourceV1::Stdout => "stdout",
+      OperationalSourceV1::Stderr => "stderr",
+      OperationalSourceV1::Script => "script",
+      OperationalSourceV1::Runtime => "runtime",
+    };
+    let _ = writer.append_redacted(source_name, &text);
+  }
+  if state.truncated {
     return Ok(());
   }
   if state.retained_bytes.saturating_add(byte_count) > target.max_retained_bytes {
@@ -1411,11 +1469,6 @@ fn append_process_output(
     state.start_sequence.get_or_insert(record.sequence);
     state.end_sequence = Some(record.sequence);
     state.truncated = true;
-    match source {
-      OperationalSourceV1::Stdout => state.stdout_truncated = true,
-      OperationalSourceV1::Stderr => state.stderr_truncated = true,
-      OperationalSourceV1::Script | OperationalSourceV1::Runtime => {}
-    }
     return Ok(());
   }
   let record = target
@@ -1444,6 +1497,37 @@ fn close_process_stream(
   let Some(stream) = stream else {
     return Ok(());
   };
+  let (writer, publish) = {
+    let mut state = stream
+      .state
+      .lock()
+      .map_err(|_| output_authority_failure(true))?;
+    (state.artifact_writer.take(), state.truncated)
+  };
+  if let Some(writer) = writer {
+    if let Ok(Some(artifact)) = writer.finish(publish) {
+      let record = stream
+        .store
+        .append(OperationalRecordDraftV1 {
+          identity: stream.identity.clone(),
+          body: OperationalBodyV1::Artifact {
+            artifact_id: artifact.id.clone(),
+            name: artifact.name.clone(),
+            size: artifact.size,
+            sha256: artifact.sha256.clone(),
+            content_type: artifact.content_type.clone(),
+          },
+        })
+        .map_err(|_| output_authority_failure(true))?;
+      let mut state = stream
+        .state
+        .lock()
+        .map_err(|_| output_authority_failure(true))?;
+      state.start_sequence.get_or_insert(record.sequence);
+      state.end_sequence = Some(record.sequence);
+      state.artifact = Some(artifact);
+    }
+  }
   let record = stream
     .store
     .append(OperationalRecordDraftV1 {

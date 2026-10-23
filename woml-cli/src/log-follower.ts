@@ -33,12 +33,13 @@ import {
   renderOperationalRecord,
   type OperationalPageV1,
   type OperationalRecordV1,
+  type OperationalExecutionPhaseV1,
   type OperationalSourceV1,
   type OperationalStreamEventV1,
 } from './operational-output';
 
 export const logFollowUsage =
-  'Usage: woml logs <run-id|workflow-id> [--follow|--no-follow] [--tail <count>|--after <cursor>] [--source <stdout,stderr,script,runtime>] [--state <path>] [--config <path>] [--json] [--color=auto|always|never]\n       woml <run-id|workflow-id> --logs [same options]';
+  'Usage: woml logs <run-id|workflow-id> [--follow|--no-follow] [--tail <count>|--after <cursor>] [--source <stdout,stderr,script,runtime>] [--phase <all|forward|corrective>] [--state <path>] [--config <path>] [--json] [--color=auto|always|never]\n       woml <run-id|workflow-id> --logs [same options]';
 
 export class LogFollowError extends Error {
   readonly code: string;
@@ -60,6 +61,7 @@ export interface LogFollowArguments {
   readonly tail?: number;
   readonly after?: number;
   readonly sources?: ReadonlySet<OperationalSourceV1>;
+  readonly phase?: OperationalExecutionPhaseV1;
   readonly operational?: boolean;
 }
 
@@ -140,6 +142,7 @@ export function parseLogFollowArguments(
   let tail: number | undefined;
   let after: number | undefined;
   let sources: ReadonlySet<OperationalSourceV1> = new Set(operationalSources);
+  let phase: OperationalExecutionPhaseV1 | undefined;
   const seen = new Set<string>();
   for (let index = commandStyle ? 2 : 1; index < args.length; index += 1) {
     const raw = args[index]!;
@@ -165,7 +168,7 @@ export function parseLogFollowArguments(
       continue;
     }
     if (
-      !['--state', '--config', '--color', '--tail', '--after', '--source'].includes(
+      !['--state', '--config', '--color', '--tail', '--after', '--source', '--phase'].includes(
         option
       )
     ) invalidArguments();
@@ -190,6 +193,9 @@ export function parseLogFollowArguments(
       } else if (option === '--after') {
         after = Number(value);
         if (!Number.isSafeInteger(after) || after < 0) invalidArguments();
+      } else if (option === '--phase') {
+        if (!['all', 'forward', 'corrective'].includes(value)) invalidArguments();
+        phase = value === 'all' ? undefined : value as OperationalExecutionPhaseV1;
       } else {
         const values = value.split(',').filter(Boolean);
         if (
@@ -216,6 +222,7 @@ export function parseLogFollowArguments(
     ...(tail === undefined ? {} : { tail }),
     ...(after === undefined ? {} : { after }),
     sources,
+    ...(phase === undefined ? {} : { phase }),
     operational: true,
   };
 }
@@ -237,6 +244,7 @@ export async function resolveLogFollowArguments(
     ...(parsed.tail === undefined ? {} : { tail: parsed.tail }),
     ...(parsed.after === undefined ? {} : { after: parsed.after }),
     sources: parsed.sources,
+    ...(parsed.phase === undefined ? {} : { phase: parsed.phase }),
     operational: parsed.operational,
   };
 }
@@ -555,7 +563,9 @@ async function followOperationalLogs(options: {
     if (
       (args.subjectKind === 'run' ? item.runId : item.workflowId) !== args.subject ||
       ((item.kind === 'output' || item.kind === 'truncated') &&
-        !sources.has(item.source))
+        !sources.has(item.source)) ||
+      (args.phase === 'corrective' && item.phase !== 'corrective') ||
+      (args.phase === 'forward' && item.phase === 'corrective')
     ) return;
     if (collectingTail && args.tail !== undefined) {
       tail.push(item);
@@ -709,6 +719,7 @@ async function followOperationalLogs(options: {
         if (sources.size !== operationalSources.length) {
           query.set('source', [...sources].join(','));
         }
+        if (args.phase !== undefined) query.set('phase', args.phase);
         const response = await fetcher(
           `${current.adminUrl}/v1/output/stream/${args.subjectKind === 'run' ? 'runs' : 'workflows'}/${encodeURIComponent(args.subject)}?${query}`,
           {

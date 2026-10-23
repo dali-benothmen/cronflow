@@ -31,6 +31,10 @@ export interface ArtifactPolicyV1 {
     readonly knownSecretAction: 'reject' | 'quarantine' | 'allow';
     readonly minimumSecretBytes: 8;
   };
+  readonly operationalOutput?: {
+    readonly enabled: true;
+    readonly retentionMs: number;
+  };
   readonly backend: ArtifactBackendV1;
 }
 
@@ -134,10 +138,10 @@ export async function preflightArtifactPolicy(
   baseDirectory: string,
   mode: ProcessRuntimeMode
 ): Promise<ArtifactPolicyV1> {
-  const policy = strictObject(input, 'policy', [
+  const policy = strictObjectWithOptional(input, 'policy', [
     'contract', 'contractVersion', 'enabled', 'modes', 'projectRoot', 'readRoots',
     'materialization', 'limits', 'retention', 'secretScanning', 'backend',
-  ]);
+  ], ['operationalOutput']);
   if (policy.contract !== 'woml.artifact-policy' || policy.contractVersion !== 1) invalid('The document does not match Artifact Policy v1.');
   if (policy.enabled !== true) throw new ArtifactPolicyError('WOML_ARTIFACT_SERVICE_DISABLED', 'Durable artifacts are disabled by policy.');
   const modes = strictObject(policy.modes, 'modes', ['foreground', 'background']);
@@ -159,6 +163,9 @@ export async function preflightArtifactPolicy(
   const limits = strictObject(policy.limits, 'limits', ['maxArtifactBytes', 'maxRunBytes', 'maxStoreBytes', 'maxConcurrentTransfers', 'transferTimeoutMs']);
   const retention = strictObject(policy.retention, 'retention', ['defaultMs', 'minimumMs', 'maximumMs']);
   const secretScanning = strictObject(policy.secretScanning, 'secretScanning', ['knownSecretAction', 'minimumSecretBytes']);
+  const operationalOutput = policy.operationalOutput === undefined
+    ? undefined
+    : strictObject(policy.operationalOutput, 'operationalOutput', ['enabled', 'retentionMs']);
   const backendValue = strictRecord(policy.backend, 'backend');
   const backend = normalizeBackend(backendValue, projectRoot);
   const normalized: ArtifactPolicyV1 = {
@@ -187,9 +194,32 @@ export async function preflightArtifactPolicy(
       knownSecretAction: enumValue(secretScanning.knownSecretAction, ['reject', 'quarantine', 'allow'], 'knownSecretAction'),
       minimumSecretBytes: exactInteger(secretScanning.minimumSecretBytes, 8, 'minimumSecretBytes'),
     },
+    ...(operationalOutput === undefined
+      ? {}
+      : {
+          operationalOutput: {
+            enabled: operationalOutput.enabled === true
+              ? true as const
+              : invalid('operationalOutput.enabled must be true when configured.'),
+            retentionMs: integer(
+              operationalOutput.retentionMs,
+              3_600_000,
+              31_536_000_000,
+              'operationalOutput.retentionMs'
+            ),
+          },
+        }),
     backend,
   };
-  if (normalized.limits.maxRunBytes < normalized.limits.maxArtifactBytes || normalized.limits.maxStoreBytes < normalized.limits.maxArtifactBytes || normalized.retention.minimumMs > normalized.retention.defaultMs || normalized.retention.defaultMs > normalized.retention.maximumMs) invalid('Artifact limits and retention bounds are inconsistent.');
+  if (
+    normalized.limits.maxRunBytes < normalized.limits.maxArtifactBytes ||
+    normalized.limits.maxStoreBytes < normalized.limits.maxArtifactBytes ||
+    normalized.retention.minimumMs > normalized.retention.defaultMs ||
+    normalized.retention.defaultMs > normalized.retention.maximumMs ||
+    (normalized.operationalOutput !== undefined &&
+      (normalized.operationalOutput.retentionMs < normalized.retention.minimumMs ||
+        normalized.operationalOutput.retentionMs > normalized.retention.maximumMs))
+  ) invalid('Artifact limits and retention bounds are inconsistent.');
   return normalized;
 }
 
@@ -297,6 +327,20 @@ function strictObject(value: unknown, label: string, fields: readonly string[]):
   if (value === null || typeof value !== 'object' || Array.isArray(value)) invalid(`${label} must be an object.`);
   const object = value as Record<string, unknown>;
   if (Object.keys(object).some(key => !fields.includes(key)) || fields.some(key => !(key in object))) invalid(`${label} has missing or unknown fields.`);
+  return object;
+}
+function strictObjectWithOptional(
+  value: unknown,
+  label: string,
+  required: readonly string[],
+  optional: readonly string[]
+): Record<string, unknown> {
+  const object = strictRecord(value, label);
+  const allowed = new Set([...required, ...optional]);
+  if (
+    Object.keys(object).some(key => !allowed.has(key)) ||
+    required.some(key => !(key in object))
+  ) invalid(`${label} has missing or unknown fields.`);
   return object;
 }
 function boundedString(value: unknown, label: string, max: number): string {

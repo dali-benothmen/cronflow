@@ -380,12 +380,15 @@ jobs:
     steps:
       - uses: actions/checkout@v6
       - uses: dtolnay/rust-toolchain@stable
-      - name: Test output ordering, replay, retention, integrity, and safe paths serially
+      - name: Test output ordering, retention, recovery, and governed rollover serially
         working-directory: core
         run: >-
           cargo test --config profile.dev.debug=0
           --config profile.dev.incremental=false -j 1 --locked
-          -p woml-engine --test operational_output_store -- --test-threads=1
+          -p woml-engine --test operational_output_store -- --test-threads=1 &&
+          cargo test --config profile.dev.debug=0
+          --config profile.dev.incremental=false -j 1 --locked
+          -p woml-engine --lib operational_output_rollover -- --test-threads=1
       - name: Failure diagnostics
         if: failure()
         run: |

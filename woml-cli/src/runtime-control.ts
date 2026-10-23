@@ -18,6 +18,7 @@ import { dirname, join, resolve } from 'node:path';
 import type { RuntimeObservabilitySurface } from './runtime-observability';
 import {
   operationalSources,
+  type OperationalExecutionPhaseV1,
   type OperationalSourceV1,
   type OperationalSubjectKind,
   type RuntimeOperationalOutputSurface,
@@ -87,6 +88,7 @@ interface RuntimeOutputRoute {
   readonly after: number;
   readonly limit: number;
   readonly sources: ReadonlySet<OperationalSourceV1>;
+  readonly phase?: OperationalExecutionPhaseV1;
 }
 
 function runtimeOutputRoute(url: URL): RuntimeOutputRoute | undefined {
@@ -153,6 +155,17 @@ function runtimeOutputRoute(url: URL): RuntimeOutputRoute | undefined {
       'The operational-output source filter is invalid.'
     );
   }
+  const requestedPhase = url.searchParams.get('phase');
+  if (
+    requestedPhase !== null &&
+    requestedPhase !== 'forward' &&
+    requestedPhase !== 'corrective'
+  ) {
+    throw new RuntimeControlError(
+      'WOML_OUTPUT_PHASE_INVALID',
+      'The operational-output execution-phase filter is invalid.'
+    );
+  }
   return {
     kind: match[1] !== undefined
       ? 'stream'
@@ -168,6 +181,9 @@ function runtimeOutputRoute(url: URL): RuntimeOutputRoute | undefined {
         ? operationalSources
         : (requestedSources as OperationalSourceV1[])
     ),
+    ...(requestedPhase === null
+      ? {}
+      : { phase: requestedPhase as OperationalExecutionPhaseV1 }),
   };
 }
 
@@ -192,6 +208,7 @@ export async function queryRuntimeOperationalOutput(
       subject,
       after: route.after,
       sources: route.sources,
+      ...(route.phase === undefined ? {} : { phase: route.phase }),
     });
   }
   return await output.page({
@@ -200,6 +217,7 @@ export async function queryRuntimeOperationalOutput(
     after: route.after,
     limit: route.limit,
     sources: route.sources,
+    ...(route.phase === undefined ? {} : { phase: route.phase }),
   });
 }
 

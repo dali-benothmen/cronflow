@@ -94,12 +94,50 @@ function surface(): RuntimeOperationalOutput {
       activeRuns: 1,
       terminalRuns: 1,
       truncatedStreams: 0,
+      maxAttemptBytes: 16 * 1024 * 1024,
+      maxRunBytes: 16 * 1024 * 1024,
+      maxStoreBytes: 1024 * 1024 * 1024,
+      retentionMs: 7 * 24 * 60 * 60 * 1000,
     }),
     heartbeatMs: 60_000,
   });
 }
 
 describe('operational output replay and live delivery', () => {
+  test('keeps forward and corrective output separately filterable', () => {
+    const corrective: OperationalRecordV1 = {
+      profile: 'woml.operational-record/v1',
+      deploymentId: 'deployment_test',
+      sequence: 4,
+      occurredAt: '2026-10-23T10:00:03.000Z',
+      workflowId: 'deploy-api',
+      runId: 'run_alpha',
+      nodeId: 'apply',
+      attempt: 2,
+      invocationId: 'corr_apply_2',
+      phase: 'corrective',
+      kind: 'output',
+      source: 'stdout',
+      text: 'rollback complete',
+      byteCount: 17,
+    };
+    const output = new RuntimeOperationalOutput({
+      readPage: () => ({ ...page(0), latestSequence: 4, nextAfter: 4, records: [records[0]!, corrective] }),
+      readProgress: () => [],
+      readObservation: () => surface().observe(),
+      heartbeatMs: 60_000,
+    });
+    expect(output.page({
+      subjectKind: 'run', subject: 'run_alpha', after: 0, limit: 100,
+      sources: new Set(['stdout']), phase: 'forward',
+    }).records.map(item => item.sequence)).toEqual([1]);
+    expect(output.page({
+      subjectKind: 'run', subject: 'run_alpha', after: 0, limit: 100,
+      sources: new Set(['stdout']), phase: 'corrective',
+    }).records.map(item => item.sequence)).toEqual([4]);
+    output.closeStreams();
+  });
+
   test('decodes ordered pages and sanitizes hostile terminal content', () => {
     const decoded = page(0);
     expect(decoded.records.map(item => item.sequence)).toEqual([1, 2, 3]);

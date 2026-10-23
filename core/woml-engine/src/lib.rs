@@ -243,9 +243,10 @@ pub use notification_runtime::{
   NotificationJourneyError, NotificationJourneyResult, NOTIFICATION_JOURNEY_DIAGNOSTICS_VERSION,
 };
 pub use operational_output::{
-  operational_output_store_for_state, LazyOperationalOutputStore, OperationalBodyV1,
-  OperationalCloseStatusV1, OperationalGapV1, OperationalIdentityV1, OperationalLogLevelV1,
-  OperationalOutputError, OperationalOutputPruneResultV1, OperationalOutputReporter,
+  operational_output_store_for_state, LazyOperationalOutputStore, OperationalAppendOutcomeV1,
+  OperationalBodyV1, OperationalCloseStatusV1, OperationalExecutionPhaseV1, OperationalGapV1,
+  OperationalIdentityV1, OperationalLogLevelV1, OperationalOutputError, OperationalOutputLimitsV1,
+  OperationalOutputPrunePlanV1, OperationalOutputPruneResultV1, OperationalOutputReporter,
   OperationalOutputStore, OperationalOutputStoreInspectionV1, OperationalPageV1,
   OperationalProgressSnapshotV1, OperationalProgressStatusV1, OperationalRecordDraftV1,
   OperationalRecordV1, OperationalSourceV1, OperationalStreamEventV1,

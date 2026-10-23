@@ -7645,6 +7645,8 @@ async function runCliUnprofiled(
                 `Policy: ${outcome.policyId}`,
                 `Eligible terminal runs: ${outcome.eligibleRuns}`,
                 `Estimated removable history: ${outcome.estimatedBytes} bytes`,
+                `Eligible operational runs: ${outcome.output.eligibleRuns}`,
+                `Estimated removable operational output: ${outcome.output.eligibleOutputBytes} bytes`,
                 ...(outcome.artifacts === undefined
                   ? []
                   : [
@@ -7659,6 +7661,7 @@ async function runCliUnprofiled(
           parsed.json
             ? `${JSON.stringify({
                 ...outcome.result,
+                output: outcome.output,
                 ...(outcome.artifacts === undefined
                   ? {}
                   : { artifacts: outcome.artifacts }),
@@ -7670,6 +7673,8 @@ async function runCliUnprofiled(
                 `Removed logical history: ${outcome.result.deletedBytes} bytes`,
                 `Batches: ${outcome.batches}`,
                 `Durable state entries deleted: ${outcome.result.stateEntriesDeleted}`,
+                `Deleted operational runs: ${outcome.output.prunedRuns}`,
+                `Removed operational output: ${outcome.output.prunedOutputBytes} bytes`,
                 ...(outcome.artifacts === undefined
                   ? []
                   : [

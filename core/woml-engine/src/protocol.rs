@@ -87,7 +87,7 @@ impl ProgressReportMessage {
       && (self.current.is_some() || self.message.is_some())
       && self
         .current
-        .is_none_or(|value| value.is_finite() && value >= 0.0 && value <= 9_007_199_254_740_991.0)
+        .is_none_or(|value| value.is_finite() && (0.0..=9_007_199_254_740_991.0).contains(&value))
       && self.total.is_none_or(|value| {
         value.is_finite()
           && value > 0.0

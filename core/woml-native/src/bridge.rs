@@ -2542,6 +2542,77 @@ pub fn observe_woml_operational_output(event_store_path: String) -> napi::Result
 }
 
 #[napi]
+pub fn plan_woml_operational_output_prune(
+  event_store_path: String,
+  cutoff: String,
+) -> napi::Result<String> {
+  let cutoff = DateTime::parse_from_rfc3339(&cutoff)
+    .map_err(|_| {
+      napi::Error::from_reason(
+        "WOML_OUTPUT_RETENTION_INVALID: the output retention cutoff is invalid".to_string(),
+      )
+    })?
+    .with_timezone(&Utc);
+  let lazy = woml_engine::operational_output_store_for_state(&PathBuf::from(event_store_path))
+    .map_err(operational_output_napi_error)?;
+  let plan = match lazy
+    .activate_if_exists()
+    .map_err(operational_output_napi_error)?
+  {
+    Some(store) => store
+      .plan_prune_terminal_before(cutoff, 1_000)
+      .map_err(operational_output_napi_error)?,
+    None => woml_engine::OperationalOutputPrunePlanV1 {
+      profile: "woml.operational-output-prune-plan/v1".to_string(),
+      eligible_runs: 0,
+      eligible_records: 0,
+      eligible_output_bytes: 0,
+    },
+  };
+  serde_json::to_string(&plan).map_err(|error| {
+    napi::Error::from_reason(format!(
+      "WOML_OUTPUT_STORE_UNAVAILABLE: could not encode output retention plan: {error}"
+    ))
+  })
+}
+
+#[napi]
+pub fn prune_woml_operational_output(
+  event_store_path: String,
+  cutoff: String,
+) -> napi::Result<String> {
+  let cutoff = DateTime::parse_from_rfc3339(&cutoff)
+    .map_err(|_| {
+      napi::Error::from_reason(
+        "WOML_OUTPUT_RETENTION_INVALID: the output retention cutoff is invalid".to_string(),
+      )
+    })?
+    .with_timezone(&Utc);
+  let lazy = woml_engine::operational_output_store_for_state(&PathBuf::from(event_store_path))
+    .map_err(operational_output_napi_error)?;
+  let result = match lazy
+    .activate_if_exists()
+    .map_err(operational_output_napi_error)?
+  {
+    Some(store) => store
+      .prune_terminal_before(cutoff, 1_000)
+      .map_err(operational_output_napi_error)?,
+    None => woml_engine::OperationalOutputPruneResultV1 {
+      profile: "woml.operational-output-prune/v1".to_string(),
+      pruned_runs: 0,
+      pruned_records: 0,
+      pruned_output_bytes: 0,
+      pruned_through: 0,
+    },
+  };
+  serde_json::to_string(&result).map_err(|error| {
+    napi::Error::from_reason(format!(
+      "WOML_OUTPUT_STORE_UNAVAILABLE: could not encode output retention result: {error}"
+    ))
+  })
+}
+
+#[napi]
 pub fn create_woml_backup(
   event_store_path: String,
   destination_path: String,

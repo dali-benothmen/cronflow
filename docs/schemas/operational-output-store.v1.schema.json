@@ -11,7 +11,7 @@
     "inspection": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["profile", "schemaVersion", "deploymentId", "nextSequence", "latestSequence", "prunedThrough", "recordCount", "retainedOutputBytes", "activeRuns", "terminalRuns", "truncatedStreams"],
+      "required": ["profile", "schemaVersion", "deploymentId", "nextSequence", "latestSequence", "prunedThrough", "recordCount", "retainedOutputBytes", "activeRuns", "terminalRuns", "truncatedStreams", "maxAttemptBytes", "maxRunBytes", "maxStoreBytes", "retentionMs"],
       "properties": {
         "profile": { "const": "woml.operational-output-store/v1" },
         "schemaVersion": { "const": 1 },
@@ -24,7 +24,12 @@
         "retainedOutputBytes": { "$ref": "#/$defs/count" },
         "activeRuns": { "$ref": "#/$defs/count" },
         "terminalRuns": { "$ref": "#/$defs/count" },
-        "truncatedStreams": { "$ref": "#/$defs/count" }
+        "truncatedStreams": { "$ref": "#/$defs/count" },
+        "maxAttemptBytes": { "$ref": "#/$defs/count" },
+        "maxRunBytes": { "$ref": "#/$defs/count" },
+        "maxStoreBytes": { "$ref": "#/$defs/count" },
+        "retentionMs": { "$ref": "#/$defs/count" },
+        "lastPrunedAt": { "type": "string", "format": "date-time" }
       }
     },
     "prune": {

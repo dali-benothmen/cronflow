@@ -1214,6 +1214,14 @@ interface NativeCore {
     runId: string
   ) => string;
   readonly observeWomlOperationalOutput?: (eventStorePath: string) => string;
+  readonly planWomlOperationalOutputPrune?: (
+    eventStorePath: string,
+    cutoff: string
+  ) => string;
+  readonly pruneWomlOperationalOutput?: (
+    eventStorePath: string,
+    cutoff: string
+  ) => string;
   readonly createWomlBackup: (
     eventStorePath: string,
     destinationPath: string,
@@ -4092,6 +4100,89 @@ export function observeOperationalOutputWithRust(
   return callOperationalOutputNative(
     () => native.observeWomlOperationalOutput!(eventStorePath),
     decodeOperationalObservationV1
+  );
+}
+
+export interface OperationalOutputPrunePlanV1 {
+  readonly profile: 'woml.operational-output-prune-plan/v1';
+  readonly eligibleRuns: number;
+  readonly eligibleRecords: number;
+  readonly eligibleOutputBytes: number;
+}
+
+export interface OperationalOutputPruneResultV1 {
+  readonly profile: 'woml.operational-output-prune/v1';
+  readonly prunedRuns: number;
+  readonly prunedRecords: number;
+  readonly prunedOutputBytes: number;
+  readonly prunedThrough: number;
+}
+
+function decodeOutputRetention<T>(
+  json: string,
+  profile: string,
+  fields: readonly string[]
+): T {
+  const value: unknown = JSON.parse(json);
+  if (
+    value === null ||
+    typeof value !== 'object' ||
+    Array.isArray(value) ||
+    (value as Record<string, unknown>).profile !== profile ||
+    !fields.every(field => {
+      const candidate = (value as Record<string, unknown>)[field];
+      return Number.isSafeInteger(candidate) && Number(candidate) >= 0;
+    })
+  ) {
+    throw new OperationalOutputError(
+      'WOML_OUTPUT_PROTOCOL_INVALID',
+      'The native core returned invalid operational-output retention data.'
+    );
+  }
+  return value as T;
+}
+
+export function planOperationalOutputPruneWithRust(
+  eventStorePath: string,
+  cutoff: string,
+  options: Pick<RustExecutorOptions, 'nativeCorePath'> = {}
+): OperationalOutputPrunePlanV1 {
+  const native = loadNativeCore(options.nativeCorePath ?? defaultNativeCorePath());
+  if (typeof native.planWomlOperationalOutputPrune !== 'function') {
+    throw new OperationalOutputError(
+      'WOML_OUTPUT_API_UNAVAILABLE',
+      'The native core does not expose operational-output retention planning.'
+    );
+  }
+  return callOperationalOutputNative(
+    () => native.planWomlOperationalOutputPrune!(eventStorePath, cutoff),
+    json => decodeOutputRetention<OperationalOutputPrunePlanV1>(
+      json,
+      'woml.operational-output-prune-plan/v1',
+      ['eligibleRuns', 'eligibleRecords', 'eligibleOutputBytes']
+    )
+  );
+}
+
+export function pruneOperationalOutputWithRust(
+  eventStorePath: string,
+  cutoff: string,
+  options: Pick<RustExecutorOptions, 'nativeCorePath'> = {}
+): OperationalOutputPruneResultV1 {
+  const native = loadNativeCore(options.nativeCorePath ?? defaultNativeCorePath());
+  if (typeof native.pruneWomlOperationalOutput !== 'function') {
+    throw new OperationalOutputError(
+      'WOML_OUTPUT_API_UNAVAILABLE',
+      'The native core does not expose operational-output pruning.'
+    );
+  }
+  return callOperationalOutputNative(
+    () => native.pruneWomlOperationalOutput!(eventStorePath, cutoff),
+    json => decodeOutputRetention<OperationalOutputPruneResultV1>(
+      json,
+      'woml.operational-output-prune/v1',
+      ['prunedRuns', 'prunedRecords', 'prunedOutputBytes', 'prunedThrough']
+    )
   );
 }
 

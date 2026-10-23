@@ -1004,6 +1004,11 @@ impl DurableCapabilityAuthority {
         node_id: Some(identity.node_id.clone()),
         attempt: Some(identity.attempt_number),
         invocation_id: Some(identity.invocation_id.clone()),
+        phase: if identity.invocation_id.starts_with("corr_") {
+          crate::OperationalExecutionPhaseV1::Corrective
+        } else {
+          crate::OperationalExecutionPhaseV1::Forward
+        },
       },
       body,
     };
@@ -1016,7 +1021,7 @@ impl DurableCapabilityAuthority {
       return Ok(());
     }
     store
-      .append(draft)
+      .append_bounded(draft)
       .map(|_| ())
       .map_err(|_| operational_output_failure("WOML_OUTPUT_STORE_UNAVAILABLE", true))
   }
@@ -2450,11 +2455,10 @@ fn redact_operational_body<'a>(
   };
   match body {
     crate::OperationalBodyV1::Output { text, .. } => redact(text),
-    crate::OperationalBodyV1::Progress { message, .. } => {
-      if let Some(message) = message {
-        redact(message);
-      }
-    }
+    crate::OperationalBodyV1::Progress {
+      message: Some(message),
+      ..
+    } => redact(message),
     _ => {}
   }
 }

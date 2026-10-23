@@ -282,6 +282,7 @@ pub struct RuntimeExecutionOptions {
   managed_durable_state_store: Option<Arc<crate::ManagedDurableStateStore>>,
   managed_locks_service: Option<Arc<crate::ManagedLocksService>>,
   managed_artifact_store: Option<Arc<crate::ManagedArtifactStore>>,
+  managed_artifact_put_handler: Option<Arc<crate::ManagedArtifactPutHandler>>,
   managed_process_handler: Option<Arc<crate::ManagedProcessHandler>>,
   operational_output_store: Option<Arc<crate::LazyOperationalOutputStore>>,
   artifact_policy: Option<Arc<crate::artifacts::PreparedArtifactPolicy>>,
@@ -515,6 +516,7 @@ impl RuntimeExecutionOptions {
       managed_durable_state_store: Some(managed_durable_state_store),
       managed_locks_service: Some(managed_locks_service),
       managed_artifact_store: None,
+      managed_artifact_put_handler: None,
       managed_process_handler: None,
       operational_output_store: None,
       artifact_policy: None,
@@ -681,6 +683,7 @@ impl RuntimeExecutionOptions {
     self.managed_durable_state_store = None;
     self.managed_locks_service = None;
     self.managed_artifact_store = None;
+    self.managed_artifact_put_handler = None;
     self.managed_process_handler = None;
     self.operational_output_store = None;
     self.artifact_policy = None;
@@ -699,6 +702,9 @@ impl RuntimeExecutionOptions {
       mode,
       Arc::clone(&self.resolved_secrets),
     )?);
+    if let Some(artifacts) = &self.managed_artifact_put_handler {
+      handler.configure_output_artifacts(Arc::clone(artifacts))?;
+    }
     self
       .capability_registry
       .register(handler.clone())
@@ -714,18 +720,23 @@ impl RuntimeExecutionOptions {
     mode: crate::ArtifactRuntimeMode,
   ) -> Result<Self, crate::ArtifactPolicyError> {
     let store = Arc::new(crate::ManagedArtifactStore::default());
-    let handler = crate::ManagedArtifactPutHandler::new(
+    let handler = Arc::new(crate::ManagedArtifactPutHandler::new(
       Arc::clone(&store),
       policy,
       mode,
       &self.resolved_secrets,
-    )?;
+    )?);
     let head_handler = handler.head_handler();
     let materialize_handler = handler.materialize_handler();
     self.artifact_policy = Some(handler.policy());
+    if let Some(process) = &self.managed_process_handler {
+      process
+        .configure_output_artifacts(Arc::clone(&handler))
+        .map_err(|error| crate::ArtifactPolicyError::Invalid(error.to_string()))?;
+    }
     self
       .capability_registry
-      .register(Arc::new(handler))
+      .register(handler.clone())
       .map_err(|error| crate::ArtifactPolicyError::Invalid(error.to_string()))?;
     self
       .capability_registry
@@ -736,6 +747,7 @@ impl RuntimeExecutionOptions {
       .register(Arc::new(materialize_handler))
       .map_err(|error| crate::ArtifactPolicyError::Invalid(error.to_string()))?;
     self.managed_artifact_store = Some(store);
+    self.managed_artifact_put_handler = Some(handler);
     Ok(self)
   }
 
@@ -1837,7 +1849,10 @@ async fn execute_policy_run_durable_unprofiled(
   }
   let mut engine = DurableDagEngine::resume(store, run_id)?;
   match acquisition {
-    PolicyClaimAcquisition::Recovered => resume_with_engine(&mut engine, run_id, options).await,
+    PolicyClaimAcquisition::Recovered => {
+      recover_operational_run(&options, run_id)?;
+      resume_with_engine(&mut engine, run_id, options).await
+    }
     PolicyClaimAcquisition::Claimed(lease) => {
       let coordinator = Arc::new(PolicyExecutionCoordinator {
         database_path: database_path.clone(),
@@ -1969,6 +1984,7 @@ async fn execute_workflow_durable_internal_unprofiled(
     bind_run_infrastructure_policy(&mut store, &admission.run_id, &options)?;
     return execute_policy_run_durable(database_path, &admission.run_id, options, store).await;
   }
+  recover_operational_output(&options)?;
   store.recover_interrupted_runs()?;
   store.register_definition_module_artifacts(
     &workflow,
@@ -2073,6 +2089,7 @@ async fn resume_workflow_durable_internal(
   if workflow.schema_version >= crate::COMPILED_MODEL_SCHEMA_VERSION_V12 {
     return execute_policy_run_durable(database_path, run_id, options, store).await;
   }
+  recover_operational_output(&options)?;
   store.recover_interrupted_runs()?;
   let options = runtime_modules_from_store(options, &store, &binding.definition_hash)?;
   let mut engine = DurableDagEngine::resume(store, run_id)?;
@@ -2167,6 +2184,43 @@ fn attach_durable_capability_authority(
     .with_operational_output(operational_output, Arc::clone(&options.resolved_secrets)),
   ));
   Ok(options)
+}
+
+fn recover_operational_output(
+  options: &RuntimeExecutionOptions,
+) -> Result<(), RuntimeExecutionError> {
+  let Some(lazy) = options.operational_output_store.as_ref() else {
+    return Ok(());
+  };
+  let Some(store) = lazy.activate_if_exists().map_err(|error| {
+    RuntimeExecutionError::InvalidConfiguration(format!("{}: {error}", error.code()))
+  })?
+  else {
+    return Ok(());
+  };
+  store.recover_interrupted_streams().map_err(|error| {
+    RuntimeExecutionError::InvalidConfiguration(format!("{}: {error}", error.code()))
+  })?;
+  Ok(())
+}
+
+fn recover_operational_run(
+  options: &RuntimeExecutionOptions,
+  run_id: &str,
+) -> Result<(), RuntimeExecutionError> {
+  let Some(lazy) = options.operational_output_store.as_ref() else {
+    return Ok(());
+  };
+  let Some(store) = lazy.activate_if_exists().map_err(|error| {
+    RuntimeExecutionError::InvalidConfiguration(format!("{}: {error}", error.code()))
+  })?
+  else {
+    return Ok(());
+  };
+  store.recover_interrupted_run(run_id).map_err(|error| {
+    RuntimeExecutionError::InvalidConfiguration(format!("{}: {error}", error.code()))
+  })?;
+  Ok(())
 }
 
 fn bind_run_infrastructure_policy(
@@ -2944,11 +2998,49 @@ async fn resume_with_engine<E: RuntimeDagEngine>(
   let mut span = crate::performance::PerformanceSpan::new("runtime", "runtime.resume_engine");
   span.run_id(run_id.to_string());
   span.count("nodes", engine.workflow().graph.nodes.len());
-  let result = resume_with_engine_unprofiled(engine, run_id, options).await;
+  let result = resume_with_engine_unprofiled(engine, run_id, options.clone()).await;
+  settle_operational_run(engine, run_id, &options);
   if result.is_ok() {
     span.succeed();
   }
   result
+}
+
+fn settle_operational_run<E: RuntimeDagEngine>(
+  engine: &E,
+  run_id: &str,
+  options: &RuntimeExecutionOptions,
+) {
+  let Some(store) = options
+    .operational_output_store
+    .as_ref()
+    .and_then(|store| store.active_store())
+  else {
+    return;
+  };
+  let Ok(projection) = engine.projection(run_id) else {
+    return;
+  };
+  let status = match projection.status {
+    RunStatus::Succeeded => crate::OperationalCloseStatusV1::Succeeded,
+    RunStatus::Failed => crate::OperationalCloseStatusV1::Failed,
+    RunStatus::Cancelled => crate::OperationalCloseStatusV1::Cancelled,
+    _ => return,
+  };
+  let _ = store.append(crate::OperationalRecordDraftV1 {
+    identity: crate::OperationalIdentityV1 {
+      workflow_id: engine.workflow().workflow_id.clone(),
+      run_id: run_id.to_string(),
+      node_id: None,
+      attempt: None,
+      invocation_id: None,
+      phase: crate::OperationalExecutionPhaseV1::Forward,
+    },
+    body: crate::OperationalBodyV1::Closed {
+      status,
+      reason_code: None,
+    },
+  });
 }
 
 fn runtime_outcome_run_id(outcome: &WorkflowRuntimeOutcome) -> &str {

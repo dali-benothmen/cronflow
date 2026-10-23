@@ -90,6 +90,8 @@ describe('workflow log following', () => {
         '25',
         '--source',
         'stdout,script',
+        '--phase',
+        'corrective',
         '--no-follow',
       ])
     ).toMatchObject({
@@ -97,7 +99,11 @@ describe('workflow log following', () => {
       tail: 25,
       follow: false,
       operational: true,
+      phase: 'corrective',
     });
+    expect(() =>
+      parseLogFollowArguments(['logs', 'run_abc', '--phase', 'cleanup'])
+    ).toThrow(LogFollowError);
     expect(() =>
       parseLogFollowArguments([
         'logs',

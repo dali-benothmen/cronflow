@@ -36,6 +36,45 @@ pub type OperationalOutputReporter = Arc<dyn Fn(u64) + Send + Sync>;
 const MAX_ID_BYTES: usize = 320;
 const MAX_REASON_BYTES: usize = 128;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct OperationalOutputLimitsV1 {
+  pub max_attempt_bytes: u64,
+  pub max_run_bytes: u64,
+  pub max_store_bytes: u64,
+  pub retention_ms: u64,
+}
+
+impl Default for OperationalOutputLimitsV1 {
+  fn default() -> Self {
+    Self {
+      max_attempt_bytes: DEFAULT_OPERATIONAL_INLINE_RUN_BYTES,
+      max_run_bytes: DEFAULT_OPERATIONAL_INLINE_RUN_BYTES,
+      max_store_bytes: DEFAULT_OPERATIONAL_STORE_BYTES,
+      retention_ms: DEFAULT_OPERATIONAL_RETENTION_MS,
+    }
+  }
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum OperationalAppendOutcomeV1 {
+  Appended(OperationalRecordV1),
+  Truncated(OperationalRecordV1),
+  Dropped { marker_sequence: u64 },
+}
+
+impl OperationalAppendOutcomeV1 {
+  pub fn sequence(&self) -> u64 {
+    match self {
+      Self::Appended(record) | Self::Truncated(record) => record.sequence,
+      Self::Dropped { marker_sequence } => *marker_sequence,
+    }
+  }
+
+  pub fn retained(&self) -> bool {
+    matches!(self, Self::Appended(_))
+  }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum OperationalSourceV1 {
@@ -43,6 +82,27 @@ pub enum OperationalSourceV1 {
   Stderr,
   Script,
   Runtime,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum OperationalExecutionPhaseV1 {
+  #[default]
+  Forward,
+  Corrective,
+}
+
+impl OperationalExecutionPhaseV1 {
+  fn as_str(self) -> &'static str {
+    match self {
+      Self::Forward => "forward",
+      Self::Corrective => "corrective",
+    }
+  }
+
+  fn is_forward(value: &Self) -> bool {
+    matches!(value, Self::Forward)
+  }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -183,6 +243,11 @@ pub struct OperationalIdentityV1 {
   pub attempt: Option<u32>,
   #[serde(skip_serializing_if = "Option::is_none")]
   pub invocation_id: Option<String>,
+  #[serde(
+    default,
+    skip_serializing_if = "OperationalExecutionPhaseV1::is_forward"
+  )]
+  pub phase: OperationalExecutionPhaseV1,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -292,6 +357,12 @@ pub struct OperationalOutputStoreInspectionV1 {
   pub active_runs: u64,
   pub terminal_runs: u64,
   pub truncated_streams: u64,
+  pub max_attempt_bytes: u64,
+  pub max_run_bytes: u64,
+  pub max_store_bytes: u64,
+  pub retention_ms: u64,
+  #[serde(skip_serializing_if = "Option::is_none")]
+  pub last_pruned_at: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -302,6 +373,15 @@ pub struct OperationalOutputPruneResultV1 {
   pub pruned_records: u64,
   pub pruned_output_bytes: u64,
   pub pruned_through: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct OperationalOutputPrunePlanV1 {
+  pub profile: String,
+  pub eligible_runs: u64,
+  pub eligible_records: u64,
+  pub eligible_output_bytes: u64,
 }
 
 #[derive(Debug, Error)]
@@ -342,6 +422,7 @@ pub struct OperationalOutputStore {
   deployment_id: String,
   connection: Mutex<Connection>,
   reporter: Option<OperationalOutputReporter>,
+  limits: OperationalOutputLimitsV1,
 }
 
 impl std::fmt::Debug for OperationalOutputStore {
@@ -367,6 +448,29 @@ impl OperationalOutputStore {
     deployment_id: impl Into<String>,
     reporter: Option<OperationalOutputReporter>,
   ) -> Result<Self, OperationalOutputError> {
+    Self::open_with_limits_and_reporter(
+      path,
+      deployment_id,
+      OperationalOutputLimitsV1::default(),
+      reporter,
+    )
+  }
+
+  pub fn open_with_limits(
+    path: impl AsRef<Path>,
+    deployment_id: impl Into<String>,
+    limits: OperationalOutputLimitsV1,
+  ) -> Result<Self, OperationalOutputError> {
+    Self::open_with_limits_and_reporter(path, deployment_id, limits, None)
+  }
+
+  fn open_with_limits_and_reporter(
+    path: impl AsRef<Path>,
+    deployment_id: impl Into<String>,
+    limits: OperationalOutputLimitsV1,
+    reporter: Option<OperationalOutputReporter>,
+  ) -> Result<Self, OperationalOutputError> {
+    validate_limits(limits)?;
     let deployment_id = deployment_id.into();
     validate_id(&deployment_id)?;
     let path = prepare_private_store_path(path.as_ref())?;
@@ -391,6 +495,7 @@ impl OperationalOutputStore {
       deployment_id,
       connection: Mutex::new(connection),
       reporter,
+      limits,
     })
   }
 
@@ -406,6 +511,19 @@ impl OperationalOutputStore {
     &self,
     draft: OperationalRecordDraftV1,
   ) -> Result<OperationalRecordV1, OperationalOutputError> {
+    match self.append_bounded(draft)? {
+      OperationalAppendOutcomeV1::Appended(record)
+      | OperationalAppendOutcomeV1::Truncated(record) => Ok(record),
+      OperationalAppendOutcomeV1::Dropped { .. } => Err(OperationalOutputError::InvalidRecord(
+        "the operational output lane is already truncated",
+      )),
+    }
+  }
+
+  pub fn append_bounded(
+    &self,
+    mut draft: OperationalRecordDraftV1,
+  ) -> Result<OperationalAppendOutcomeV1, OperationalOutputError> {
     validate_draft(&draft)?;
     let occurred_at = now_string();
     let mut connection = self
@@ -432,6 +550,78 @@ impl OperationalOutputStore {
         "the operational stream is already closed",
       ));
     }
+    let mut truncated = false;
+    if let OperationalBodyV1::Output {
+      source, byte_count, ..
+    } = &draft.body
+    {
+      let run_bytes: u64 = transaction
+        .query_row(
+          "SELECT COALESCE(retained_output_bytes, 0) FROM woml_operational_runs WHERE run_id = ?1",
+          [&draft.identity.run_id],
+          |row| row.get(0),
+        )
+        .optional()
+        .map_err(|_| OperationalOutputError::Corrupt)?
+        .unwrap_or(0);
+      let attempt_bytes: u64 = transaction
+        .query_row(
+          "SELECT COALESCE(SUM(accounted_bytes), 0) FROM woml_operational_records
+           WHERE run_id = ?1 AND node_id IS ?2 AND attempt_number IS ?3",
+          params![
+            draft.identity.run_id,
+            draft.identity.node_id,
+            draft.identity.attempt,
+          ],
+          |row| row.get(0),
+        )
+        .map_err(|_| OperationalOutputError::Corrupt)?;
+      let store_bytes: u64 = transaction
+        .query_row(
+          "SELECT COALESCE(SUM(retained_output_bytes), 0) FROM woml_operational_runs",
+          [],
+          |row| row.get(0),
+        )
+        .map_err(|_| OperationalOutputError::Corrupt)?;
+      let reason = if attempt_bytes.saturating_add(*byte_count) > self.limits.max_attempt_bytes {
+        Some("inline_attempt_budget")
+      } else if run_bytes.saturating_add(*byte_count) > self.limits.max_run_bytes {
+        Some("inline_run_budget")
+      } else if store_bytes.saturating_add(*byte_count) > self.limits.max_store_bytes {
+        Some("output_store_budget")
+      } else {
+        None
+      };
+      if let Some(reason) = reason {
+        let marker_sequence = transaction
+          .query_row(
+            "SELECT sequence FROM woml_operational_records
+             WHERE run_id = ?1 AND node_id IS ?2 AND attempt_number IS ?3
+               AND kind = 'truncated'
+             ORDER BY sequence LIMIT 1",
+            params![
+              draft.identity.run_id,
+              draft.identity.node_id,
+              draft.identity.attempt,
+            ],
+            |row| row.get::<_, u64>(0),
+          )
+          .optional()
+          .map_err(|_| OperationalOutputError::Corrupt)?;
+        if let Some(marker_sequence) = marker_sequence {
+          transaction
+            .commit()
+            .map_err(|_| OperationalOutputError::Unavailable)?;
+          return Ok(OperationalAppendOutcomeV1::Dropped { marker_sequence });
+        }
+        draft.body = OperationalBodyV1::Truncated {
+          source: *source,
+          dropped_bytes: *byte_count,
+          reason: reason.to_string(),
+        };
+        truncated = true;
+      }
+    }
     let record = OperationalRecordV1 {
       profile: OPERATIONAL_RECORD_PROFILE.to_string(),
       deployment_id: self.deployment_id.clone(),
@@ -452,8 +642,8 @@ impl OperationalOutputStore {
       .execute(
         "INSERT INTO woml_operational_records(
            sequence, deployment_id, occurred_at, workflow_id, run_id, node_id, attempt_number,
-           invocation_id, kind, source, accounted_bytes, record_json
-         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
+           invocation_id, phase, kind, source, accounted_bytes, record_json
+         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
         params![
           sequence,
           self.deployment_id,
@@ -463,6 +653,7 @@ impl OperationalOutputStore {
           record.identity.node_id,
           record.identity.attempt,
           record.identity.invocation_id,
+          record.identity.phase.as_str(),
           record.body.kind(),
           source,
           record.body.accounted_bytes(),
@@ -484,7 +675,11 @@ impl OperationalOutputStore {
     if let Some(reporter) = &self.reporter {
       reporter(record.sequence);
     }
-    Ok(record)
+    Ok(if truncated {
+      OperationalAppendOutcomeV1::Truncated(record)
+    } else {
+      OperationalAppendOutcomeV1::Appended(record)
+    })
   }
 
   /// Durably updates an existing latest-progress lane without adding another
@@ -781,6 +976,11 @@ impl OperationalOutputStore {
       active_runs,
       terminal_runs,
       truncated_streams,
+      max_attempt_bytes: self.limits.max_attempt_bytes,
+      max_run_bytes: self.limits.max_run_bytes,
+      max_store_bytes: self.limits.max_store_bytes,
+      retention_ms: self.limits.retention_ms,
+      last_pruned_at: read_metadata_optional(&connection, "last_pruned_at")?,
     })
   }
 
@@ -865,6 +1065,15 @@ impl OperationalOutputStore {
         [pruned_through.to_string()],
       )
       .map_err(|_| OperationalOutputError::Unavailable)?;
+    if !candidates.is_empty() {
+      transaction
+        .execute(
+          "INSERT INTO woml_operational_metadata(key, value) VALUES ('last_pruned_at', ?1)
+           ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+          [now_string()],
+        )
+        .map_err(|_| OperationalOutputError::Unavailable)?;
+    }
     transaction
       .commit()
       .map_err(|_| OperationalOutputError::Unavailable)?;
@@ -876,16 +1085,130 @@ impl OperationalOutputStore {
       pruned_through,
     })
   }
+
+  pub fn plan_prune_terminal_before(
+    &self,
+    cutoff: DateTime<Utc>,
+    max_runs: usize,
+  ) -> Result<OperationalOutputPrunePlanV1, OperationalOutputError> {
+    if !(1..=1_000).contains(&max_runs) {
+      return Err(OperationalOutputError::InvalidCursor);
+    }
+    let cutoff = cutoff.to_rfc3339_opts(SecondsFormat::Millis, true);
+    let connection = self
+      .connection
+      .lock()
+      .map_err(|_| OperationalOutputError::Unavailable)?;
+    let (eligible_runs, eligible_records, eligible_output_bytes) = connection
+      .query_row(
+        "SELECT COUNT(*), COALESCE(SUM(record_count), 0),
+                COALESCE(SUM(retained_output_bytes), 0)
+         FROM (
+           SELECT record_count, retained_output_bytes
+           FROM woml_operational_runs
+           WHERE active = 0 AND terminal_at < ?1
+           ORDER BY terminal_at, run_id LIMIT ?2
+         )",
+        params![cutoff, max_runs],
+        |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+      )
+      .map_err(|_| OperationalOutputError::Corrupt)?;
+    Ok(OperationalOutputPrunePlanV1 {
+      profile: "woml.operational-output-prune-plan/v1".to_string(),
+      eligible_runs,
+      eligible_records,
+      eligible_output_bytes,
+    })
+  }
+
+  pub fn recover_interrupted_streams(
+    &self,
+  ) -> Result<Vec<OperationalRecordV1>, OperationalOutputError> {
+    self.recover_interrupted_streams_scoped(None)
+  }
+
+  pub fn recover_interrupted_run(
+    &self,
+    run_id: &str,
+  ) -> Result<Vec<OperationalRecordV1>, OperationalOutputError> {
+    validate_id(run_id)?;
+    self.recover_interrupted_streams_scoped(Some(run_id))
+  }
+
+  fn recover_interrupted_streams_scoped(
+    &self,
+    run_id: Option<&str>,
+  ) -> Result<Vec<OperationalRecordV1>, OperationalOutputError> {
+    let lanes = {
+      let connection = self
+        .connection
+        .lock()
+        .map_err(|_| OperationalOutputError::Unavailable)?;
+      let mut statement = connection
+        .prepare(
+          "SELECT r.workflow_id, r.run_id, r.node_id, r.attempt_number, r.invocation_id, r.phase
+           FROM woml_operational_records r
+           JOIN woml_operational_runs runs ON runs.run_id = r.run_id AND runs.active = 1
+           WHERE r.node_id IS NOT NULL AND r.attempt_number IS NOT NULL
+             AND (?1 IS NULL OR r.run_id = ?1)
+           GROUP BY r.run_id, r.node_id, r.attempt_number
+           HAVING SUM(CASE WHEN r.kind = 'closed' THEN 1 ELSE 0 END) = 0
+           ORDER BY MIN(r.sequence) LIMIT 1000",
+        )
+        .map_err(|_| OperationalOutputError::Corrupt)?;
+      let lanes = statement
+        .query_map([run_id], |row| {
+          Ok(OperationalIdentityV1 {
+            workflow_id: row.get(0)?,
+            run_id: row.get(1)?,
+            node_id: row.get(2)?,
+            attempt: row.get(3)?,
+            invocation_id: row.get(4)?,
+            phase: if row.get::<_, String>(5)? == "corrective" {
+              OperationalExecutionPhaseV1::Corrective
+            } else {
+              OperationalExecutionPhaseV1::Forward
+            },
+          })
+        })
+        .map_err(|_| OperationalOutputError::Corrupt)?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|_| OperationalOutputError::Corrupt)?;
+      lanes
+    };
+    lanes
+      .into_iter()
+      .map(|identity| {
+        self.append(OperationalRecordDraftV1 {
+          identity,
+          body: OperationalBodyV1::Closed {
+            status: OperationalCloseStatusV1::Interrupted,
+            reason_code: Some("WOML_OUTPUT_RECOVERED_INTERRUPTION".to_string()),
+          },
+        })
+      })
+      .collect()
+  }
 }
 
 /// Defers filesystem and SQLite activation until a workflow actually emits
 /// operational output or progress.
-#[derive(Debug)]
 pub struct LazyOperationalOutputStore {
   path: PathBuf,
   deployment_id: String,
   active: Mutex<Option<Arc<OperationalOutputStore>>>,
   reporter: Option<OperationalOutputReporter>,
+}
+
+impl std::fmt::Debug for LazyOperationalOutputStore {
+  fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+    formatter
+      .debug_struct("LazyOperationalOutputStore")
+      .field("path", &self.path)
+      .field("deployment_id", &self.deployment_id)
+      .field("active", &self.is_active())
+      .finish_non_exhaustive()
+  }
 }
 
 impl LazyOperationalOutputStore {
@@ -909,6 +1232,23 @@ impl LazyOperationalOutputStore {
       .lock()
       .map(|active| active.is_some())
       .unwrap_or(false)
+  }
+
+  pub fn path(&self) -> &Path {
+    &self.path
+  }
+
+  pub fn active_store(&self) -> Option<Arc<OperationalOutputStore>> {
+    self.active.lock().ok()?.clone()
+  }
+
+  pub fn activate_if_exists(
+    &self,
+  ) -> Result<Option<Arc<OperationalOutputStore>>, OperationalOutputError> {
+    if !self.path.exists() {
+      return Ok(None);
+    }
+    self.activate().map(Some)
   }
 
   pub fn activate(&self) -> Result<Arc<OperationalOutputStore>, OperationalOutputError> {
@@ -1079,6 +1419,21 @@ fn validate_draft(draft: &OperationalRecordDraftV1) -> Result<(), OperationalOut
   Ok(())
 }
 
+fn validate_limits(limits: OperationalOutputLimitsV1) -> Result<(), OperationalOutputError> {
+  if limits.max_attempt_bytes == 0
+    || limits.max_attempt_bytes > MAX_OPERATIONAL_INLINE_RUN_BYTES
+    || limits.max_run_bytes < limits.max_attempt_bytes
+    || limits.max_run_bytes > MAX_OPERATIONAL_INLINE_RUN_BYTES
+    || limits.max_store_bytes < limits.max_run_bytes
+    || limits.retention_ms == 0
+  {
+    return Err(OperationalOutputError::InvalidRecord(
+      "operational output limits are invalid",
+    ));
+  }
+  Ok(())
+}
+
 fn validate_persisted_record(
   record: &OperationalRecordV1,
   deployment_id: &str,
@@ -1198,6 +1553,7 @@ fn initialize_schema(
          node_id TEXT,
          attempt_number INTEGER CHECK(attempt_number IS NULL OR attempt_number > 0),
          invocation_id TEXT,
+         phase TEXT NOT NULL DEFAULT 'forward' CHECK(phase IN ('forward','corrective')),
          kind TEXT NOT NULL CHECK(kind IN ('output','progress','truncated','artifact','closed')),
          source TEXT CHECK(source IS NULL OR source IN ('stdout','stderr','script','runtime')),
          accounted_bytes INTEGER NOT NULL CHECK(accounted_bytes >= 0),
@@ -1245,6 +1601,29 @@ fn initialize_schema(
          pruned_through INTEGER NOT NULL CHECK(pruned_through > 0),
          pruned_at TEXT NOT NULL
        );",
+    )
+    .map_err(|_| OperationalOutputError::Unavailable)?;
+  let has_phase = connection
+    .prepare("PRAGMA table_info(woml_operational_records)")
+    .and_then(|mut statement| {
+      let columns = statement
+        .query_map([], |row| row.get::<_, String>(1))?
+        .collect::<Result<Vec<_>, _>>()?;
+      Ok(columns.iter().any(|column| column == "phase"))
+    })
+    .map_err(|_| OperationalOutputError::Corrupt)?;
+  if !has_phase {
+    connection
+      .execute(
+        "ALTER TABLE woml_operational_records ADD COLUMN phase TEXT NOT NULL DEFAULT 'forward' CHECK(phase IN ('forward','corrective'))",
+        [],
+      )
+      .map_err(|_| OperationalOutputError::Unavailable)?;
+  }
+  connection
+    .execute(
+      "CREATE INDEX IF NOT EXISTS woml_operational_records_phase ON woml_operational_records(phase, sequence)",
+      [],
     )
     .map_err(|_| OperationalOutputError::Unavailable)?;
   connection
@@ -1330,6 +1709,20 @@ fn read_metadata_u64(connection: &Connection, key: &str) -> Result<u64, Operatio
     )
     .map_err(|_| OperationalOutputError::Corrupt)?;
   value.parse().map_err(|_| OperationalOutputError::Corrupt)
+}
+
+fn read_metadata_optional(
+  connection: &Connection,
+  key: &str,
+) -> Result<Option<String>, OperationalOutputError> {
+  connection
+    .query_row(
+      "SELECT value FROM woml_operational_metadata WHERE key = ?1",
+      [key],
+      |row| row.get(0),
+    )
+    .optional()
+    .map_err(|_| OperationalOutputError::Corrupt)
 }
 
 fn sequence_bounds(

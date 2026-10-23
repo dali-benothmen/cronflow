@@ -9,10 +9,12 @@ use chrono::{Duration, Utc};
 use rusqlite::Connection;
 use uuid::Uuid;
 use woml_engine::{
-  LazyOperationalOutputStore, OperationalBodyV1, OperationalCloseStatusV1, OperationalIdentityV1,
-  OperationalOutputError, OperationalOutputStore, OperationalProgressStatusV1,
-  OperationalRecordDraftV1, OperationalSourceV1, MAX_OPERATIONAL_PAGE_BYTES,
-  MAX_OPERATIONAL_PAGE_RECORDS, OPERATIONAL_OUTPUT_STORE_SCHEMA_VERSION,
+  LazyOperationalOutputStore, OperationalAppendOutcomeV1, OperationalBodyV1,
+  OperationalCloseStatusV1, OperationalExecutionPhaseV1, OperationalIdentityV1,
+  OperationalOutputError, OperationalOutputLimitsV1, OperationalOutputStore,
+  OperationalProgressStatusV1, OperationalRecordDraftV1, OperationalSourceV1,
+  MAX_OPERATIONAL_PAGE_BYTES, MAX_OPERATIONAL_PAGE_RECORDS,
+  OPERATIONAL_OUTPUT_STORE_SCHEMA_VERSION,
 };
 
 const CONTRACTS: &str =
@@ -52,6 +54,24 @@ fn identity(run_id: &str) -> OperationalIdentityV1 {
     node_id: Some("inspect".to_string()),
     attempt: Some(1),
     invocation_id: Some(format!("inv-{run_id}")),
+    phase: OperationalExecutionPhaseV1::Forward,
+  }
+}
+
+fn close_run(run_id: &str) -> OperationalRecordDraftV1 {
+  OperationalRecordDraftV1 {
+    identity: OperationalIdentityV1 {
+      workflow_id: "deployment-health".to_string(),
+      run_id: run_id.to_string(),
+      node_id: None,
+      attempt: None,
+      invocation_id: None,
+      phase: OperationalExecutionPhaseV1::Forward,
+    },
+    body: OperationalBodyV1::Closed {
+      status: OperationalCloseStatusV1::Succeeded,
+      reason_code: None,
+    },
   }
 }
 
@@ -69,13 +89,7 @@ fn output(run_id: &str, text: impl Into<String>) -> OperationalRecordDraftV1 {
 }
 
 fn close(run_id: &str) -> OperationalRecordDraftV1 {
-  OperationalRecordDraftV1 {
-    identity: identity(run_id),
-    body: OperationalBodyV1::Closed {
-      status: OperationalCloseStatusV1::Succeeded,
-      reason_code: None,
-    },
-  }
+  close_run(run_id)
 }
 
 fn progress(run_id: &str, current: f64) -> OperationalRecordDraftV1 {
@@ -243,6 +257,158 @@ fn cursor_pages_are_record_and_byte_bounded() {
     store.read_page(0, MAX_OPERATIONAL_PAGE_RECORDS + 1),
     Err(OperationalOutputError::InvalidCursor)
   ));
+}
+
+#[test]
+fn exact_budgets_emit_one_marker_then_keep_accepting_drained_bytes() {
+  let temporary = TemporaryStore::new();
+  let store = OperationalOutputStore::open_with_limits(
+    temporary.path(),
+    "deployment-a",
+    OperationalOutputLimitsV1 {
+      max_attempt_bytes: 10,
+      max_run_bytes: 15,
+      max_store_bytes: 20,
+      retention_ms: 60_000,
+    },
+  )
+  .unwrap();
+  assert!(matches!(
+    store.append_bounded(output("run-a", "12345678")).unwrap(),
+    OperationalAppendOutcomeV1::Appended(_)
+  ));
+  let marker = store.append_bounded(output("run-a", "abcd")).unwrap();
+  assert!(matches!(marker, OperationalAppendOutcomeV1::Truncated(_)));
+  assert!(matches!(
+    store
+      .append_bounded(output("run-a", "more dropped bytes"))
+      .unwrap(),
+    OperationalAppendOutcomeV1::Dropped { .. }
+  ));
+  let page = store.read_run_page("run-a", 0, 100).unwrap();
+  assert_eq!(page.records.len(), 2);
+  assert!(matches!(
+    &page.records[1].body,
+    OperationalBodyV1::Truncated {
+      reason,
+      dropped_bytes: 4,
+      ..
+    } if reason == "inline_attempt_budget"
+  ));
+  assert_eq!(store.inspect().unwrap().retained_output_bytes, 8);
+  assert_eq!(store.inspect().unwrap().truncated_streams, 1);
+}
+
+#[test]
+fn recovery_marks_only_open_attempt_lanes_and_is_idempotent() {
+  let temporary = TemporaryStore::new();
+  let store = OperationalOutputStore::open(temporary.path(), "deployment-a").unwrap();
+  store.append(output("run-open", "before crash")).unwrap();
+  store
+    .append(output("run-other", "still executing"))
+    .unwrap();
+  store.append(output("run-closed", "complete")).unwrap();
+  store.append(close("run-closed")).unwrap();
+
+  let recovered = store.recover_interrupted_run("run-open").unwrap();
+  assert_eq!(recovered.len(), 1);
+  assert_eq!(recovered[0].identity.run_id, "run-open");
+  assert!(matches!(
+    recovered[0].body,
+    OperationalBodyV1::Closed {
+      status: OperationalCloseStatusV1::Interrupted,
+      ..
+    }
+  ));
+  assert!(store
+    .recover_interrupted_run("run-open")
+    .unwrap()
+    .is_empty());
+  let remaining = store.recover_interrupted_streams().unwrap();
+  assert_eq!(remaining.len(), 1);
+  assert_eq!(remaining[0].identity.run_id, "run-other");
+}
+
+#[test]
+fn retention_plan_matches_prune_and_records_operator_health() {
+  let temporary = TemporaryStore::new();
+  let store = OperationalOutputStore::open(temporary.path(), "deployment-a").unwrap();
+  store.append(output("run-old", "retained")).unwrap();
+  store.append(close_run("run-old")).unwrap();
+  store.append(output("run-active", "protected")).unwrap();
+  let cutoff = Utc::now() + Duration::seconds(1);
+  let plan = store.plan_prune_terminal_before(cutoff, 100).unwrap();
+  assert_eq!(plan.eligible_runs, 1);
+  assert_eq!(plan.eligible_records, 2);
+  let result = store.prune_terminal_before(cutoff, 100).unwrap();
+  assert_eq!(result.pruned_runs, plan.eligible_runs);
+  assert_eq!(result.pruned_records, plan.eligible_records);
+  let inspection = store.inspect().unwrap();
+  assert_eq!(inspection.active_runs, 1);
+  assert!(inspection.last_pruned_at.is_some());
+}
+
+#[test]
+fn corrective_records_remain_labelled_and_run_isolated() {
+  let temporary = TemporaryStore::new();
+  let store = OperationalOutputStore::open(temporary.path(), "deployment-a").unwrap();
+  let mut corrective = output("run-child", "rollback complete");
+  corrective.identity.phase = OperationalExecutionPhaseV1::Corrective;
+  store.append(corrective).unwrap();
+  store.append(output("run-parent", "parent output")).unwrap();
+
+  let child = store.read_run_page("run-child", 0, 100).unwrap();
+  assert_eq!(child.records.len(), 1);
+  assert_eq!(
+    child.records[0].identity.phase,
+    OperationalExecutionPhaseV1::Corrective
+  );
+  assert!(child
+    .records
+    .iter()
+    .all(|record| record.identity.run_id == "run-child"));
+}
+
+#[test]
+fn retries_and_control_flow_lanes_keep_exact_attempt_identity() {
+  let temporary = TemporaryStore::new();
+  let store = OperationalOutputStore::open(temporary.path(), "deployment-a").unwrap();
+  for (node, attempt, invocation, text) in [
+    ("apply", 1, "inv-apply-1", "attempt one failed"),
+    ("apply", 2, "inv-apply-2", "attempt two running"),
+    ("items-iteration-3", 1, "inv-item-3", "iteration output"),
+    ("fork-production", 1, "inv-fork-production", "branch output"),
+    (
+      "approval-resume",
+      1,
+      "inv-approval-resume",
+      "resumed output",
+    ),
+    ("locked-apply", 1, "inv-locked-apply", "lease-owned output"),
+  ] {
+    let mut draft = output("run-composed", text);
+    draft.identity.node_id = Some(node.to_string());
+    draft.identity.attempt = Some(attempt);
+    draft.identity.invocation_id = Some(invocation.to_string());
+    store.append(draft).unwrap();
+  }
+
+  let page = store.read_run_page("run-composed", 0, 100).unwrap();
+  let identities = page
+    .records
+    .iter()
+    .map(|record| {
+      (
+        record.identity.node_id.as_deref().unwrap(),
+        record.identity.attempt.unwrap(),
+        record.identity.invocation_id.as_deref().unwrap(),
+      )
+    })
+    .collect::<Vec<_>>();
+  assert_eq!(identities[0], ("apply", 1, "inv-apply-1"));
+  assert_eq!(identities[1], ("apply", 2, "inv-apply-2"));
+  assert_ne!(identities[0], identities[1]);
+  assert_eq!(identities.len(), 6);
 }
 
 #[test]

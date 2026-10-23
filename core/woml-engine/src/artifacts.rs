@@ -69,7 +69,16 @@ pub struct ArtifactPolicyV1 {
   pub limits: ArtifactLimits,
   pub retention: ArtifactRetentionPolicy,
   pub secret_scanning: ArtifactSecretScanningPolicy,
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub operational_output: Option<ArtifactOperationalOutputPolicy>,
   pub backend: ArtifactBackendPolicy,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ArtifactOperationalOutputPolicy {
+  pub enabled: bool,
+  pub retention_ms: u64,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -273,6 +282,7 @@ pub(crate) struct PreparedArtifactPolicy {
   retention: ArtifactRetentionPolicy,
   secret_action: KnownSecretAction,
   minimum_secret_bytes: usize,
+  operational_output: Option<ArtifactOperationalOutputPolicy>,
 }
 
 impl std::fmt::Debug for PreparedArtifactPolicy {
@@ -286,6 +296,7 @@ impl std::fmt::Debug for PreparedArtifactPolicy {
       .field("limits", &self.limits)
       .field("retention", &self.retention)
       .field("secret_action", &self.secret_action)
+      .field("operational_output", &self.operational_output)
       .finish()
   }
 }
@@ -2325,6 +2336,241 @@ pub struct ManagedArtifactPutHandler {
   known_secrets: Arc<Vec<Vec<u8>>>,
 }
 
+pub(crate) struct OperationalArtifactWriter {
+  store: Arc<ArtifactStore>,
+  stage: Option<ArtifactStage>,
+  digest: Sha256,
+  size: u64,
+  max_bytes: u64,
+  retention_ms: u64,
+  workflow_id: String,
+  run_id: String,
+  node_id: String,
+  attempt: u32,
+  invocation_id: String,
+  known_secrets: Arc<Vec<Vec<u8>>>,
+  unavailable: bool,
+}
+
+impl std::fmt::Debug for OperationalArtifactWriter {
+  fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+    formatter
+      .debug_struct("OperationalArtifactWriter")
+      .field("run_id", &self.run_id)
+      .field("node_id", &self.node_id)
+      .field("attempt", &self.attempt)
+      .field("size", &self.size)
+      .field("unavailable", &self.unavailable)
+      .finish_non_exhaustive()
+  }
+}
+
+impl OperationalArtifactWriter {
+  pub(crate) fn append_redacted(
+    &mut self,
+    source: &str,
+    text: &str,
+  ) -> Result<(), CapabilityFailure> {
+    if self.unavailable {
+      return Ok(());
+    }
+    let mut encoded = serde_json::to_vec(&json!({
+      "source": source,
+      "text": text,
+    }))
+    .map_err(|_| backend_unavailable())?;
+    encoded.push(b'\n');
+    if self.size.saturating_add(encoded.len() as u64) > self.max_bytes {
+      self.unavailable = true;
+      self.stage.take();
+      return Err(quota_exceeded());
+    }
+    if self
+      .known_secrets
+      .iter()
+      .any(|secret| contains_bytes(&encoded, secret))
+    {
+      self.unavailable = true;
+      self.stage.take();
+      return Err(artifact_quarantined());
+    }
+    let stage = self.stage.as_mut().ok_or_else(backend_unavailable)?;
+    stage
+      .file
+      .as_mut()
+      .ok_or_else(backend_unavailable)?
+      .write_all(&encoded)
+      .map_err(|_| backend_unavailable())?;
+    self.digest.update(&encoded);
+    self.size = self.size.saturating_add(encoded.len() as u64);
+    Ok(())
+  }
+
+  pub(crate) fn finish(
+    mut self,
+    publish: bool,
+  ) -> Result<Option<ArtifactReferenceV1>, CapabilityFailure> {
+    if !publish || self.unavailable || self.size == 0 {
+      return Ok(None);
+    }
+    let stage = self.stage.take().ok_or_else(backend_unavailable)?;
+    let sha256 = hex::encode(self.digest.finalize());
+    let operation_key = format!("operational-output:{}", self.invocation_id);
+    let input_digest = format!("sha256:{sha256}");
+    let started_at = timestamp();
+    let mut connection = self.store.connection()?;
+    let transaction = connection
+      .transaction_with_behavior(TransactionBehavior::Immediate)
+      .map_err(|_| backend_unavailable())?;
+    validate_schema(&transaction)?;
+    if let Some(settlement) = read_settlement(&transaction, &operation_key)? {
+      validate_settlement_identity(&settlement, &input_digest)?;
+      transaction.commit().map_err(|_| backend_unavailable())?;
+      return match settlement.status.as_str() {
+        "succeeded" => Ok(settlement.artifact),
+        _ => Err(artifact_interrupted()),
+      };
+    }
+    enforce_quotas(
+      &transaction,
+      &self.run_id,
+      &sha256,
+      self.size,
+      &self.store.policy.limits,
+    )?;
+    transaction
+      .execute(
+        "INSERT INTO woml_artifact_transfers(
+           operation_key, run_id, node_id, attempt_number, operation, input_digest,
+           status, started_at
+         ) VALUES (?1, ?2, ?3, ?4, 'put', ?5, 'started', ?6)",
+        params![
+          operation_key,
+          self.run_id,
+          self.node_id,
+          self.attempt,
+          input_digest,
+          started_at,
+        ],
+      )
+      .map_err(|_| backend_unavailable())?;
+    transaction.commit().map_err(|_| backend_unavailable())?;
+
+    let artifact = ArtifactReferenceV1 {
+      contract: ARTIFACT_REFERENCE_CONTRACT.to_string(),
+      contract_version: ARTIFACT_REFERENCE_CONTRACT_VERSION,
+      id: new_artifact_id()?,
+      name: format!(
+        "{}-attempt-{}-operational-output.ndjson",
+        self.node_id, self.attempt
+      ),
+      size: self.size,
+      sha256: sha256.clone(),
+      content_type: "application/x-ndjson".to_string(),
+    };
+    let created_at = timestamp();
+    let expires_at = Utc::now()
+      .checked_add_signed(chrono::Duration::milliseconds(self.retention_ms as i64))
+      .ok_or_else(retention_invalid)?
+      .to_rfc3339_opts(SecondsFormat::Millis, true);
+    let result = json!({
+      "contract": ARTIFACTS_CONTRACT,
+      "contractVersion": ARTIFACTS_CONTRACT_VERSION,
+      "kind": "result",
+      "operation": "put",
+      "data": &artifact,
+    });
+    let result_digest = canonical_digest(b"woml.artifact-result\0v1\0", &result)?;
+    let cancellation = CapabilityCancellationToken::default();
+    let mut connection = self.store.connection()?;
+    let transaction = connection
+      .transaction_with_behavior(TransactionBehavior::Immediate)
+      .map_err(|_| backend_unavailable())?;
+    validate_schema(&transaction)?;
+    enforce_quotas(
+      &transaction,
+      &self.run_id,
+      &sha256,
+      self.size,
+      &self.store.policy.limits,
+    )?;
+    self
+      .store
+      .backend
+      .publish(stage, &sha256, self.size, &cancellation)?;
+    transaction
+      .execute(
+        "INSERT OR IGNORE INTO woml_artifact_blobs(sha256, size, created_at)
+         VALUES (?1, ?2, ?3)",
+        params![sha256, self.size, created_at],
+      )
+      .map_err(|_| backend_unavailable())?;
+    transaction
+      .execute(
+        "INSERT INTO woml_artifacts(
+           artifact_id, name, size, sha256, content_type, status, created_at
+         ) VALUES (?1, ?2, ?3, ?4, ?5, 'available', ?6)",
+        params![
+          artifact.id,
+          artifact.name,
+          artifact.size,
+          artifact.sha256,
+          artifact.content_type,
+          created_at,
+        ],
+      )
+      .map_err(|_| backend_unavailable())?;
+    transaction
+      .execute(
+        "INSERT INTO woml_artifact_provenance(
+           artifact_id, workflow_id, run_id, node_id, attempt_number, operation_key
+         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+        params![
+          artifact.id,
+          self.workflow_id,
+          self.run_id,
+          self.node_id,
+          self.attempt,
+          operation_key,
+        ],
+      )
+      .map_err(|_| backend_unavailable())?;
+    transaction
+      .execute(
+        "INSERT INTO woml_artifact_access(artifact_id, run_id, granted_at)
+         VALUES (?1, ?2, ?3)",
+        params![artifact.id, self.run_id, created_at],
+      )
+      .map_err(|_| backend_unavailable())?;
+    transaction
+      .execute(
+        "INSERT INTO woml_artifact_retention(
+           artifact_id, requested_ms, effective_ms, expires_at
+         ) VALUES (?1, ?2, ?2, ?3)",
+        params![artifact.id, self.retention_ms, expires_at],
+      )
+      .map_err(|_| backend_unavailable())?;
+    transaction
+      .execute(
+        "UPDATE woml_artifact_transfers
+         SET status = 'succeeded', artifact_id = ?2, content_digest = ?3,
+             size = ?4, result_digest = ?5, settled_at = ?6
+         WHERE operation_key = ?1 AND status = 'started'",
+        params![
+          operation_key,
+          artifact.id,
+          format!("sha256:{sha256}"),
+          self.size,
+          result_digest,
+          timestamp(),
+        ],
+      )
+      .map_err(|_| backend_unavailable())?;
+    transaction.commit().map_err(|_| backend_unavailable())?;
+    Ok(Some(artifact))
+  }
+}
+
 impl ManagedArtifactPutHandler {
   pub fn new(
     store: Arc<ManagedArtifactStore>,
@@ -2370,6 +2616,36 @@ impl ManagedArtifactPutHandler {
 
   pub(crate) fn policy(&self) -> Arc<PreparedArtifactPolicy> {
     Arc::clone(&self.policy)
+  }
+
+  pub(crate) fn begin_operational_output(
+    &self,
+    workflow_id: &str,
+    run_id: &str,
+    node_id: &str,
+    attempt: u32,
+    invocation_id: &str,
+  ) -> Result<Option<OperationalArtifactWriter>, CapabilityFailure> {
+    let Some(policy) = self.policy.operational_output.as_ref() else {
+      return Ok(None);
+    };
+    let store = self.store.configured()?;
+    let stage = store.backend.begin_stage()?;
+    Ok(Some(OperationalArtifactWriter {
+      store,
+      stage: Some(stage),
+      digest: Sha256::new(),
+      size: 0,
+      max_bytes: self.policy.limits.max_artifact_bytes,
+      retention_ms: policy.retention_ms,
+      workflow_id: workflow_id.to_string(),
+      run_id: run_id.to_string(),
+      node_id: node_id.to_string(),
+      attempt,
+      invocation_id: invocation_id.to_string(),
+      known_secrets: Arc::clone(&self.known_secrets),
+      unavailable: false,
+    }))
   }
 
   pub fn head_handler(&self) -> ManagedArtifactReadHandler {
@@ -3321,6 +3597,7 @@ impl PreparedArtifactPolicy {
       retention: policy.retention,
       secret_action: policy.secret_scanning.known_secret_action,
       minimum_secret_bytes: policy.secret_scanning.minimum_secret_bytes,
+      operational_output: policy.operational_output,
     })
   }
 }
@@ -3482,6 +3759,11 @@ fn validate_policy_limits(policy: &ArtifactPolicyV1) -> Result<(), ArtifactPolic
     || retention.minimum_ms > retention.default_ms
     || retention.default_ms > retention.maximum_ms
     || retention.maximum_ms > 31_536_000_000
+    || policy.operational_output.as_ref().is_some_and(|output| {
+      !output.enabled
+        || output.retention_ms < retention.minimum_ms
+        || output.retention_ms > retention.maximum_ms
+    })
     || policy.secret_scanning.minimum_secret_bytes != 8
     || !policy.materialization.cleanup_on_start
     || policy.materialization.max_bytes_per_attempt == 0
@@ -4702,6 +4984,7 @@ mod tests {
         known_secret_action: KnownSecretAction::Reject,
         minimum_secret_bytes: 8,
       },
+      operational_output: None,
       backend: ArtifactBackendPolicy::Local {
         contract: "woml.artifact-backend".to_string(),
         contract_version: 1,
@@ -5885,5 +6168,82 @@ mod tests {
     assert!(inspection.elapsed() <= INSPECTION_BUDGET);
     assert_eq!(artifact.artifact.size, FIXTURE_BYTES as u64);
     assert_eq!(run.artifacts.len(), 1);
+  }
+
+  #[test]
+  fn operational_output_rollover_is_explicit_ordered_redacted_and_atomic() {
+    let temp = TempDir::new().unwrap();
+    let state = temp.path().join("state.sqlite");
+    let backend = temp.path().join("artifacts-v1");
+    let managed = Arc::new(ManagedArtifactStore::default());
+    let mut authored_policy = policy(temp.path(), &backend);
+    authored_policy.operational_output = Some(ArtifactOperationalOutputPolicy {
+      enabled: true,
+      retention_ms: 86_400_000,
+    });
+    let secrets = BTreeMap::from([("TOKEN".to_string(), "secret-value".to_string())]);
+    let handler = ManagedArtifactPutHandler::new(
+      Arc::clone(&managed),
+      authored_policy,
+      ArtifactRuntimeMode::Foreground,
+      &secrets,
+    )
+    .unwrap();
+    managed
+      .configure_for_state(&state, handler.policy())
+      .unwrap();
+
+    let mut writer = handler
+      .begin_operational_output("deploy", "run-deploy", "apply", 2, "inv-apply-2")
+      .unwrap()
+      .expect("explicit operational-output grant");
+    writer.append_redacted("stdout", "plan ready\n").unwrap();
+    writer
+      .append_redacted("stderr", "token=[redacted]\n")
+      .unwrap();
+    let artifact = writer.finish(true).unwrap().expect("published artifact");
+    let store = managed.configured().unwrap();
+    let verified = store
+      .backend
+      .verify(&artifact.sha256, artifact.size)
+      .unwrap();
+    let body = fs::read_to_string(&verified.path).unwrap();
+    assert_eq!(
+      body,
+      "{\"source\":\"stdout\",\"text\":\"plan ready\\n\"}\n{\"source\":\"stderr\",\"text\":\"token=[redacted]\\n\"}\n"
+    );
+    assert!(!body.contains("secret-value"));
+    assert_eq!(
+      hex::encode(Sha256::digest(body.as_bytes())),
+      artifact.sha256
+    );
+    assert_eq!(artifact.contract, ARTIFACT_REFERENCE_CONTRACT);
+
+    let mut abandoned = handler
+      .begin_operational_output("deploy", "run-deploy", "apply", 3, "inv-apply-3")
+      .unwrap()
+      .unwrap();
+    abandoned.append_redacted("stdout", "partial").unwrap();
+    drop(abandoned);
+    assert_eq!(fs::read_dir(backend.join("staging")).unwrap().count(), 0);
+  }
+
+  #[test]
+  fn operational_output_rollover_denial_creates_no_fallback_stage() {
+    let temp = TempDir::new().unwrap();
+    let backend = temp.path().join("artifacts-v1");
+    let managed = Arc::new(ManagedArtifactStore::default());
+    let handler = ManagedArtifactPutHandler::new(
+      managed,
+      policy(temp.path(), &backend),
+      ArtifactRuntimeMode::Foreground,
+      &BTreeMap::new(),
+    )
+    .unwrap();
+    assert!(handler
+      .begin_operational_output("deploy", "run-deploy", "apply", 1, "inv-apply-1")
+      .unwrap()
+      .is_none());
+    assert!(!backend.exists());
   }
 }

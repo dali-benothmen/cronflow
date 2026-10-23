@@ -9,6 +9,7 @@ export const operationalSources = [
 
 export type OperationalSourceV1 = (typeof operationalSources)[number];
 export type OperationalSubjectKind = 'run' | 'workflow';
+export type OperationalExecutionPhaseV1 = 'forward' | 'corrective';
 
 interface OperationalRecordBaseV1 {
   readonly profile: 'woml.operational-record/v1';
@@ -20,6 +21,7 @@ interface OperationalRecordBaseV1 {
   readonly nodeId?: string;
   readonly attempt?: number;
   readonly invocationId?: string;
+  readonly phase?: 'corrective';
 }
 
 export type OperationalRecordV1 = OperationalRecordBaseV1 &
@@ -118,6 +120,11 @@ export interface OperationalOutputObservationV1 {
   readonly activeRuns: number;
   readonly terminalRuns: number;
   readonly truncatedStreams: number;
+  readonly maxAttemptBytes: number;
+  readonly maxRunBytes: number;
+  readonly maxStoreBytes: number;
+  readonly retentionMs: number;
+  readonly lastPrunedAt?: string;
 }
 
 export interface OperationalOutputWakeupV1 {
@@ -241,8 +248,15 @@ export function decodeOperationalRecordV1(value: unknown): OperationalRecordV1 {
     ...(value.nodeId === undefined ? [] : ['nodeId']),
     ...(value.attempt === undefined ? [] : ['attempt']),
     ...(value.invocationId === undefined ? [] : ['invocationId']),
+    ...(value.phase === undefined ? [] : ['phase']),
     'kind',
   ];
+  if (value.phase !== undefined && value.phase !== 'corrective') {
+    throw new OperationalOutputError(
+      'WOML_OUTPUT_PROTOCOL_INVALID',
+      'The native core returned an invalid operational-output execution phase.'
+    );
+  }
   const source = value.source;
   switch (value.kind) {
     case 'output':
@@ -453,19 +467,24 @@ export function decodeOperationalObservationV1(
     'activeRuns',
     'terminalRuns',
     'truncatedStreams',
+    'maxAttemptBytes',
+    'maxRunBytes',
+    'maxStoreBytes',
+    'retentionMs',
   ] as const;
   if (
     !record(value) ||
     !exactKeys(
       value,
       ['profile', 'deploymentId', ...fields],
-      ['earliestAvailable']
+      ['earliestAvailable', 'lastPrunedAt']
     ) ||
     value.profile !== 'woml.operational-output-store/v1' ||
     !identifier(value.deploymentId) ||
     !fields.every(field => safeSequence(value[field])) ||
     (value.earliestAvailable !== undefined &&
-      !safeSequence(value.earliestAvailable, 1))
+      !safeSequence(value.earliestAvailable, 1)) ||
+    (value.lastPrunedAt !== undefined && !dateTime(value.lastPrunedAt))
   ) {
     throw new OperationalOutputError(
       'WOML_OUTPUT_PROTOCOL_INVALID',
@@ -506,6 +525,7 @@ export interface RuntimeOperationalOutputSurface {
     readonly after: number;
     readonly limit: number;
     readonly sources: ReadonlySet<OperationalSourceV1>;
+    readonly phase?: OperationalExecutionPhaseV1;
   }): OperationalPageV1 | Promise<OperationalPageV1>;
   progress(runId: string):
     | readonly OperationalProgressSnapshotV1[]
@@ -516,6 +536,7 @@ export interface RuntimeOperationalOutputSurface {
     readonly subject: string;
     readonly after: number;
     readonly sources: ReadonlySet<OperationalSourceV1>;
+    readonly phase?: OperationalExecutionPhaseV1;
   }): Response | Promise<Response>;
   notify(wakeup: OperationalOutputWakeupV1): void;
   closeStreams(): void;
@@ -526,6 +547,7 @@ interface Follower {
   readonly subjectKind: OperationalSubjectKind;
   readonly subject: string;
   readonly sources: ReadonlySet<OperationalSourceV1>;
+  readonly phase?: OperationalExecutionPhaseV1;
   readonly controller: ReadableStreamDefaultController<Uint8Array>;
   cursor: number;
   flushing: boolean;
@@ -587,6 +609,7 @@ export class RuntimeOperationalOutput implements RuntimeOperationalOutputSurface
     readonly after: number;
     readonly limit: number;
     readonly sources: ReadonlySet<OperationalSourceV1>;
+    readonly phase?: OperationalExecutionPhaseV1;
   }): OperationalPageV1 {
     this.#validateSubject(request.subjectKind, request.subject);
     const page = this.#readPage(
@@ -601,7 +624,12 @@ export class RuntimeOperationalOutput implements RuntimeOperationalOutputSurface
         : item.workflowId === request.subject) &&
       (item.kind !== 'output' && item.kind !== 'truncated'
         ? true
-        : request.sources.has(item.source))
+        : request.sources.has(item.source)) &&
+      (request.phase === undefined
+        ? true
+        : request.phase === 'corrective'
+          ? item.phase === 'corrective'
+          : item.phase === undefined)
     );
     return { ...page, records };
   }
@@ -622,6 +650,7 @@ export class RuntimeOperationalOutput implements RuntimeOperationalOutputSurface
     readonly subject: string;
     readonly after: number;
     readonly sources: ReadonlySet<OperationalSourceV1>;
+    readonly phase?: OperationalExecutionPhaseV1;
   }): Response {
     this.#validateSubject(request.subjectKind, request.subject);
     if (this.#followers.size >= 8) {

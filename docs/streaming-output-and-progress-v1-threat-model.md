@@ -40,9 +40,13 @@ Security checks fail closed. Optional output loss cannot change workflow state.
 Consumers must expose truncation and replay gaps instead of silently presenting
 partial data as complete.
 
-## Deferred verification
+## Verification status
 
 SOP2 verifies chunk-boundary redaction and process draining. SOP3 verifies
 script-host identity confinement. SOP5 verifies slow-consumer and terminal
-sanitization behavior. SOP6 verifies retention and backup recovery. SOP7 and
-SOP8 add body-free telemetry, fuzzing, and sustained-load evidence.
+sanitization behavior. SOP6 verifies bounded retention, governed artifact
+rollover, active-run protection, explicit replay gaps, and backup separation.
+SOP7 verifies attempt/phase/run isolation, crash interruption, operator
+filtering, and production-style infrastructure composition. SOP8 adds the
+remaining cross-platform fuzzing, performance gates, packaging, and release
+evidence.
