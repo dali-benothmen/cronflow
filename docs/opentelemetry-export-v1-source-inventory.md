@@ -6,16 +6,25 @@ This inventory identifies where OpenTelemetry facts may come from. It does not
 authorize copying complete values from those sources. The safe output remains
 limited by Telemetry Signal v1 and the attribute policy.
 
-OTE2 through OTE5 implement this boundary in
+OTE2 through OTE7 implement this boundary in
 `core/woml-engine/src/telemetry.rs`,
 `core/woml-engine/src/telemetry_propagation.rs`,
 `woml-cli/src/opentelemetry-signal.ts`, and
-`woml-cli/src/opentelemetry-observation.ts`. Rust projects value-free facts from the
-authoritative durable history only after execution commits. The native bridge
-uses bounded non-blocking dispatch, and TypeScript rejects any record outside
-the frozen schemas before constructing SDK spans, metrics, or logs. W3C
-admission links remain transient, and managed HTTP propagation is derived from
-engine-owned identity after policy validation.
+`woml-cli/src/opentelemetry-observation.ts`. Rust projects value-free facts
+from the authoritative durable history only after execution commits. The
+native bridge and host use bounded non-blocking dispatch, and TypeScript
+rejects any record outside the frozen schemas before constructing SDK spans,
+metrics, or logs. W3C admission links remain transient, and managed HTTP
+propagation is derived from engine-owned identity after policy validation.
+
+OTE6 adds the governed exporters and Exporter Health v2 in
+`woml-cli/src/opentelemetry-sdk.ts`,
+`woml-cli/src/opentelemetry-runtime.ts`,
+`woml-cli/src/runtime-observability.ts`, and
+`woml-cli/src/runtime-inspector.ts`. OTE7 publishes the operator contract in
+`docs/woml-opentelemetry.md` and the validated local deployment under
+`examples/openTelemetry/`. These are operational projections only and do not
+add a new authoritative source.
 
 | Concern | Authoritative or operational source | OTE mapping decision |
 | --- | --- | --- |

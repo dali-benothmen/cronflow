@@ -31,6 +31,7 @@ import { OTLPMetricExporter } from '@opentelemetry/exporter-metrics-otlp-proto';
 import { OTLPLogExporter } from '@opentelemetry/exporter-logs-otlp-proto';
 
 import type {
+  OpenTelemetryExporterEvent,
   OpenTelemetrySdkHandle,
   OpenTelemetrySdkStartOptions,
 } from './opentelemetry-runtime';
@@ -88,6 +89,152 @@ function sampler(
   });
 }
 
+interface ExportResultLike {
+  readonly code: number;
+}
+
+interface ExporterLike<T> {
+  export(value: T, callback: (result: ExportResultLike) => void): void;
+  forceFlush?(): Promise<void>;
+  shutdown(): Promise<void>;
+}
+
+const EXPORT_SUCCESS = 0;
+const EXPORT_FAILURE = 1;
+const EXPORT_RETRY_DELAYS_MS = [100, 250] as const;
+const EXPORT_CIRCUIT_FAILURE_THRESHOLD = 3;
+const EXPORT_CIRCUIT_OPEN_MS = 5_000;
+
+export function governOpenTelemetryExporter<T extends object, TValue>(
+  delegate: T & ExporterLike<TValue>,
+  options: {
+    readonly signal: OpenTelemetryExporterEvent['signal'];
+    readonly timeoutMs: number;
+    readonly onEvent?: (event: OpenTelemetryExporterEvent) => void;
+    readonly now?: () => number;
+    readonly schedule?: (
+      action: () => void,
+      delayMs: number
+    ) => ReturnType<typeof setTimeout>;
+  }
+): T & ExporterLike<TValue> {
+  const now = options.now ?? Date.now;
+  const schedule = options.schedule ?? setTimeout;
+  let consecutiveFailures = 0;
+  let circuitOpenUntil = 0;
+  const publish = (
+    kind: OpenTelemetryExporterEvent['kind'],
+    fields: Pick<OpenTelemetryExporterEvent, 'code' | 'retryAt'> = {}
+  ): void => {
+    options.onEvent?.({
+      kind,
+      signal: options.signal,
+      occurredAt: new Date(now()).toISOString(),
+      ...fields,
+    });
+  };
+
+  const governedExport = (
+    value: TValue,
+    callback: (result: ExportResultLike) => void
+  ): void => {
+    const startedAt = now();
+    const deadline = startedAt + options.timeoutMs;
+    if (circuitOpenUntil > startedAt) {
+      publish('export_dropped', { code: 'WOML_OTEL_CIRCUIT_OPEN' });
+      callback({ code: EXPORT_FAILURE });
+      return;
+    }
+    if (circuitOpenUntil > 0) {
+      publish('circuit_half_open');
+      circuitOpenUntil = 0;
+    }
+
+    let settled = false;
+    const finish = (
+      result: ExportResultLike,
+      kind: 'export_succeeded' | 'export_failed' | 'export_timeout'
+    ): void => {
+      if (settled) return;
+      settled = true;
+      if (kind === 'export_succeeded') {
+        const recovered = consecutiveFailures > 0;
+        consecutiveFailures = 0;
+        publish(kind);
+        if (recovered) publish('circuit_closed');
+      } else {
+        consecutiveFailures += 1;
+        publish(kind, {
+          code:
+            kind === 'export_timeout'
+              ? 'WOML_OTEL_EXPORT_TIMEOUT'
+              : 'WOML_OTEL_EXPORT_FAILED',
+        });
+        if (consecutiveFailures >= EXPORT_CIRCUIT_FAILURE_THRESHOLD) {
+          circuitOpenUntil = now() + EXPORT_CIRCUIT_OPEN_MS;
+          publish('circuit_opened', {
+            code: 'WOML_OTEL_CIRCUIT_OPEN',
+            retryAt: new Date(circuitOpenUntil).toISOString(),
+          });
+        }
+      }
+      callback(result);
+    };
+
+    const attempt = (attemptIndex: number): void => {
+      if (settled) return;
+      const remaining = deadline - now();
+      if (remaining <= 0) {
+        finish({ code: EXPORT_FAILURE }, 'export_timeout');
+        return;
+      }
+      let attemptSettled = false;
+      const timer = schedule(() => {
+        if (attemptSettled || settled) return;
+        attemptSettled = true;
+        finish({ code: EXPORT_FAILURE }, 'export_timeout');
+      }, remaining);
+      if (typeof timer === 'object') timer.unref?.();
+      try {
+        delegate.export(value, result => {
+          if (attemptSettled || settled) return;
+          attemptSettled = true;
+          clearTimeout(timer);
+          if (result.code === EXPORT_SUCCESS) {
+            finish(result, 'export_succeeded');
+            return;
+          }
+          const delay = EXPORT_RETRY_DELAYS_MS[attemptIndex];
+          if (delay !== undefined && now() + delay < deadline) {
+            const retryAt = now() + delay;
+            publish('retry_scheduled', {
+              code: 'WOML_OTEL_EXPORT_RETRY',
+              retryAt: new Date(retryAt).toISOString(),
+            });
+            const retryTimer = schedule(() => attempt(attemptIndex + 1), delay);
+            if (typeof retryTimer === 'object') retryTimer.unref?.();
+            return;
+          }
+          finish(result, 'export_failed');
+        });
+      } catch {
+        clearTimeout(timer);
+        attemptSettled = true;
+        finish({ code: EXPORT_FAILURE }, 'export_failed');
+      }
+    };
+    attempt(0);
+  };
+
+  return new Proxy(delegate, {
+    get(target, property, receiver) {
+      if (property === 'export') return governedExport;
+      const value = Reflect.get(target, property, receiver);
+      return typeof value === 'function' ? value.bind(target) : value;
+    },
+  });
+}
+
 async function settleAll(
   operations: readonly (() => Promise<void>)[]
 ): Promise<void> {
@@ -127,12 +274,19 @@ export async function startOpenTelemetrySdk(
   const seenSignals = new Set<string>();
 
   if (configuration.signals.traces) {
-    const exporter = new OTLPTraceExporter({
-      url: configuration.endpoints.traces,
-      headers: mergedHeaders(secrets.headers.common, secrets.headers.traces),
-      timeoutMillis: configuration.exportTimeoutMs,
-      concurrencyLimit: 1,
-    });
+    const exporter = governOpenTelemetryExporter(
+      new OTLPTraceExporter({
+        url: configuration.endpoints.traces,
+        headers: mergedHeaders(secrets.headers.common, secrets.headers.traces),
+        timeoutMillis: configuration.exportTimeoutMs,
+        concurrencyLimit: 1,
+      }),
+      {
+        signal: 'traces',
+        timeoutMs: configuration.exportTimeoutMs,
+        onEvent: options.onExportEvent,
+      }
+    );
     const idGenerator = new DeterministicIdGenerator();
     const provider = new TracerProvider({
         resource,
@@ -195,12 +349,19 @@ export async function startOpenTelemetrySdk(
   }
 
   if (configuration.signals.metrics) {
-    const exporter = new OTLPMetricExporter({
-      url: configuration.endpoints.metrics,
-      headers: mergedHeaders(secrets.headers.common, secrets.headers.metrics),
-      timeoutMillis: configuration.exportTimeoutMs,
-      concurrencyLimit: 1,
-    });
+    const exporter = governOpenTelemetryExporter(
+      new OTLPMetricExporter({
+        url: configuration.endpoints.metrics,
+        headers: mergedHeaders(secrets.headers.common, secrets.headers.metrics),
+        timeoutMillis: configuration.exportTimeoutMs,
+        concurrencyLimit: 1,
+      }),
+      {
+        signal: 'metrics',
+        timeoutMs: configuration.exportTimeoutMs,
+        onEvent: options.onExportEvent,
+      }
+    );
     const provider = new MeterProvider({
         resource,
         readers: [
@@ -255,12 +416,19 @@ export async function startOpenTelemetrySdk(
   }
 
   if (configuration.signals.logs) {
-    const exporter = new OTLPLogExporter({
-      url: configuration.endpoints.logs,
-      headers: mergedHeaders(secrets.headers.common, secrets.headers.logs),
-      timeoutMillis: configuration.exportTimeoutMs,
-      concurrencyLimit: 1,
-    });
+    const exporter = governOpenTelemetryExporter(
+      new OTLPLogExporter({
+        url: configuration.endpoints.logs,
+        headers: mergedHeaders(secrets.headers.common, secrets.headers.logs),
+        timeoutMillis: configuration.exportTimeoutMs,
+        concurrencyLimit: 1,
+      }),
+      {
+        signal: 'logs',
+        timeoutMs: configuration.exportTimeoutMs,
+        onEvent: options.onExportEvent,
+      }
+    );
     const provider = new LoggerProvider({
         resource,
         logRecordLimits: {

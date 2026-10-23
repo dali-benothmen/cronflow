@@ -199,6 +199,40 @@ describe('WOML terminal inspector', () => {
     }
   });
 
+  test('renders bounded OpenTelemetry exporter health in the runtime view', () => {
+    const frame = renderInspectorFrame(
+      {
+        ...snapshot,
+        openTelemetry: {
+          profile: 'woml.opentelemetry-exporter-health/v2',
+          state: 'degraded',
+          enabled: true,
+          protocol: 'http/protobuf',
+          signals: ['traces', 'metrics'],
+          queue: { size: 96, capacity: 128, utilization: 0.75 },
+          exports: 12,
+          failures: 2,
+          timeouts: 1,
+          dropped: 3,
+          flushes: 1,
+          consecutiveFailures: 2,
+          circuit: 'open',
+          lastSuccessAt: '2026-10-23T11:59:00.000Z',
+          retryAt: '2026-10-23T12:00:05.000Z',
+          lastErrorCode: 'WOML_OTEL_EXPORT_FAILED',
+        },
+      },
+      { ...baseState, view: 'runtime' },
+      120,
+      30,
+      false
+    );
+    expect(frame).toContain('OPENTELEMETRY EXPORT');
+    expect(frame).toContain('Queue: 96 / 128 (75%)');
+    expect(frame).toContain('Exports: 12  Failures: 2  Timeouts: 1  Dropped: 3');
+    expect(frame).not.toContain('authorization');
+  });
+
   test('shows concise loop work and bounded detail for the selected run', () => {
     const compact = renderInspectorFrame(snapshot, {
       ...baseState,

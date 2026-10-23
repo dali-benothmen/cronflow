@@ -114,6 +114,7 @@ describe('OpenTelemetry Signal v1', () => {
       }
     );
     expect(runtime.record(signal)).toBe(true);
+    await Promise.resolve();
     expect(accepted).toEqual(['telemetry_run_01HXTRACE_settled']);
     await runtime.shutdown();
   });

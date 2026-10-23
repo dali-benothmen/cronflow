@@ -1,0 +1,52 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://woml.dev/schemas/opentelemetry-exporter-health/v2",
+  "title": "WOML OpenTelemetry Exporter Health v2",
+  "x-status": "opentelemetry-export-ote6-frozen",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "profile",
+    "state",
+    "enabled",
+    "protocol",
+    "signals",
+    "queue",
+    "exports",
+    "failures",
+    "timeouts",
+    "dropped",
+    "flushes",
+    "consecutiveFailures",
+    "circuit"
+  ],
+  "properties": {
+    "profile": { "const": "woml.opentelemetry-exporter-health/v2" },
+    "state": { "enum": ["disabled", "starting", "healthy", "degraded", "flushing", "stopped"] },
+    "enabled": { "type": "boolean" },
+    "protocol": { "const": "http/protobuf" },
+    "signals": { "type": "array", "uniqueItems": true, "maxItems": 3, "items": { "enum": ["traces", "metrics", "logs"] } },
+    "queue": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["size", "capacity", "utilization"],
+      "properties": {
+        "size": { "type": "integer", "minimum": 0, "maximum": 65536 },
+        "capacity": { "type": "integer", "minimum": 128, "maximum": 65536 },
+        "utilization": { "type": "number", "minimum": 0, "maximum": 1 }
+      }
+    },
+    "exports": { "type": "integer", "minimum": 0 },
+    "failures": { "type": "integer", "minimum": 0 },
+    "timeouts": { "type": "integer", "minimum": 0 },
+    "dropped": { "type": "integer", "minimum": 0 },
+    "flushes": { "type": "integer", "minimum": 0 },
+    "consecutiveFailures": { "type": "integer", "minimum": 0 },
+    "circuit": { "enum": ["closed", "open", "half_open"] },
+    "lastSuccessAt": { "type": "string", "format": "date-time" },
+    "lastFailureAt": { "type": "string", "format": "date-time" },
+    "lastFlushAt": { "type": "string", "format": "date-time" },
+    "retryAt": { "type": "string", "format": "date-time" },
+    "lastErrorCode": { "type": "string", "pattern": "^WOML_[A-Z0-9_]+$", "maxLength": 128 }
+  }
+}

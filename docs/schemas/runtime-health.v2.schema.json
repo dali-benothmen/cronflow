@@ -1,0 +1,32 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://woml.dev/schemas/runtime-health/v2",
+  "title": "WOML Runtime Detailed Health v2",
+  "x-status": "opentelemetry-export-ote6-frozen",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["profile", "kind", "status", "runtimeInstanceId", "components", "openTelemetry"],
+  "properties": {
+    "profile": { "const": "woml.runtime-health/v2" },
+    "kind": { "const": "detail" },
+    "status": { "enum": ["ready", "degraded", "unready"] },
+    "runtimeInstanceId": { "type": "string", "minLength": 1, "maxLength": 320 },
+    "components": {
+      "type": "array",
+      "maxItems": 1000,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["name", "status"],
+        "properties": {
+          "name": { "type": "string", "minLength": 1, "maxLength": 320 },
+          "status": { "enum": ["ready", "degraded", "unready", "stopped"] },
+          "code": { "type": "string", "pattern": "^WOML_[A-Z0-9_]+$" }
+        }
+      }
+    },
+    "openTelemetry": {
+      "$ref": "https://woml.dev/schemas/opentelemetry-exporter-health/v2"
+    }
+  }
+}

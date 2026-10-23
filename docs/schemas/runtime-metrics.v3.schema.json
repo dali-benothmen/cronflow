@@ -1,0 +1,29 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://woml.dev/schemas/runtime-metrics/v3",
+  "title": "WOML OpenTelemetry Exporter Runtime Metrics v3",
+  "description": "Additive, label-free self-metrics for the optional OpenTelemetry exporter.",
+  "x-status": "opentelemetry-export-ote6-frozen",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["profile", "name", "type", "value", "labels"],
+  "properties": {
+    "profile": { "const": "woml.runtime-metrics/v3" },
+    "name": {
+      "enum": [
+        "woml_exporter_queue_size",
+        "woml_exporter_queue_capacity",
+        "woml_exporter_queue_utilization",
+        "woml_exporter_exports_total",
+        "woml_exporter_failures_total",
+        "woml_exporter_timeouts_total",
+        "woml_exporter_dropped_total",
+        "woml_exporter_flushes_total",
+        "woml_exporter_circuit_open"
+      ]
+    },
+    "type": { "enum": ["gauge", "counter"] },
+    "value": { "type": "number", "minimum": 0 },
+    "labels": { "type": "object", "additionalProperties": false, "maxProperties": 0 }
+  }
+}

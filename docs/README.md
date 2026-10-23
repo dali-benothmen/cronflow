@@ -49,6 +49,7 @@ or schema documents to write and run a workflow.
 | Runtime configuration and ownership | [Production runtime](woml-production-runtime.md) |
 | VPS, Docker, proxy, and Kubernetes | [Production deployment](woml-production-deployment.md) |
 | Logs, metrics, and terminal inspection | [Observability](woml-observability.md) |
+| OTLP traces, metrics, and correlated logs | [OpenTelemetry export](woml-opentelemetry.md) |
 | Streaming output, replay, retention, and operations | [Streaming Output and Progress](woml-streaming-output-and-progress.md) |
 | Streaming wire contracts and cursor semantics | [Streaming Output and Progress v1](protocols/streaming-output-and-progress-v1.md) |
 | Recovery behavior | [Recovery](woml-recovery.md) |
@@ -73,6 +74,7 @@ Provider-specific setup is available for [Telegram](telegram.md),
 - [Process v1 release notes](release/process-v1-release-notes.md)
 - [Infrastructure Policies v1 release notes](release/infrastructure-policies-v1-release-notes.md)
 - [Streaming Output and Progress v1 release notes](release/streaming-output-and-progress-v1-release-notes.md)
+- [OpenTelemetry Export v1 release notes](release/opentelemetry-export-v1-release-notes.md)
 - [Release runbook](woml-release.md)
 - [Provider extension direction](provider-extension-architecture.md)
 

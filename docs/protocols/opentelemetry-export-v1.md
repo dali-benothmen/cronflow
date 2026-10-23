@@ -143,9 +143,40 @@ The exporter state is one of `disabled`, `starting`, `healthy`, `degraded`,
 collector, export, and flush failures degrade only the telemetry component.
 They never close workflow readiness.
 
-Queues and batches are bounded. Shutdown performs a bounded force-flush and
-SDK shutdown. A timeout abandons optional telemetry and allows WOML shutdown
-to continue.
+The native callback hands reviewed facts to a host-owned queue without waiting
+for network I/O. Queue capacity and batch size come from the resolved runtime
+configuration. When the queue is full, the new record is rejected
+deterministically, the drop counter increases, and workflow execution
+continues.
+
+Each signal exporter has a bounded whole-attempt deadline, two bounded retry
+delays, and a circuit breaker. Three exhausted exports open the circuit for a
+short cooldown; records presented while it is open are dropped visibly. The
+first request after the cooldown is a half-open probe, and a successful probe
+closes the circuit. Collector errors are reduced to fixed `WOML_OTEL_*` codes;
+remote response bodies never enter diagnostics. Repeated diagnostics are
+rate-limited by code.
+
+Exporter Health v2 adds queue size, capacity, and utilization; export,
+failure, timeout, drop, and flush counters; circuit and retry state; and the
+last successful export, failure, and flush timestamps. Runtime Health v2,
+Runtime Metrics v3, the operations stream, and `woml inspect` expose these
+facts. A degraded exporter degrades detailed health but never workflow
+readiness.
+
+Shutdown drains the host queue, performs force-flush, and initiates SDK
+shutdown within one hard deadline. A timeout abandons optional telemetry and
+allows WOML shutdown to continue.
+
+## Deployment experience
+
+The operator guide is [Export WOML Telemetry with
+OpenTelemetry](../woml-opentelemetry.md). The copy-ready assets under
+`examples/openTelemetry/` pin a Collector, Jaeger, and Prometheus; validate a
+Runtime Configuration v2 document; and include a production-shaped workflow
+covering process, HTTP, approval, durable wait, Workflow Call, compensation,
+and cleanup relationships. Telemetry configuration remains outside `.woml`
+source.
 
 ## Performance budgets
 

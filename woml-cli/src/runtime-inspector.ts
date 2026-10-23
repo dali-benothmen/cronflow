@@ -11,6 +11,7 @@ import {
   consumeOperationsStream,
   type OperationsStreamEventV1,
 } from './operations-stream';
+import type { OpenTelemetryExporterHealthV2 } from './opentelemetry-runtime';
 
 export const inspectUsage =
   'Usage: woml inspect [--state <path>] [--no-color]';
@@ -88,6 +89,7 @@ export interface InspectorSnapshotV1 {
   readonly runs: readonly InspectorRunV1[];
   readonly components: readonly InspectorComponentV1[];
   readonly alerts: readonly InspectorAlertV1[];
+  readonly openTelemetry?: OpenTelemetryExporterHealthV2;
 }
 
 export type InspectorStreamEventV1 = OperationsStreamEventV1;
@@ -172,6 +174,37 @@ function decodeSnapshot(value: unknown): InspectorSnapshotV1 {
     throw new Error('The runtime returned an invalid operations snapshot.');
   }
   return value as unknown as InspectorSnapshotV1;
+}
+
+function decodeOpenTelemetryHealth(
+  value: unknown
+): OpenTelemetryExporterHealthV2 | undefined {
+  if (
+    !isRecord(value) ||
+    value.profile !== 'woml.runtime-health/v2' ||
+    !isRecord(value.openTelemetry)
+  ) {
+    return undefined;
+  }
+  const health = value.openTelemetry;
+  if (
+    health.profile !== 'woml.opentelemetry-exporter-health/v2' ||
+    !isRecord(health.queue) ||
+    !isCount(health.queue.size) ||
+    !isCount(health.queue.capacity) ||
+    typeof health.queue.utilization !== 'number' ||
+    !Number.isFinite(health.queue.utilization) ||
+    health.queue.utilization < 0 ||
+    health.queue.utilization > 1 ||
+    !isCount(health.exports) ||
+    !isCount(health.failures) ||
+    !isCount(health.timeouts) ||
+    !isCount(health.dropped) ||
+    !isCount(health.flushes)
+  ) {
+    return undefined;
+  }
+  return health as unknown as OpenTelemetryExporterHealthV2;
 }
 
 export function parseInspectArguments(args: readonly string[]): InspectorArguments {
@@ -358,6 +391,25 @@ function runtimeLines(snapshot: InspectorSnapshotV1) {
     lines.push('No runtime components reported.');
     colors.push('dim');
   }
+  if (snapshot.openTelemetry !== undefined) {
+    const telemetry = snapshot.openTelemetry;
+    lines.push(
+      '',
+      'OPENTELEMETRY EXPORT',
+      `Queue: ${telemetry.queue.size} / ${telemetry.queue.capacity} (${Math.round(telemetry.queue.utilization * 100)}%)`,
+      `Exports: ${telemetry.exports}  Failures: ${telemetry.failures}  Timeouts: ${telemetry.timeouts}  Dropped: ${telemetry.dropped}`,
+      `Circuit: ${telemetry.circuit}${telemetry.retryAt === undefined ? '' : `  Retry: ${telemetry.retryAt}`}`,
+      `Last success: ${telemetry.lastSuccessAt ?? '—'}  Last flush: ${telemetry.lastFlushAt ?? '—'}`
+    );
+    colors.push(
+      undefined,
+      'cyan',
+      telemetry.queue.utilization >= 0.8 ? 'yellow' : 'green',
+      telemetry.failures > 0 || telemetry.dropped > 0 ? 'yellow' : 'green',
+      telemetry.circuit === 'closed' ? 'green' : 'yellow',
+      'dim'
+    );
+  }
   lines.push('', `Runtime ID: ${snapshot.runtimeInstanceId}`, `Captured: ${snapshot.capturedAt}`);
   colors.push(undefined, 'dim', 'dim');
   return { lines, colors };
@@ -495,7 +547,19 @@ async function fetchSnapshot(descriptor: RuntimeDescriptorV1, fetcher: typeof fe
     headers: { authorization: `Bearer ${descriptor.capability}` },
   });
   if (!response.ok) throw new Error(`Runtime snapshot request failed with HTTP ${response.status}.`);
-  return decodeSnapshot(await response.json());
+  const snapshot = decodeSnapshot(await response.json());
+  try {
+    const healthResponse = await fetcher(`${descriptor.adminUrl}/v1/health`, {
+      headers: { authorization: `Bearer ${descriptor.capability}` },
+    });
+    if (!healthResponse.ok) return snapshot;
+    const openTelemetry = decodeOpenTelemetryHealth(await healthResponse.json());
+    return openTelemetry === undefined
+      ? snapshot
+      : { ...snapshot, openTelemetry };
+  } catch {
+    return snapshot;
+  }
 }
 
 export async function runRuntimeInspector(options: {

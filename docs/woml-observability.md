@@ -147,6 +147,13 @@ confirmed cancellation, `r` refreshes, `?` shows help, and `q` closes only the
 inspector. Non-TTY use is rejected with `woml list --json` as the scriptable
 alternative.
 
+When optional OpenTelemetry export is active, the Runtime view also shows its
+bounded queue, export/failure/timeout/drop counters, circuit state, retry time,
+and last successful export and flush. Collector failure degrades only that
+component; public readiness remains available for workflow execution. See
+[OpenTelemetry export](woml-opentelemetry.md) for setup and the exact privacy
+boundary.
+
 ## Release gate
 
 Run from `woml-cli`:

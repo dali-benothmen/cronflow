@@ -1,0 +1,12 @@
+<woml>
+  <workflow id="observed-release-health" name="Observed release health" description="Child workflow used by the OpenTelemetry operator example." version="1.0.0">
+    <triggers><manual id="start" /></triggers>
+    <steps>
+      <step id="verify" name="Verify release health">
+        <script>
+          return { releaseId: context.payload.releaseId, healthy: true };
+        </script>
+      </step>
+    </steps>
+  </workflow>
+</woml>

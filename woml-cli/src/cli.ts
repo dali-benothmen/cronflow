@@ -6270,23 +6270,9 @@ async function activateWorkflows(
             ...(dependencies.loadOpenTelemetrySdk === undefined
               ? {}
               : { loadSdk: dependencies.loadOpenTelemetrySdk }),
-            onHealth: health => {
-              const status =
-                health.state === 'healthy'
-                  ? 'ready'
-                  : health.state === 'degraded'
-                    ? 'degraded'
-                    : health.state === 'starting' ||
-                        health.state === 'flushing'
-                      ? 'unready'
-                      : 'stopped';
-              observability?.setComponent(
-                'opentelemetry',
-                'provider',
-                status,
-                health.lastErrorCode
-              );
-            },
+            onHealth: health => observability?.setOpenTelemetryHealth(health),
+            onDiagnostic: (code, message) =>
+              observability?.alert(code, message, 'warn'),
           }
         );
         for (const link of pendingTelemetryLinks.splice(0)) {

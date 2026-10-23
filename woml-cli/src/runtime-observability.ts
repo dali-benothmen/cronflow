@@ -12,6 +12,7 @@ import {
   type TelemetryMetricFactV1,
 } from './opentelemetry-observation';
 import type { TelemetrySignalV1 } from './opentelemetry-signal';
+import type { OpenTelemetryExporterHealthV2 } from './opentelemetry-runtime';
 
 export type RuntimeLifecycle =
   | 'starting'
@@ -218,6 +219,8 @@ export class RuntimeObservability implements RuntimeObservabilitySurface {
   >();
   readonly #telemetryActive = new TelemetryActiveGaugeState();
   readonly #telemetrySignalIds = new Set<string>();
+  #openTelemetryHealth?: OpenTelemetryExporterHealthV2;
+  #openTelemetryComponentIdentity?: string;
   #telemetryObserved = false;
   #nextSubscriberId = 1;
   #sequence = 0;
@@ -439,6 +442,56 @@ export class RuntimeObservability implements RuntimeObservabilitySurface {
     }
   }
 
+  setOpenTelemetryHealth(health: OpenTelemetryExporterHealthV2): void {
+    const previous = this.#openTelemetryHealth;
+    this.#openTelemetryHealth = health;
+    const status =
+      health.state === 'healthy'
+        ? 'ready'
+        : health.state === 'degraded'
+          ? 'degraded'
+          : health.state === 'starting' || health.state === 'flushing'
+            ? 'unready'
+            : 'stopped';
+    const identity = `${status}:${health.lastErrorCode ?? ''}`;
+    if (identity !== this.#openTelemetryComponentIdentity) {
+      this.#openTelemetryComponentIdentity = identity;
+      this.setComponent(
+        'opentelemetry',
+        'provider',
+        status,
+        health.lastErrorCode
+      );
+    }
+    if ((previous?.exports ?? 0) < health.exports) {
+      this.record('provider', 'opentelemetry', 'exported');
+    }
+    if ((previous?.failures ?? 0) < health.failures) {
+      this.record(
+        'provider',
+        'opentelemetry',
+        'failed',
+        health.lastErrorCode
+      );
+    }
+    if ((previous?.timeouts ?? 0) < health.timeouts) {
+      this.record(
+        'provider',
+        'opentelemetry',
+        'timed_out',
+        health.lastErrorCode
+      );
+    }
+    if ((previous?.dropped ?? 0) < health.dropped) {
+      this.record(
+        'provider',
+        'opentelemetry',
+        'dropped',
+        health.lastErrorCode
+      );
+    }
+  }
+
   alert(code: string, message: string, level: 'warn' | 'error' = 'error'): void {
     const normalizedCode = safeCode(code) ?? 'WOML_OBSERVABILITY_ALERT';
     const safeMessage = bounded(message, 'WOML runtime alert.', 1024);
@@ -519,7 +572,10 @@ export class RuntimeObservability implements RuntimeObservabilitySurface {
           ? 'degraded'
           : 'unready';
     return {
-      profile: 'woml.runtime-health/v1',
+      profile:
+        this.#openTelemetryHealth === undefined
+          ? 'woml.runtime-health/v1'
+          : 'woml.runtime-health/v2',
       kind: 'detail',
       status,
       runtimeInstanceId: this.#runtimeInstanceId,
@@ -541,6 +597,9 @@ export class RuntimeObservability implements RuntimeObservabilitySurface {
               },
             ]),
       ],
+      ...(this.#openTelemetryHealth === undefined
+        ? {}
+        : { openTelemetry: this.#openTelemetryHealth }),
     };
   }
 
@@ -627,6 +686,17 @@ export class RuntimeObservability implements RuntimeObservabilitySurface {
       value,
       labels: { backend },
     });
+    const exporterMetric = (
+      name: string,
+      type: 'gauge' | 'counter',
+      value: number
+    ) => ({
+      profile: 'woml.runtime-metrics/v3',
+      name,
+      type,
+      value,
+      labels: {},
+    });
     const durable = this.#observeDurable?.();
     const artifacts = this.#observeArtifacts?.();
     const locks = this.#observeLocks?.();
@@ -655,6 +725,32 @@ export class RuntimeObservability implements RuntimeObservabilitySurface {
       metric('woml_run_duration_seconds', 'histogram', snapshot.runs.length === 0 ? 0 : snapshot.runs.reduce((sum, run) => sum + run.durationMs, 0) / snapshot.runs.length / 1000),
       metric('woml_store_size_bytes', 'gauge', await this.#storeSize(), { provider: 'sqlite' }),
     ];
+    if (this.#openTelemetryHealth !== undefined) {
+      const health = this.#openTelemetryHealth;
+      results.push(
+        exporterMetric('woml_exporter_queue_size', 'gauge', health.queue.size),
+        exporterMetric(
+          'woml_exporter_queue_capacity',
+          'gauge',
+          health.queue.capacity
+        ),
+        exporterMetric(
+          'woml_exporter_queue_utilization',
+          'gauge',
+          health.queue.utilization
+        ),
+        exporterMetric('woml_exporter_exports_total', 'counter', health.exports),
+        exporterMetric('woml_exporter_failures_total', 'counter', health.failures),
+        exporterMetric('woml_exporter_timeouts_total', 'counter', health.timeouts),
+        exporterMetric('woml_exporter_dropped_total', 'counter', health.dropped),
+        exporterMetric('woml_exporter_flushes_total', 'counter', health.flushes),
+        exporterMetric(
+          'woml_exporter_circuit_open',
+          'gauge',
+          health.circuit === 'open' ? 1 : 0
+        )
+      );
+    }
     for (const status of ['queued', 'running', 'waiting', 'retrying', 'succeeded', 'failed', 'cancelled']) {
       const value =
         status === 'queued'
