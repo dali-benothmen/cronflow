@@ -47,12 +47,13 @@ function protocolVersionFromEnvironment(): ScriptHostProtocolVersion {
     raw === '8' ||
     raw === '9' ||
     raw === '10' ||
-    raw === '11'
+    raw === '11' ||
+    raw === '12'
   ) {
     return Number(raw) as ScriptHostProtocolVersion;
   }
   throw new Error(
-    'WOML_SCRIPT_HOST_PROTOCOL_VERSION must be 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, or 11.'
+    'WOML_SCRIPT_HOST_PROTOCOL_VERSION must be 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, or 12.'
   );
 }
 

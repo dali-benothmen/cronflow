@@ -61,6 +61,7 @@ fn output(run_id: &str, text: impl Into<String>) -> OperationalRecordDraftV1 {
     identity: identity(run_id),
     body: OperationalBodyV1::Output {
       source: OperationalSourceV1::Stdout,
+      level: None,
       byte_count: text.len() as u64,
       text,
     },
@@ -73,6 +74,20 @@ fn close(run_id: &str) -> OperationalRecordDraftV1 {
     body: OperationalBodyV1::Closed {
       status: OperationalCloseStatusV1::Succeeded,
       reason_code: None,
+    },
+  }
+}
+
+fn progress(run_id: &str, current: f64) -> OperationalRecordDraftV1 {
+  OperationalRecordDraftV1 {
+    identity: identity(run_id),
+    body: OperationalBodyV1::Progress {
+      progress_id: "items".to_string(),
+      current: Some(current),
+      total: Some(1_000.0),
+      unit: Some("items".to_string()),
+      message: Some(format!("processed {current}")),
+      status: OperationalProgressStatusV1::Active,
     },
   }
 }
@@ -175,6 +190,39 @@ fn restart_preserves_cursor_order_progress_and_deployment_binding() {
   assert!(matches!(
     OperationalOutputStore::open(temporary.path(), "deployment-b"),
     Err(OperationalOutputError::DeploymentMismatch)
+  ));
+}
+
+#[test]
+fn progress_floods_coalesce_durably_and_the_final_snapshot_is_replayable() {
+  let temporary = TemporaryStore::new();
+  let store = OperationalOutputStore::open(temporary.path(), "deployment-a").unwrap();
+  let first = progress("run-progress", 0.0);
+  assert!(!store.coalesce_progress_snapshot(&first).unwrap());
+  store.append(first).unwrap();
+
+  for current in 1..1_000 {
+    let draft = progress("run-progress", current as f64);
+    if !store.coalesce_progress_snapshot(&draft).unwrap() {
+      store.append(draft).unwrap();
+    }
+  }
+  let latest = store.latest_progress("run-progress").unwrap();
+  assert_eq!(latest.len(), 1);
+  assert_eq!(latest[0].current, Some(999.0));
+
+  // The Script Host force-appends its newest accepted lane before closure so
+  // cursor replay contains the final value even when intermediate snapshots
+  // were projection-only updates.
+  store.append(progress("run-progress", 999.0)).unwrap();
+  let replay = store.read_run_page("run-progress", 0, 1_000).unwrap();
+  assert!(replay.records.len() < 1_000);
+  assert!(matches!(
+    replay.records.last().map(|record| &record.body),
+    Some(OperationalBodyV1::Progress {
+      current: Some(999.0),
+      ..
+    })
   ));
 }
 

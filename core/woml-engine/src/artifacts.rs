@@ -1541,6 +1541,16 @@ impl ManagedArtifactStore {
     let _ = store.cleanup_materialization(invocation_id);
   }
 
+  pub(crate) fn operational_redactions(&self, invocation_id: &str) -> Vec<String> {
+    let Ok(store) = self.configured() else {
+      return Vec::new();
+    };
+    vec![store
+      .invocation_materialization_directory(invocation_id)
+      .to_string_lossy()
+      .into_owned()]
+  }
+
   /// Verifies an artifact reference for an immutable rich-approval review.
   /// This intentionally exposes metadata only; artifact bytes never enter the
   /// review event or provider payload.

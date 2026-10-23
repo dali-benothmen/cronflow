@@ -36,6 +36,7 @@
       "properties": {
         "kind": { "const": "output" },
         "source": { "$ref": "#/$defs/source" },
+        "level": { "enum": ["debug", "info", "warn", "error"] },
         "text": { "type": "string", "maxLength": 16384, "pattern": "^[^\\u0000]*$" },
         "byteCount": { "type": "integer", "minimum": 0, "maximum": 16384 }
       }

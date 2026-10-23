@@ -13,6 +13,7 @@ use std::{
 use chrono::{DateTime, SecondsFormat, Utc};
 use rusqlite::{params, Connection, OptionalExtension, TransactionBehavior};
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use thiserror::Error;
 
 pub const OPERATIONAL_RECORD_PROFILE: &str = "woml.operational-record/v1";
@@ -29,6 +30,7 @@ pub const DEFAULT_OPERATIONAL_INLINE_RUN_BYTES: u64 = 16 * 1024 * 1024;
 pub const MAX_OPERATIONAL_INLINE_RUN_BYTES: u64 = 256 * 1024 * 1024;
 pub const DEFAULT_OPERATIONAL_RETENTION_MS: u64 = 7 * 24 * 60 * 60 * 1_000;
 pub const DEFAULT_OPERATIONAL_STORE_BYTES: u64 = 1024 * 1024 * 1024;
+pub const OPERATIONAL_PROGRESS_CADENCE_MS: i64 = 250;
 
 const MAX_ID_BYTES: usize = 320;
 const MAX_REASON_BYTES: usize = 128;
@@ -40,6 +42,15 @@ pub enum OperationalSourceV1 {
   Stderr,
   Script,
   Runtime,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum OperationalLogLevelV1 {
+  Debug,
+  Info,
+  Warn,
+  Error,
 }
 
 impl OperationalSourceV1 {
@@ -84,6 +95,8 @@ impl OperationalProgressStatusV1 {
 pub enum OperationalBodyV1 {
   Output {
     source: OperationalSourceV1,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    level: Option<OperationalLogLevelV1>,
     text: String,
     #[serde(rename = "byteCount")]
     byte_count: u64,
@@ -453,6 +466,100 @@ impl OperationalOutputStore {
     Ok(record)
   }
 
+  /// Durably updates an existing latest-progress lane without adding another
+  /// replay record when the lane is still inside the frozen 250 ms cadence.
+  /// The caller must force-append the newest body before attempt closure.
+  pub fn coalesce_progress_snapshot(
+    &self,
+    draft: &OperationalRecordDraftV1,
+  ) -> Result<bool, OperationalOutputError> {
+    validate_draft(draft)?;
+    let OperationalBodyV1::Progress {
+      progress_id,
+      current,
+      total,
+      unit,
+      message,
+      status,
+    } = &draft.body
+    else {
+      return Ok(false);
+    };
+    let occurred_at = now_string();
+    let now =
+      DateTime::parse_from_rfc3339(&occurred_at).map_err(|_| OperationalOutputError::Corrupt)?;
+    let mut connection = self
+      .connection
+      .lock()
+      .map_err(|_| OperationalOutputError::Unavailable)?;
+    let transaction = connection
+      .transaction_with_behavior(TransactionBehavior::Immediate)
+      .map_err(|_| OperationalOutputError::Unavailable)?;
+    let existing_active: Option<bool> = transaction
+      .query_row(
+        "SELECT active FROM woml_operational_runs WHERE run_id = ?1",
+        [&draft.identity.run_id],
+        |row| row.get(0),
+      )
+      .optional()
+      .map_err(|_| OperationalOutputError::Corrupt)?;
+    if existing_active == Some(false) {
+      return Err(OperationalOutputError::InvalidRecord(
+        "the operational stream is already closed",
+      ));
+    }
+    let previous: Option<String> = transaction
+      .query_row(
+        "SELECT occurred_at FROM woml_operational_progress
+         WHERE run_id = ?1 AND node_key = ?2 AND attempt_key = ?3 AND progress_id = ?4",
+        params![
+          draft.identity.run_id,
+          draft.identity.node_id.as_deref().unwrap_or(""),
+          draft.identity.attempt.unwrap_or(0),
+          progress_id,
+        ],
+        |row| row.get(0),
+      )
+      .optional()
+      .map_err(|_| OperationalOutputError::Corrupt)?;
+    let within_cadence = previous
+      .as_deref()
+      .and_then(|value| DateTime::parse_from_rfc3339(value).ok())
+      .is_some_and(|previous| {
+        let elapsed = now.signed_duration_since(previous).num_milliseconds();
+        (0..OPERATIONAL_PROGRESS_CADENCE_MS).contains(&elapsed)
+      });
+    if !within_cadence {
+      return Ok(false);
+    }
+    let changed = transaction
+      .execute(
+        "UPDATE woml_operational_progress SET
+           current = ?1, total = ?2, unit = ?3, message = ?4, status = ?5, occurred_at = ?6
+         WHERE run_id = ?7 AND node_key = ?8 AND attempt_key = ?9 AND progress_id = ?10",
+        params![
+          current,
+          total,
+          unit,
+          message,
+          status.as_str(),
+          occurred_at,
+          draft.identity.run_id,
+          draft.identity.node_id.as_deref().unwrap_or(""),
+          draft.identity.attempt.unwrap_or(0),
+          progress_id,
+        ],
+      )
+      .map_err(|_| OperationalOutputError::Unavailable)?;
+    if changed != 1 {
+      return Err(OperationalOutputError::Corrupt);
+    }
+    transaction
+      .commit()
+      .map_err(|_| OperationalOutputError::Unavailable)?;
+    Ok(true)
+  }
+
   pub fn read_page(
     &self,
     after: u64,
@@ -780,6 +887,40 @@ impl LazyOperationalOutputStore {
     *active = Some(Arc::clone(&store));
     Ok(store)
   }
+}
+
+/// Derives the private operational-output authority associated with one
+/// durable state database. The default `.woml/state.sqlite` maps to
+/// `.woml/output.sqlite`; custom names remain adjacent and cannot collide with
+/// the authoritative state file.
+pub fn operational_output_store_for_state(
+  state_path: &Path,
+) -> Result<LazyOperationalOutputStore, OperationalOutputError> {
+  let file_name = state_path
+    .file_name()
+    .and_then(|value| value.to_str())
+    .ok_or(OperationalOutputError::UnsafePath)?;
+  let output_name = if file_name == "state.sqlite" {
+    "output.sqlite".to_string()
+  } else {
+    let stem = state_path
+      .file_stem()
+      .and_then(|value| value.to_str())
+      .ok_or(OperationalOutputError::UnsafePath)?;
+    format!("{stem}.output.sqlite")
+  };
+  let output_path = state_path.with_file_name(output_name);
+  if output_path == state_path {
+    return Err(OperationalOutputError::UnsafePath);
+  }
+  let identity_source = state_path
+    .canonicalize()
+    .unwrap_or_else(|_| state_path.to_path_buf());
+  let digest = Sha256::digest(identity_source.to_string_lossy().as_bytes());
+  Ok(LazyOperationalOutputStore::new(
+    output_path,
+    format!("deployment_{:x}", digest),
+  ))
 }
 
 fn validate_draft(draft: &OperationalRecordDraftV1) -> Result<(), OperationalOutputError> {
@@ -1169,8 +1310,10 @@ fn update_run_accounting(
   transaction: &rusqlite::Transaction<'_>,
   record: &OperationalRecordV1,
 ) -> Result<(), OperationalOutputError> {
-  let (active, terminal_at) = match record.body {
-    OperationalBodyV1::Closed { .. } => (0, Some(record.occurred_at.as_str())),
+  // A node-scoped closure ends one attempt stream. Only a run-scoped closure
+  // makes the complete operational run terminal.
+  let (active, terminal_at) = match (&record.body, &record.identity.node_id) {
+    (OperationalBodyV1::Closed { .. }, None) => (0, Some(record.occurred_at.as_str())),
     _ => (1, None),
   };
   transaction
@@ -1198,12 +1341,18 @@ fn update_run_accounting(
     )
     .map_err(|_| OperationalOutputError::Unavailable)?;
   if matches!(record.body, OperationalBodyV1::Closed { .. }) {
-    transaction
-      .execute(
+    match (&record.identity.node_id, record.identity.attempt) {
+      (Some(node_id), Some(attempt)) => transaction.execute(
+        "UPDATE woml_operational_progress SET status = 'closed'
+         WHERE run_id = ?1 AND node_key = ?2 AND attempt_key = ?3",
+        params![record.identity.run_id, node_id, attempt],
+      ),
+      _ => transaction.execute(
         "UPDATE woml_operational_progress SET status = 'closed' WHERE run_id = ?1",
         [&record.identity.run_id],
-      )
-      .map_err(|_| OperationalOutputError::Unavailable)?;
+      ),
+    }
+    .map_err(|_| OperationalOutputError::Unavailable)?;
   }
   Ok(())
 }

@@ -16,7 +16,8 @@ use tokio::time::timeout;
 use crate::protocol::{
   CancelMessage, CapabilityCallMessage, CapabilityResultMessage, CompletedMessage, ExecuteMessage,
   FetchObservationAckMessage, FetchObservationMessage, HostOutcome, HostReportedFailureKind,
-  ModuleRegisteredMessage, ReadyMessage, RegisterModuleMessage,
+  ModuleRegisteredMessage, ProgressAckMessage, ProgressReportMessage, ReadyMessage,
+  RegisterModuleMessage, ScriptLogMessage,
 };
 use crate::{
   capability_transport_failure, CapabilityCancellationToken, CapabilityFailure,
@@ -73,6 +74,10 @@ struct PendingInvocation {
   sender: oneshot::Sender<PendingResult>,
   identity: NativeFetchInvocationIdentity,
   authority: Option<Arc<DurableCapabilityAuthority>>,
+  last_operational_frame_sequence: u64,
+  operational_emitted: bool,
+  cancellation_requested: bool,
+  latest_progress: HashMap<String, crate::OperationalBodyV1>,
 }
 
 impl std::fmt::Debug for PendingInvocation {
@@ -304,6 +309,10 @@ impl ScriptHostClient {
             step_idempotency_key: message.attempt.idempotency_key.to_string(),
           },
           authority,
+          last_operational_frame_sequence: 0,
+          operational_emitted: false,
+          cancellation_requested: false,
+          latest_progress: HashMap::new(),
         },
       );
     }
@@ -349,6 +358,9 @@ impl ScriptHostClient {
     message: CancelMessage<'_>,
   ) -> Result<(), ScriptHostClientError> {
     let invocation_id = message.invocation_id;
+    if let Some(pending) = self.shared.lock().await.pending.get_mut(invocation_id) {
+      pending.cancellation_requested = true;
+    }
     cancel_invocation_calls(&self.shared, invocation_id).await;
     if let Err(error) = self.write_message(&message).await {
       fail_all(&self.shared, error.clone()).await;
@@ -466,12 +478,19 @@ async fn host_message_reader<R: AsyncRead + Unpin + Send + 'static>(
         }
         let pending = {
           let state = shared.lock().await;
-          state
-            .pending
-            .get(&message.invocation_id)
-            .map(|pending| (pending.identity.clone(), pending.authority.clone()))
+          state.pending.get(&message.invocation_id).map(|pending| {
+            (
+              pending.identity.clone(),
+              pending.authority.clone(),
+              pending
+                .latest_progress
+                .values()
+                .cloned()
+                .collect::<Vec<_>>(),
+            )
+          })
         };
-        let Some((identity, authority)) = pending else {
+        let Some((identity, authority, latest_progress)) = pending else {
           fail_all(
             &shared,
             ScriptHostClientError::Protocol(format!(
@@ -483,6 +502,51 @@ async fn host_message_reader<R: AsyncRead + Unpin + Send + 'static>(
           return;
         };
         if let Some(authority) = &authority {
+          for progress in latest_progress {
+            if authority
+              .force_append_script_operational_record(&identity, progress)
+              .await
+              .is_err()
+            {
+              fail_all(
+                &shared,
+                ScriptHostClientError::Protocol(
+                  "the final structured-progress snapshot could not be persisted".to_string(),
+                ),
+              )
+              .await;
+              return;
+            }
+          }
+          let operational_emitted = shared
+            .lock()
+            .await
+            .pending
+            .get(&message.invocation_id)
+            .is_some_and(|pending| pending.operational_emitted);
+          if operational_emitted {
+            let (status, reason_code) = operational_close(&message.outcome);
+            if authority
+              .append_script_operational_record(
+                &identity,
+                crate::OperationalBodyV1::Closed {
+                  status,
+                  reason_code,
+                },
+              )
+              .await
+              .is_err()
+            {
+              fail_all(
+                &shared,
+                ScriptHostClientError::Protocol(
+                  "script operational-output closure could not be persisted".to_string(),
+                ),
+              )
+              .await;
+              return;
+            }
+          }
           authority.close_programmatic_lock_sessions(&identity.invocation_id);
           if authority
             .close_active_native_fetches(&identity, completion_fetch_failure(&message.outcome))
@@ -516,6 +580,182 @@ async fn host_message_reader<R: AsyncRead + Unpin + Send + 'static>(
           return;
         };
         let _ = pending.sender.send(Ok(message));
+      }
+      Some("script_log") => {
+        let message: ScriptLogMessage = match serde_json::from_value(message) {
+          Ok(message) => message,
+          Err(error) => {
+            fail_all(&shared, ScriptHostClientError::Protocol(error.to_string())).await;
+            return;
+          }
+        };
+        if let Err(error) = message.validate() {
+          fail_all(&shared, ScriptHostClientError::Protocol(error)).await;
+          return;
+        }
+        let pending = {
+          let state = shared.lock().await;
+          state.pending.get(&message.request_id).map(|pending| {
+            (
+              pending.identity.clone(),
+              pending.authority.clone(),
+              pending.last_operational_frame_sequence,
+              pending.cancellation_requested,
+            )
+          })
+        };
+        let Some((identity, Some(authority), previous, cancellation_requested)) = pending else {
+          fail_all(
+            &shared,
+            ScriptHostClientError::Protocol(
+              "received a script-log frame for an unknown invocation".to_string(),
+            ),
+          )
+          .await;
+          return;
+        };
+        if cancellation_requested {
+          fail_all(
+            &shared,
+            ScriptHostClientError::Protocol(
+              "received a script-log frame after invocation cancellation".to_string(),
+            ),
+          )
+          .await;
+          return;
+        }
+        if message.frame_sequence != previous.saturating_add(1) {
+          fail_all(
+            &shared,
+            ScriptHostClientError::Protocol(
+              "received an out-of-order Script Host v12 operational frame".to_string(),
+            ),
+          )
+          .await;
+          return;
+        }
+        let byte_count = message.text.len() as u64;
+        if authority
+          .append_script_operational_record(
+            &identity,
+            crate::OperationalBodyV1::Output {
+              source: crate::OperationalSourceV1::Script,
+              level: Some(message.level.into()),
+              text: message.text,
+              byte_count,
+            },
+          )
+          .await
+          .is_err()
+        {
+          fail_all(
+            &shared,
+            ScriptHostClientError::Protocol(
+              "script operational output could not be persisted".to_string(),
+            ),
+          )
+          .await;
+          return;
+        }
+        let mut state = shared.lock().await;
+        if let Some(pending) = state.pending.get_mut(&message.request_id) {
+          pending.last_operational_frame_sequence = message.frame_sequence;
+          pending.operational_emitted = true;
+        }
+      }
+      Some("progress_report") => {
+        let message: ProgressReportMessage = match serde_json::from_value(message) {
+          Ok(message) => message,
+          Err(error) => {
+            fail_all(&shared, ScriptHostClientError::Protocol(error.to_string())).await;
+            return;
+          }
+        };
+        if let Err(error) = message.validate() {
+          fail_all(&shared, ScriptHostClientError::Protocol(error)).await;
+          return;
+        }
+        let pending = {
+          let state = shared.lock().await;
+          state.pending.get(&message.request_id).map(|pending| {
+            (
+              pending.identity.clone(),
+              pending.authority.clone(),
+              pending.last_operational_frame_sequence,
+              pending.cancellation_requested,
+            )
+          })
+        };
+        let Some((identity, Some(authority), previous, cancellation_requested)) = pending else {
+          fail_all(
+            &shared,
+            ScriptHostClientError::Protocol(
+              "received a progress frame for an unknown invocation".to_string(),
+            ),
+          )
+          .await;
+          return;
+        };
+        if cancellation_requested {
+          fail_all(
+            &shared,
+            ScriptHostClientError::Protocol(
+              "received a progress frame after invocation cancellation".to_string(),
+            ),
+          )
+          .await;
+          return;
+        }
+        if message.frame_sequence != previous.saturating_add(1) {
+          fail_all(
+            &shared,
+            ScriptHostClientError::Protocol(
+              "received an out-of-order Script Host v12 operational frame".to_string(),
+            ),
+          )
+          .await;
+          return;
+        }
+        let progress_id = message.progress_id.clone();
+        let progress = crate::OperationalBodyV1::Progress {
+          progress_id: message.progress_id,
+          current: message.current,
+          total: message.total,
+          unit: message.unit,
+          message: message.message,
+          status: crate::OperationalProgressStatusV1::Active,
+        };
+        if authority
+          .append_script_operational_record(&identity, progress.clone())
+          .await
+          .is_err()
+        {
+          fail_all(
+            &shared,
+            ScriptHostClientError::Protocol(
+              "structured progress could not be persisted".to_string(),
+            ),
+          )
+          .await;
+          return;
+        }
+        {
+          let mut state = shared.lock().await;
+          if let Some(pending) = state.pending.get_mut(&message.request_id) {
+            pending.last_operational_frame_sequence = message.frame_sequence;
+            pending.operational_emitted = true;
+            pending.latest_progress.insert(progress_id, progress);
+          }
+        }
+        if let Err(error) = write_serialized_message(
+          &stdin,
+          &ProgressAckMessage::accepted(&message.request_id, message.frame_sequence),
+        )
+        .await
+        {
+          fail_all(&shared, error).await;
+          return;
+        }
       }
       Some("capability_call") => {
         let message: CapabilityCallMessage = match serde_json::from_value(message) {
@@ -662,7 +902,7 @@ async fn host_message_reader<R: AsyncRead + Unpin + Send + 'static>(
         fail_all(
           &shared,
           ScriptHostClientError::Protocol(
-            "received an unsupported Bun-to-Rust script-host v6 message".to_string(),
+            "received an unsupported Bun-to-Rust Script Host v12 message".to_string(),
           ),
         )
         .await;
@@ -737,6 +977,22 @@ async fn fail_all(shared: &Arc<Mutex<SharedState>>, error: ScriptHostClientError
   }
   for (_, pending) in pending {
     if let Some(authority) = &pending.authority {
+      for progress in pending.latest_progress.values().cloned() {
+        let _ = authority
+          .force_append_script_operational_record(&pending.identity, progress)
+          .await;
+      }
+      if pending.operational_emitted {
+        let _ = authority
+          .append_script_operational_record(
+            &pending.identity,
+            crate::OperationalBodyV1::Closed {
+              status: crate::OperationalCloseStatusV1::Interrupted,
+              reason_code: Some("WOML_SCRIPT_HOST_INTERRUPTED".to_string()),
+            },
+          )
+          .await;
+      }
       authority.close_programmatic_lock_sessions(&pending.identity.invocation_id);
     }
     let _ = pending.sender.send(Err(error.clone()));
@@ -792,6 +1048,32 @@ fn completion_fetch_failure(outcome: &HostOutcome) -> CapabilityFailure {
     retryable: false,
     ambiguous: true,
     details: None,
+  }
+}
+
+fn operational_close(outcome: &HostOutcome) -> (crate::OperationalCloseStatusV1, Option<String>) {
+  match outcome {
+    HostOutcome::Success { .. } => (crate::OperationalCloseStatusV1::Succeeded, None),
+    HostOutcome::Failure { error }
+      if error.kind == HostReportedFailureKind::InvocationCancelled =>
+    {
+      (
+        crate::OperationalCloseStatusV1::Cancelled,
+        Some(error.code.clone()),
+      )
+    }
+    HostOutcome::Failure { error } if error.kind == HostReportedFailureKind::ScriptTimedOut => (
+      crate::OperationalCloseStatusV1::TimedOut,
+      Some(error.code.clone()),
+    ),
+    HostOutcome::Failure { error } if error.kind == HostReportedFailureKind::WorkerCrashed => (
+      crate::OperationalCloseStatusV1::Interrupted,
+      Some(error.code.clone()),
+    ),
+    HostOutcome::Failure { error } => (
+      crate::OperationalCloseStatusV1::Failed,
+      Some(error.code.clone()),
+    ),
   }
 }
 

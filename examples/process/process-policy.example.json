@@ -25,6 +25,7 @@
   "limits": {
     "maxTimeoutMs": 1200000,
     "maxOutputBytes": 262144,
+    "maxStreamBytes": 16777216,
     "maxConcurrent": 4
   }
 }

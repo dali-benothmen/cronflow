@@ -1,6 +1,6 @@
 # WOML Streaming Output and Progress v1
 
-**Status:** SOP0 contracts frozen; SOP1 storage foundation implemented on 2026-10-23  
+**Status:** SOP0–SOP3 implemented on 2026-10-23
 **Authority:** Rust core  
 **Durability class:** Operational, bounded, and explicitly non-authoritative
 
@@ -143,8 +143,19 @@ value. Streamed bytes are redacted across chunk boundaries before persistence
 or publication. The final result adds `streamed`, start/end sequence,
 truncation, and optional artifact metadata without duplicating complete output.
 
-Process v2 is only a frozen contract in SOP0. The process supervisor implements
-it in SOP2.
+The Rust process supervisor owns both pipe drains. It preserves stdout/stderr
+source identity, incrementally reconstructs UTF-8, replaces invalid byte
+sequences safely, and applies stateful secret redaction before append. Capture
+and streaming are independent, and the supervisor keeps draining after the
+stream budget is exhausted so a noisy child cannot block on a full pipe.
+
+Process Policy v1 accepts the optional `limits.maxStreamBytes` limit. Existing
+policies default to 16 MiB; operators may lower it or raise it through the
+reviewed 256 MiB protocol ceiling without granting any new executable,
+working-directory, environment, or shell authority. Store activation occurs
+before spawn. A post-spawn output-authority failure terminates the owned process
+tree and returns an ambiguous capability failure rather than silently losing
+requested output.
 
 ## Script Host v12
 
@@ -155,8 +166,20 @@ workflow, run, node, attempt, or invocation identity; the trusted runtime
 obtains that identity from the already-authorized in-flight request. Existing
 v11 control-message bodies retain their meaning with protocol version 12.
 
-Script Host v12 is only a frozen contract in SOP0. The host implements it in
-SOP3.
+Scripts and imported modules receive the same deeply frozen
+`services.progress.report()` facade. Calls are awaited until Rust validates and
+accepts the frame. `console.log`, `console.info`, `console.warn`, and
+`console.error` become structured script records in v12; v11 retains its exact
+stderr behavior.
+
+The worker redacts known WOML secrets and materialized artifact paths before a
+frame crosses the worker boundary. Rust repeats redaction before persistence,
+binds the frame to the trusted active invocation, and rejects late,
+cross-invocation, oversized, invalid, or post-cancellation frames. Progress is
+coalesced per attempt and progress ID at no more than four persisted snapshots
+per second, while the newest accepted value is force-persisted before attempt
+closure. These records never enter Capability Call history or the durable run
+event stream.
 
 ## Failure behavior
 

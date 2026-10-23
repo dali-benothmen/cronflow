@@ -213,6 +213,8 @@ interface WomlProcessRunRequest {
   readonly timeout?: number | string;
   readonly acceptExitCodes?: readonly number[];
   readonly output?: WomlProcessOutputOptions;
+  /** Publish redacted stdout/stderr as bounded operational records. */
+  readonly stream?: boolean;
 }
 
 interface WomlProcessRunResult {
@@ -225,6 +227,11 @@ interface WomlProcessRunResult {
   readonly stdoutTruncated: boolean;
   readonly stderrTruncated: boolean;
   readonly durationMs: number;
+  readonly streamed?: true;
+  readonly streamStartSequence?: number | null;
+  readonly streamEndSequence?: number | null;
+  readonly streamTruncated?: boolean;
+  readonly streamArtifact?: null;
 }
 
 interface WomlProcessService {
@@ -232,6 +239,19 @@ interface WomlProcessService {
     input: WomlProcessRunRequest,
     options?: WomlOperationOptions
   ) => Promise<WomlProcessRunResult>;
+}
+
+interface WomlProgressReport {
+  readonly id?: string;
+  readonly current?: number;
+  readonly total?: number;
+  readonly unit?: string;
+  readonly message?: string;
+}
+
+interface WomlProgressService {
+  /** Persist the newest operational progress snapshot for this step attempt. */
+  readonly report: (progress: WomlProgressReport) => Promise<void>;
 }
 
 interface WomlArtifactPutOptions {
@@ -303,6 +323,7 @@ interface WomlBuiltinServices {
   readonly cache: WomlCacheService;
   readonly state: WomlStateService;
   readonly process: WomlProcessService;
+  readonly progress: WomlProgressService;
   readonly artifacts: WomlArtifactsService;
   readonly locks: WomlLocksService;
   readonly events: {

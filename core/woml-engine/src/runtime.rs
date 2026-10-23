@@ -281,6 +281,8 @@ pub struct RuntimeExecutionOptions {
   managed_durable_state_store: Option<Arc<crate::ManagedDurableStateStore>>,
   managed_locks_service: Option<Arc<crate::ManagedLocksService>>,
   managed_artifact_store: Option<Arc<crate::ManagedArtifactStore>>,
+  managed_process_handler: Option<Arc<crate::ManagedProcessHandler>>,
+  operational_output_store: Option<Arc<crate::LazyOperationalOutputStore>>,
   artifact_policy: Option<Arc<crate::artifacts::PreparedArtifactPolicy>>,
   infrastructure_policy: Option<Arc<crate::PreparedInfrastructurePolicyV1>>,
   emergency_deny_overlay: Option<Arc<crate::PreparedInfrastructurePolicyV1>>,
@@ -511,6 +513,8 @@ impl RuntimeExecutionOptions {
       managed_durable_state_store: Some(managed_durable_state_store),
       managed_locks_service: Some(managed_locks_service),
       managed_artifact_store: None,
+      managed_process_handler: None,
+      operational_output_store: None,
       artifact_policy: None,
       infrastructure_policy: None,
       emergency_deny_overlay: None,
@@ -675,6 +679,8 @@ impl RuntimeExecutionOptions {
     self.managed_durable_state_store = None;
     self.managed_locks_service = None;
     self.managed_artifact_store = None;
+    self.managed_process_handler = None;
+    self.operational_output_store = None;
     self.artifact_policy = None;
     self
   }
@@ -682,15 +688,20 @@ impl RuntimeExecutionOptions {
   /// Enables the managed process capability for this runtime only after the
   /// runtime-owned Process Policy v1 has been validated by the Rust core.
   pub fn with_process_policy(
-    self,
+    mut self,
     policy: crate::ProcessPolicyV1,
     mode: crate::ProcessRuntimeMode,
   ) -> Result<Self, crate::ProcessPolicyError> {
-    let handler = crate::ManagedProcessHandler::new(policy, mode)?;
+    let handler = Arc::new(crate::ManagedProcessHandler::new_with_secrets(
+      policy,
+      mode,
+      Arc::clone(&self.resolved_secrets),
+    )?);
     self
       .capability_registry
-      .register(Arc::new(handler))
+      .register(handler.clone())
       .map_err(|error| crate::ProcessPolicyError::Invalid(error.to_string()))?;
+    self.managed_process_handler = Some(handler);
     Ok(self)
   }
 
@@ -2062,6 +2073,20 @@ fn attach_durable_capability_authority(
   mut options: RuntimeExecutionOptions,
   database_path: &std::path::Path,
 ) -> Result<RuntimeExecutionOptions, RuntimeExecutionError> {
+  let operational_output = Arc::new(
+    crate::operational_output_store_for_state(database_path).map_err(|error| {
+      RuntimeExecutionError::InvalidConfiguration(format!(
+        "{}: the operational-output path could not be derived",
+        error.code()
+      ))
+    })?,
+  );
+  if let Some(process) = &options.managed_process_handler {
+    process
+      .configure_output_store(Arc::clone(&operational_output))
+      .map_err(|error| RuntimeExecutionError::InvalidConfiguration(error.to_string()))?;
+  }
+  options.operational_output_store = Some(Arc::clone(&operational_output));
   if let Some(authority) = options.reviewer_authority() {
     REVIEWER_AUTHORITIES
       .get_or_init(|| RwLock::new(HashMap::new()))
@@ -2126,7 +2151,8 @@ fn attach_durable_capability_authority(
       options.infrastructure_policy_required || options.infrastructure_policy.is_some(),
       options.managed_artifact_store.clone(),
       options.emergency_deny_overlay.clone(),
-    ),
+    )
+    .with_operational_output(operational_output, Arc::clone(&options.resolved_secrets)),
   ));
   Ok(options)
 }

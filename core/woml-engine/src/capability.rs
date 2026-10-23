@@ -657,6 +657,59 @@ fn iteration_attempt_identity(
   })
 }
 
+fn operational_invocation_is_active(
+  projection: &crate::RunProjection,
+  identity: &NativeFetchInvocationIdentity,
+) -> bool {
+  let root_attempt = projection.attempts.iter().any(|attempt| {
+    attempt.identity.node_id == identity.node_id
+      && attempt.identity.attempt == identity.attempt_number
+      && attempt.identity.invocation_id == identity.invocation_id
+      && attempt.status == crate::projection::AttemptStatus::Started
+  });
+  let root_lifecycle = projection.lifecycle_hooks.values().any(|hook| {
+    hook.actions.get(&identity.node_id).is_some_and(|action| {
+      action.attempt == identity.attempt_number
+        && action.status == crate::projection::LifecycleActionStatus::Started
+    })
+  });
+  let root_reusable = projection
+    .reusable_lifecycle_hooks
+    .values()
+    .any(|hook| hook.active_action_id.as_deref() == Some(identity.node_id.as_str()));
+  let iteration = projection.for_each.values().any(|loop_| {
+    loop_.executions.values().any(|execution| {
+      execution.attempts.iter().any(|attempt| {
+        attempt.identity.node_id == identity.node_id
+          && attempt.identity.attempt == identity.attempt_number
+          && attempt.identity.invocation_id == identity.invocation_id
+          && attempt.status == crate::projection::AttemptStatus::Started
+      }) || execution.lifecycle_hooks.values().any(|hook| {
+        hook.actions.get(&identity.node_id).is_some_and(|action| {
+          action.attempt == identity.attempt_number
+            && action.status == crate::projection::LifecycleActionStatus::Started
+        })
+      }) || execution
+        .reusable_lifecycle_hooks
+        .values()
+        .any(|hook| hook.active_action_id.as_deref() == Some(identity.node_id.as_str()))
+    })
+  });
+  let correction = projection.sagas.values().any(|saga| {
+    saga.actions.get(&identity.node_id).is_some_and(|action| {
+      action.active_attempt == Some(identity.attempt_number)
+        && action.status == crate::projection::CorrectionActionStatus::Started
+        && crate::durable::correction_invocation_id(
+          &identity.run_id,
+          &saga.saga_id,
+          &identity.node_id,
+          identity.attempt_number,
+        ) == identity.invocation_id
+    })
+  });
+  root_attempt || root_lifecycle || root_reusable || iteration || correction
+}
+
 fn operation_with_iteration_scope(
   projection: &crate::RunProjection,
   identity: &crate::projection::OperationIdentity,
@@ -803,6 +856,8 @@ pub struct DurableCapabilityAuthority {
   infrastructure_policy_evaluators: Arc<InfrastructurePolicyEvaluatorCacheV1>,
   artifact_store: Option<Arc<crate::ManagedArtifactStore>>,
   emergency_deny_overlay: Option<Arc<PreparedInfrastructurePolicyV1>>,
+  operational_output_store: Option<Arc<crate::LazyOperationalOutputStore>>,
+  operational_redactions: Arc<std::collections::BTreeMap<String, String>>,
 }
 
 impl DurableCapabilityAuthority {
@@ -815,6 +870,8 @@ impl DurableCapabilityAuthority {
       infrastructure_policy_evaluators: Arc::new(InfrastructurePolicyEvaluatorCacheV1::default()),
       artifact_store: None,
       emergency_deny_overlay: None,
+      operational_output_store: None,
+      operational_redactions: Arc::new(std::collections::BTreeMap::new()),
     }
   }
 
@@ -831,6 +888,8 @@ impl DurableCapabilityAuthority {
       infrastructure_policy_evaluators: Arc::new(InfrastructurePolicyEvaluatorCacheV1::default()),
       artifact_store: None,
       emergency_deny_overlay: None,
+      operational_output_store: None,
+      operational_redactions: Arc::new(std::collections::BTreeMap::new()),
     }
   }
 
@@ -866,7 +925,100 @@ impl DurableCapabilityAuthority {
       infrastructure_policy_evaluators: Arc::new(InfrastructurePolicyEvaluatorCacheV1::default()),
       artifact_store,
       emergency_deny_overlay,
+      operational_output_store: None,
+      operational_redactions: Arc::new(std::collections::BTreeMap::new()),
     }
+  }
+
+  pub fn with_operational_output(
+    mut self,
+    store: Arc<crate::LazyOperationalOutputStore>,
+    redactions: Arc<std::collections::BTreeMap<String, String>>,
+  ) -> Self {
+    self.operational_output_store = Some(store);
+    self.operational_redactions = redactions;
+    self
+  }
+
+  pub async fn append_script_operational_record(
+    &self,
+    identity: &NativeFetchInvocationIdentity,
+    body: crate::OperationalBodyV1,
+  ) -> Result<(), CapabilityFailure> {
+    self
+      .append_script_operational_record_inner(identity, body, false)
+      .await
+  }
+
+  pub async fn force_append_script_operational_record(
+    &self,
+    identity: &NativeFetchInvocationIdentity,
+    body: crate::OperationalBodyV1,
+  ) -> Result<(), CapabilityFailure> {
+    self
+      .append_script_operational_record_inner(identity, body, true)
+      .await
+  }
+
+  async fn append_script_operational_record_inner(
+    &self,
+    identity: &NativeFetchInvocationIdentity,
+    mut body: crate::OperationalBodyV1,
+    force_append: bool,
+  ) -> Result<(), CapabilityFailure> {
+    let workflow_id = {
+      let store = self.store.lock().await;
+      let projection = store
+        .projection(&identity.run_id)
+        .map_err(|_| operational_output_failure("WOML_OPERATIONAL_IDENTITY_INVALID", false))?;
+      if !operational_invocation_is_active(&projection, identity) {
+        return Err(operational_output_failure(
+          "WOML_OPERATIONAL_INVOCATION_CLOSED",
+          false,
+        ));
+      }
+      store
+        .run_binding(&identity.run_id)
+        .map_err(|_| operational_output_failure("WOML_OPERATIONAL_IDENTITY_INVALID", false))?
+        .workflow_id
+    };
+    let mut redactions = self
+      .operational_redactions
+      .values()
+      .cloned()
+      .collect::<Vec<_>>();
+    if let Some(artifacts) = self.artifact_store.as_ref() {
+      redactions.extend(artifacts.operational_redactions(&identity.invocation_id));
+    }
+    redact_operational_body(&mut body, redactions.iter());
+    let store = self
+      .operational_output_store
+      .as_ref()
+      .ok_or_else(|| operational_output_failure("WOML_OUTPUT_STORE_UNAVAILABLE", false))?
+      .activate()
+      .map_err(|_| operational_output_failure("WOML_OUTPUT_STORE_UNAVAILABLE", false))?;
+    let draft = crate::OperationalRecordDraftV1 {
+      identity: crate::OperationalIdentityV1 {
+        workflow_id,
+        run_id: identity.run_id.clone(),
+        node_id: Some(identity.node_id.clone()),
+        attempt: Some(identity.attempt_number),
+        invocation_id: Some(identity.invocation_id.clone()),
+      },
+      body,
+    };
+    if !force_append
+      && matches!(&draft.body, crate::OperationalBodyV1::Progress { .. })
+      && store
+        .coalesce_progress_snapshot(&draft)
+        .map_err(|_| operational_output_failure("WOML_OUTPUT_STORE_UNAVAILABLE", true))?
+    {
+      return Ok(());
+    }
+    store
+      .append(draft)
+      .map(|_| ())
+      .map_err(|_| operational_output_failure("WOML_OUTPUT_STORE_UNAVAILABLE", true))
   }
 
   pub fn registry(&self) -> &Arc<CapabilityRegistry> {
@@ -2270,6 +2422,41 @@ fn generated_event_id() -> String {
 
 fn duration_ms(started: Instant) -> f64 {
   started.elapsed().as_secs_f64() * 1_000.0
+}
+
+fn operational_output_failure(code: &str, ambiguous: bool) -> CapabilityFailure {
+  failure(
+    CapabilityFailureKind::TransportFailed,
+    code,
+    "The operational-output authority could not accept this script record.",
+    false,
+    ambiguous,
+  )
+}
+
+fn redact_operational_body<'a>(
+  body: &mut crate::OperationalBodyV1,
+  values: impl Iterator<Item = &'a String>,
+) {
+  let mut redactions = values
+    .filter(|value| !value.is_empty())
+    .cloned()
+    .collect::<Vec<_>>();
+  redactions.sort_by_key(|value| std::cmp::Reverse(value.len()));
+  let redact = |text: &mut String| {
+    for value in &redactions {
+      *text = text.replace(value, "[redacted]");
+    }
+  };
+  match body {
+    crate::OperationalBodyV1::Output { text, .. } => redact(text),
+    crate::OperationalBodyV1::Progress { message, .. } => {
+      if let Some(message) = message {
+        redact(message);
+      }
+    }
+    _ => {}
+  }
 }
 
 fn failure(
