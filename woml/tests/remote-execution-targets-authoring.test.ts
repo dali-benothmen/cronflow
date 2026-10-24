@@ -125,9 +125,12 @@ describe('WOML Remote Execution Targets', () => {
     expect(
       JSON.stringify(
         compileWoml(
-          parseWoml(source.replaceAll('\n', '\r\n'), {
-            file: 'model.reviewed.woml',
-          })
+          parseWoml(
+            source.replace(/\r\n?/g, '\n').replaceAll('\n', '\r\n'),
+            {
+              file: 'model.reviewed.woml',
+            }
+          )
         )
       )
     ).toBe(reviewed);
