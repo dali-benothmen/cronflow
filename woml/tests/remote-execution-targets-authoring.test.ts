@@ -50,6 +50,7 @@ describe('WOML Remote Execution Targets', () => {
       'worker-protocol.v1.schema.json',
       'remote-dispatch-inspection.v1.schema.json',
       'remote-dispatch-reconciliation.v1.schema.json',
+      'run-event.v20.schema.json',
       'compiled-workflow-model.v21.schema.json',
       'woml-definition-package.v16.schema.json',
     ]) {
@@ -63,6 +64,7 @@ describe('WOML Remote Execution Targets', () => {
       ['https://woml.dev/schemas/dispatch-package/v1', 'dispatch-package.v1.json'],
       ['https://woml.dev/schemas/remote-dispatch-inspection/v1', 'inspection.v1.json'],
       ['https://woml.dev/schemas/remote-dispatch-reconciliation/v1', 'reconciliation.v1.json'],
+      ['https://woml.dev/schemas/run-event/v20', 'run-event.v20.json'],
       ['https://woml.dev/schemas/compiled-workflow-model/v21', 'model.v21.reviewed.json'],
     ] as const;
     for (const [schema, name] of cases) {

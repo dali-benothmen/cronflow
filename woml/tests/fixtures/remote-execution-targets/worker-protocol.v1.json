@@ -12,6 +12,7 @@
     "capacity": 4,
     "capabilities": [
       { "id": "runtime.script", "version": 1 },
+      { "id": "services.artifacts", "version": 1 },
       { "id": "services.process", "version": 2 }
     ]
   },

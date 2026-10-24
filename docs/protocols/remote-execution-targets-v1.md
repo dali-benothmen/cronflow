@@ -111,7 +111,8 @@ non-symlink files and must not be group- or world-writable on Unix. Certificate
 references must stay within the trust file directory and resolve to bounded,
 regular, non-symlink PEM files.
 
-WOML hashes certificate bytes into the trust digest but never copies PEM bytes
+WOML parses each trusted PEM certificate and hashes its canonical DER bytes into
+the trust digest and authenticated leaf-certificate identity, but never copies PEM bytes
 into inspection output, runtime configuration, compiled models, or workflow
 state. Private keys are not accepted by the target registry or target trust
 contracts; they remain worker-local configuration.

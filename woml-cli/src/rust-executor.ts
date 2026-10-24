@@ -1199,6 +1199,17 @@ interface NativeCore {
     requestJson: string
   ) => Promise<string>;
   readonly inspectWomlRun: (eventStorePath: string, runId: string) => string;
+  readonly inspectWomlRemoteDispatch?: (
+    eventStorePath: string,
+    dispatchId: string
+  ) => string;
+  readonly reconcileWomlRemoteDispatch?: (
+    eventStorePath: string,
+    dispatchId: string,
+    resolution: string,
+    actor: string,
+    evidenceDigest: string
+  ) => string;
   readonly inspectWomlRunPresentation: (
     eventStorePath: string,
     runId: string
@@ -3766,6 +3777,75 @@ export function inspectRunWithRust(
     throw new Error('The native core returned invalid run inspection data.');
   }
   return value as unknown as RustRunInspection;
+}
+
+export interface RustRemoteDispatchInspectionV1 {
+  readonly profile: 'woml.remote-dispatch-inspection/v1';
+  readonly dispatchId: string;
+  readonly runId: string;
+  readonly nodeId: string;
+  readonly attempt: number;
+  readonly target: string;
+  readonly workerId?: string;
+  readonly state: string;
+  readonly ambiguous: boolean;
+  readonly lastHeartbeatAt?: string;
+  readonly outputSequence: number;
+  readonly failureCode?: string;
+}
+
+function remoteDispatchNativeError(error: unknown): RunManagementError {
+  const message = error instanceof Error ? error.message : String(error);
+  const match = message.match(/(WOML_[A-Z0-9_]+):/u);
+  return new RunManagementError(
+    match?.[1] ?? 'WOML_TARGET_UNAVAILABLE',
+    'The durable remote dispatch operation failed closed.'
+  );
+}
+
+export function inspectRemoteDispatchWithRust(
+  eventStorePath: string,
+  dispatchId: string,
+  options: Pick<RustExecutorOptions, 'nativeCorePath'> = {}
+): RustRemoteDispatchInspectionV1 {
+  const nativePath = options.nativeCorePath ?? defaultNativeCorePath();
+  const native = loadNativeCore(nativePath);
+  if (typeof native.inspectWomlRemoteDispatch !== 'function') {
+    throw new Error(`Native core at "${nativePath}" does not expose remote dispatch inspection; rebuild the Rust addon.`);
+  }
+  try {
+    const value = JSON.parse(native.inspectWomlRemoteDispatch(eventStorePath, dispatchId)) as unknown;
+    if (!record(value) || value.profile !== 'woml.remote-dispatch-inspection/v1' || value.dispatchId !== dispatchId || typeof value.state !== 'string' || typeof value.ambiguous !== 'boolean') {
+      throw new Error('invalid native result');
+    }
+    return value as unknown as RustRemoteDispatchInspectionV1;
+  } catch (error) {
+    if (error instanceof SyntaxError) throw new RunManagementError('WOML_REMOTE_PROTOCOL_INVALID', 'The native core returned invalid remote dispatch data.');
+    throw remoteDispatchNativeError(error);
+  }
+}
+
+export function reconcileRemoteDispatchWithRust(
+  eventStorePath: string,
+  dispatchId: string,
+  resolution: 'record-failure' | 'authorize-possible-duplicate-retry',
+  actor: string,
+  evidenceDigest: string,
+  options: Pick<RustExecutorOptions, 'nativeCorePath'> = {}
+): Record<string, unknown> {
+  const nativePath = options.nativeCorePath ?? defaultNativeCorePath();
+  const native = loadNativeCore(nativePath);
+  if (typeof native.reconcileWomlRemoteDispatch !== 'function') {
+    throw new Error(`Native core at "${nativePath}" does not expose remote dispatch reconciliation; rebuild the Rust addon.`);
+  }
+  try {
+    const value = JSON.parse(native.reconcileWomlRemoteDispatch(eventStorePath, dispatchId, resolution, actor, evidenceDigest)) as unknown;
+    if (!record(value) || value.dispatchId !== dispatchId || typeof value.state !== 'string') throw new Error('invalid native result');
+    return value;
+  } catch (error) {
+    if (error instanceof SyntaxError) throw new RunManagementError('WOML_REMOTE_PROTOCOL_INVALID', 'The native core returned invalid remote dispatch data.');
+    throw remoteDispatchNativeError(error);
+  }
 }
 
 export function inspectRunPresentationWithRust(

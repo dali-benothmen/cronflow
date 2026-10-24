@@ -1,4 +1,4 @@
-import { createHash } from 'node:crypto';
+import { createHash, X509Certificate } from 'node:crypto';
 import { constants } from 'node:fs';
 import { access, lstat, readFile, realpath } from 'node:fs/promises';
 import { dirname, relative, resolve, sep } from 'node:path';
@@ -340,7 +340,16 @@ async function resolveCertificate(reference: string, trustPath: string): Promise
   const bytes = await readFile(canonical);
   const text = bytes.toString('utf8');
   if (!text.includes('-----BEGIN CERTIFICATE-----') || !text.includes('-----END CERTIFICATE-----')) failure('WOML_TARGET_INVALID', `Trusted certificate ${JSON.stringify(reference)} is not a PEM certificate.`);
-  return { path: canonical, digest: `sha256:${createHash('sha256').update(bytes).digest('hex')}` };
+  let certificate: X509Certificate;
+  try {
+    certificate = new X509Certificate(bytes);
+  } catch {
+    failure('WOML_TARGET_INVALID', `Trusted certificate ${JSON.stringify(reference)} is not a valid X.509 certificate.`);
+  }
+  return {
+    path: canonical,
+    digest: `sha256:${createHash('sha256').update(certificate.raw).digest('hex')}`,
+  };
 }
 
 export async function loadTargetRegistry(

@@ -35,6 +35,11 @@ pub mod presentation;
 pub mod process;
 pub mod projection;
 pub mod protocol;
+pub mod remote_coordinator;
+pub mod remote_coordinator_server;
+pub mod remote_dispatch;
+pub mod remote_protocol;
+pub mod remote_worker;
 pub mod retention;
 pub mod rich_approval;
 pub mod runtime;
@@ -49,6 +54,35 @@ pub mod webhook;
 pub mod whatsapp;
 pub mod workflow_calls;
 
+pub use remote_coordinator::{
+  remote_transport_profile, RemoteCoordinatorError, RemoteSessionAuthorityV1,
+  RemoteSessionRecordV1, TrustedWorkerIdentityV1, REMOTE_MAX_REPLAY_IDS, REMOTE_MAX_SESSIONS,
+  REMOTE_MESSAGE_CLOCK_SKEW_SECONDS, REMOTE_SESSION_LIFETIME_SECONDS,
+};
+pub use remote_coordinator_server::{
+  RemoteCoordinatorServerError, RemoteCoordinatorServerV1, RemoteCoordinatorTlsOptionsV1,
+  REMOTE_COORDINATOR_IO_TIMEOUT_SECONDS, REMOTE_COORDINATOR_MAX_CONNECTIONS,
+  REMOTE_COORDINATOR_MAX_HEADER_BYTES,
+};
+pub use remote_dispatch::{
+  derive_remote_dispatch_id, RemoteDispatchError, RemoteDispatchInspectionV1,
+  RemoteDispatchRecordV1, RemoteDispatchRequestV1, RemoteDispatchResolutionV1,
+  RemoteDispatchStateV1, REMOTE_DISPATCH_HEARTBEAT_MAX_BYTES, REMOTE_DISPATCH_RECOVERY_BATCH_LIMIT,
+};
+pub use remote_protocol::{
+  decode_worker_hello, decode_worker_poll, decode_worker_shutdown, RemoteProtocolError,
+  WorkerArchitectureV1, WorkerCapabilityV1, WorkerHelloV1, WorkerOperatingSystemV1,
+  WorkerPlatformV1, WorkerPollResultV1, WorkerPollV1, WorkerSessionV1, WorkerShutdownV1,
+  WORKER_PROTOCOL_MAX_CAPABILITIES, WORKER_PROTOCOL_MAX_CAPACITY,
+  WORKER_PROTOCOL_MAX_MESSAGE_BYTES, WORKER_PROTOCOL_MAX_TARGETS, WORKER_PROTOCOL_PROFILE,
+  WORKER_PROTOCOL_VERSION,
+};
+pub use remote_worker::{
+  parse_worker_configuration, prepare_worker_configuration, PreparedWorkerConfigurationV1,
+  RemoteWorkerConfigurationError, WorkerConfigurationV1, WorkerSecretProviderV1,
+  WorkerTlsReferencesV1, WORKER_CONFIGURATION_MAX_BYTES, WORKER_CONFIGURATION_PROFILE,
+  WORKER_CONFIGURATION_VERSION,
+};
 pub use target_registry::{
   parse_target_registry, prepare_target_registry, PreparedTargetRegistryV1, TargetRegistryEntryV1,
   TargetRegistryError, TargetRegistryV1, TARGET_REGISTRY_MAX_BYTES, TARGET_REGISTRY_MAX_TARGETS,
@@ -175,16 +209,17 @@ pub use event::{
   NotificationRunFailure, NotificationSafeFailure, OperationExecutionMode, OperationFailedData,
   OperationStartedData, OperationSucceededData, ParallelFailure, ParallelFailurePolicy,
   ParallelGroupCompletedData, ParallelGroupOutcome, ParallelGroupStartedData,
-  ProviderMessageIdentity, ReusableLifecycleActionFailedData, ReusableLifecycleActionStartedData,
-  ReusableLifecycleActionSucceededData, ReusableLifecycleCompletedData, ReusableLifecycleHook,
-  ReusableLifecycleOutcome, ReusableLifecycleRequestedData, RichApprovalResolutionReason,
-  RunAdmissionQueue, RunAdmissionTrigger, RunAdmittedData, RunCancellationRequestedData, RunEvent,
-  RunEventPayload, RunExecutionStartedData, RunFailedData, RunFailedDataV1, RunFailedDataV2,
-  RunFailedDataV3, RunFailedDataV4, RunFailedDataV5, RunFinalizedData, RunIngress,
-  RunOutcomeDecidedData, RunStartedData, RunSucceededData, RunTimeoutReachedData,
-  SagaCorrectionReason, SagaCorrectionStartedData, SagaIdentityData, SlackProviderMessageIdentity,
-  StepAttemptFailedData, StepAttemptStartedData, StepAttemptSucceededData, StepRetryScheduledData,
-  WaitCancelledData, WaitRegisteredData, WaitSatisfiedData, WaitTimedOutData,
+  ProviderMessageIdentity, RemoteDispatchTransitionedData, ReusableLifecycleActionFailedData,
+  ReusableLifecycleActionStartedData, ReusableLifecycleActionSucceededData,
+  ReusableLifecycleCompletedData, ReusableLifecycleHook, ReusableLifecycleOutcome,
+  ReusableLifecycleRequestedData, RichApprovalResolutionReason, RunAdmissionQueue,
+  RunAdmissionTrigger, RunAdmittedData, RunCancellationRequestedData, RunEvent, RunEventPayload,
+  RunExecutionStartedData, RunFailedData, RunFailedDataV1, RunFailedDataV2, RunFailedDataV3,
+  RunFailedDataV4, RunFailedDataV5, RunFinalizedData, RunIngress, RunOutcomeDecidedData,
+  RunStartedData, RunSucceededData, RunTimeoutReachedData, SagaCorrectionReason,
+  SagaCorrectionStartedData, SagaIdentityData, SlackProviderMessageIdentity, StepAttemptFailedData,
+  StepAttemptStartedData, StepAttemptSucceededData, StepRetryScheduledData, WaitCancelledData,
+  WaitRegisteredData, WaitSatisfiedData, WaitTimedOutData,
 };
 pub use events_service::{
   EventServiceAcceptedRun, EventServiceRunDispatcher, EventServiceSubscriber, ManagedEventsHandler,
@@ -406,10 +441,13 @@ pub const RUN_EVENT_SCHEMA_VERSION_V16: u32 = 16;
 pub const RUN_EVENT_SCHEMA_VERSION_V17: u32 = 17;
 pub const RUN_EVENT_SCHEMA_VERSION_V18: u32 = 18;
 pub const RUN_EVENT_SCHEMA_VERSION_V19: u32 = 19;
-pub const RUN_EVENT_SCHEMA_VERSION: u32 = RUN_EVENT_SCHEMA_VERSION_V19;
+pub const RUN_EVENT_SCHEMA_VERSION_V20: u32 = 20;
+pub const RUN_EVENT_SCHEMA_VERSION: u32 = RUN_EVENT_SCHEMA_VERSION_V20;
 
 pub const fn run_event_schema_version_for_model(model_schema_version: u32) -> u32 {
-  if model_schema_version >= COMPILED_MODEL_SCHEMA_VERSION_V20 {
+  if model_schema_version >= COMPILED_MODEL_SCHEMA_VERSION_V21 {
+    RUN_EVENT_SCHEMA_VERSION_V20
+  } else if model_schema_version >= COMPILED_MODEL_SCHEMA_VERSION_V20 {
     RUN_EVENT_SCHEMA_VERSION_V19
   } else if model_schema_version >= COMPILED_MODEL_SCHEMA_VERSION_V19 {
     RUN_EVENT_SCHEMA_VERSION_V18

@@ -79,6 +79,8 @@ import {
   inspectWaitsV1WithRust,
   inspectLocksV1WithRust,
   inspectCorrectionV1WithRust,
+  inspectRemoteDispatchWithRust,
+  reconcileRemoteDispatchWithRust,
   recoverCorrectionWithRust,
   listRunPresentationsWithRust,
   hasWorkflowDefinitionWithRust,
@@ -304,6 +306,11 @@ import {
 } from './compiled-workflow-cache';
 import { runtimeActivationRequirements } from './runtime-activation';
 import {
+  checkWorkerConfiguration,
+  RemoteWorkerError,
+  startWorker,
+} from './remote-worker';
+import {
   inspectTarget,
   loadTargetRegistry,
   preflightRemoteTargets,
@@ -419,6 +426,163 @@ function targetUsage(): string {
     '  woml target check <target> [--registry <path>] [--trust <path>] [--json]',
     '  woml target inspect <target> [--registry <path>] [--trust <path>] --json',
   ].join('\n');
+}
+
+function workerUsage(): string {
+  return [
+    'Usage:',
+    '  woml worker check --config <path> [--json]',
+    '  woml worker start --config <path> [--json]',
+  ].join('\n');
+}
+
+function dispatchUsage(): string {
+  return [
+    'Usage:',
+    '  woml dispatch inspect <dispatchId> [--state <path>] [--json]',
+    '  woml dispatch reconcile <dispatchId> --action <record-failure|authorize-possible-duplicate-retry> --request-id <id> [--reason <text>] [--state <path>] [--json]',
+  ].join('\n');
+}
+
+async function runDispatchCommand(
+  args: readonly string[],
+  io: CliIo,
+  dependencies: CliDependencies
+): Promise<number> {
+  const operation = args[1];
+  const dispatchId = args[2];
+  if ((operation !== 'inspect' && operation !== 'reconcile') || dispatchId === undefined || !/^dispatch_[a-f0-9]{64}$/u.test(dispatchId)) {
+    io.stderr(`${dispatchUsage()}\n`);
+    return 2;
+  }
+  let statePath = resolve('.woml/state.sqlite');
+  let action: 'record-failure' | 'authorize-possible-duplicate-retry' | undefined;
+  let requestId: string | undefined;
+  let reason: string | undefined;
+  let json = false;
+  for (let index = 3; index < args.length; index += 1) {
+    const argument = args[index];
+    if (argument === '--json' && !json) {
+      json = true;
+      continue;
+    }
+    const value = args[index + 1];
+    if (value === undefined || value.startsWith('--')) {
+      io.stderr(`${dispatchUsage()}\n`);
+      return 2;
+    }
+    if (argument === '--state') statePath = value;
+    else if (argument === '--action' && ['record-failure', 'authorize-possible-duplicate-retry'].includes(value)) action = value as typeof action;
+    else if (argument === '--request-id' && /^[A-Za-z0-9_-]{1,256}$/u.test(value)) requestId = value;
+    else if (argument === '--reason' && value.length <= 1024) reason = value;
+    else {
+      io.stderr(`${dispatchUsage()}\n`);
+      return 2;
+    }
+    index += 1;
+  }
+  if (operation === 'reconcile' && (action === undefined || requestId === undefined)) {
+    io.stderr(`${dispatchUsage()}\n`);
+    return 2;
+  }
+  try {
+    const evidenceDigest = `sha256:${createHash('sha256').update(JSON.stringify({
+      profile: 'woml.remote-dispatch-reconciliation/v1', dispatchId, action,
+      requestId, ...(reason === undefined ? {} : { reason }),
+    })).digest('hex')}`;
+    const result = operation === 'inspect'
+      ? inspectRemoteDispatchWithRust(statePath, dispatchId, { nativeCorePath: dependencies.nativeCorePath })
+      : reconcileRemoteDispatchWithRust(statePath, dispatchId, action!, requestId!, evidenceDigest, { nativeCorePath: dependencies.nativeCorePath });
+    io.stdout(
+      json
+        ? `${JSON.stringify(result)}\n`
+        : operation === 'inspect'
+          ? [
+              'WOML remote dispatch',
+              `Dispatch: ${dispatchId}`,
+              `State: ${String((result as { state: string }).state)}`,
+              `Ambiguous: ${String((result as { ambiguous: boolean }).ambiguous)}`,
+            ].join('\n') + '\n'
+          : [
+              'WOML remote dispatch reconciled.',
+              `Dispatch: ${dispatchId}`,
+              `State: ${String((result as { state: string }).state)}`,
+              `Action: ${action}`,
+              `Request: ${requestId}`,
+            ].join('\n') + '\n'
+    );
+    return 0;
+  } catch (error) {
+    io.stderr(`${formatError(error)}\n`);
+    return 1;
+  }
+}
+
+async function runWorkerCommand(
+  args: readonly string[],
+  io: CliIo,
+  dependencies: CliDependencies
+): Promise<number> {
+  const operation = args[1];
+  let configPath: string | undefined;
+  let json = false;
+  for (let index = 2; index < args.length; index += 1) {
+    if (args[index] === '--json' && !json) {
+      json = true;
+    } else if (
+      args[index] === '--config' &&
+      configPath === undefined &&
+      args[index + 1] !== undefined
+    ) {
+      configPath = args[++index];
+    } else {
+      io.stderr(`${workerUsage()}\n`);
+      return 2;
+    }
+  }
+  if ((operation !== 'check' && operation !== 'start') || configPath === undefined) {
+    io.stderr(`${workerUsage()}\n`);
+    return 2;
+  }
+  try {
+    if (operation === 'check') {
+      const result = await checkWorkerConfiguration(configPath);
+      io.stdout(
+        json
+          ? `${JSON.stringify(result)}\n`
+          : [
+              'WOML worker configuration is valid.',
+              `Worker: ${result.workerId}`,
+              `Coordinator: ${result.coordinator}`,
+              `Targets: ${result.targets.join(', ')}`,
+              `Capacity: ${result.capacity}`,
+              'Transport: mutual TLS',
+              'Dispatch: disabled until RET5',
+            ].join('\n') + '\n'
+      );
+      return 0;
+    }
+    await startWorker(
+      configPath,
+      WOML_CLI_VERSION,
+      dependencies.waitForShutdown ?? waitForShutdownSignal,
+      session =>
+        io.stdout(
+          json
+            ? `${JSON.stringify(session)}\n`
+            : [
+                'WOML remote worker session established.',
+                `Worker: ${String(session.workerId)}`,
+                `Session: ${String(session.sessionId)}`,
+                'Status: idle; executable dispatch is disabled until RET5',
+              ].join('\n') + '\n'
+        )
+    );
+    return 0;
+  } catch (error) {
+    io.stderr(`${formatError(error)}\n`);
+    return 1;
+  }
 }
 
 interface TargetCommandArguments {
@@ -652,7 +816,7 @@ function typesUsage(): string {
 }
 
 function usage(): string {
-  return `${runUsage()}\n${testUsage()}\n${logFollowUsage}\n${checkUsage()}\n${targetUsage()}\n${policyUsage()}\n${typesUsage()}\n${inspectUsage}\n${artifactsUsage()}\n${backupUsage}\n${restoreUsage}\n${pruneUsage}\n${listUsage()}\n${getUsage()}\n${cancelUsage()}\n${recoverUsage()}\n${stopUsage()}\n${emitUsage()}\n${signalUsage()}\n${secretsUsage()}\n${providerDoctorUsage()}`;
+  return `${runUsage()}\n${testUsage()}\n${logFollowUsage}\n${checkUsage()}\n${targetUsage()}\n${workerUsage()}\n${dispatchUsage()}\n${policyUsage()}\n${typesUsage()}\n${inspectUsage}\n${artifactsUsage()}\n${backupUsage}\n${restoreUsage}\n${pruneUsage}\n${listUsage()}\n${getUsage()}\n${cancelUsage()}\n${recoverUsage()}\n${stopUsage()}\n${emitUsage()}\n${signalUsage()}\n${secretsUsage()}\n${providerDoctorUsage()}`;
 }
 
 interface RunArguments {
@@ -2172,6 +2336,9 @@ function formatError(
   if (error instanceof TargetRegistryError) {
     return `WOML target error [${error.code}]: ${error.message}`;
   }
+  if (error instanceof RemoteWorkerError) {
+    return `WOML worker error [${error.code}]: ${error.message}`;
+  }
   if (error instanceof ReviewerDirectoryLoadError) {
     return `WOML approval authority error [${error.code}]: ${error.message}`;
   }
@@ -3520,7 +3687,7 @@ async function runSingleCheckCommand(
       }
       io.stdout(
         reusablePackage?.schemaVersion === 16
-          ? `Compiled Model v21 package: ${reusablePackage.rootHash}\nExecution: remote target authoring is validated; authenticated dispatch begins in RET2–RET5.\n`
+          ? `Compiled Model v21 package: ${reusablePackage.rootHash}\nExecution: remote placement, authenticated sessions, and durable dispatch authority are validated; executable remote attempts begin in RET5.\n`
           : reusablePackage?.schemaVersion === 14
           ? `Compiled Model v19 package: ${reusablePackage.rootHash}\nExecution: compensation and cleanup authoring is validated; durable correction execution begins in CC2–CC4.\n`
           : reusablePackage?.schemaVersion === 13
@@ -3612,7 +3779,7 @@ async function runSingleCheckCommand(
         io.stdout(`Target: ${placement.stepId} -> ${placement.target}\n`);
       }
       io.stdout(
-        'Execution: authenticated remote dispatch begins in RET2–RET5; targeted workflows cannot run yet.\n'
+        'Execution: authenticated sessions and durable dispatch authority are available; executable remote attempts begin in RET5.\n'
       );
       return 0;
     }
@@ -7918,6 +8085,8 @@ async function runCliUnprofiled(
     'test',
     'check',
     'target',
+    'worker',
+    'dispatch',
     'policy',
     'types',
     'secrets',
@@ -7973,6 +8142,14 @@ async function runCliUnprofiled(
 
   if (args[0] === 'target') {
     return await runTargetCommand(args, io);
+  }
+
+  if (args[0] === 'worker') {
+    return await runWorkerCommand(args, io, dependencies);
+  }
+
+  if (args[0] === 'dispatch') {
+    return await runDispatchCommand(args, io, dependencies);
   }
 
   if (args[0] === 'policy') {

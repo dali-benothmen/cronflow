@@ -12871,7 +12871,8 @@ fn attempt_run_failed_data(
     | crate::RUN_EVENT_SCHEMA_VERSION_V16
     | crate::RUN_EVENT_SCHEMA_VERSION_V17
     | crate::RUN_EVENT_SCHEMA_VERSION_V18
-    | crate::RUN_EVENT_SCHEMA_VERSION_V19 => RunFailedData::V2(RunFailedDataV2::Attempt {
+    | crate::RUN_EVENT_SCHEMA_VERSION_V19
+    | crate::RUN_EVENT_SCHEMA_VERSION_V20 => RunFailedData::V2(RunFailedDataV2::Attempt {
       node_id: failure.node_id.clone(),
       attempt: failure.attempt,
       invocation_id: failure.invocation_id.clone(),
@@ -13416,6 +13417,7 @@ impl RuntimeDagEngine for InMemoryDagEngine {
         | crate::RUN_EVENT_SCHEMA_VERSION_V17
         | crate::RUN_EVENT_SCHEMA_VERSION_V18
         | crate::RUN_EVENT_SCHEMA_VERSION_V19
+        | crate::RUN_EVENT_SCHEMA_VERSION_V20
     ) {
       crate::durable::expand_model_v11_payload(self.workflow(), run_id, payload)?
     } else {

@@ -36,7 +36,9 @@ describe('Remote Execution Targets CLI boundary', () => {
     expect(result.stdout).toContain(
       'Target: deploy:cleanup:removeTemporaryFiles -> maintenance-runner'
     );
-    expect(result.stdout).toContain('targeted workflows cannot run yet');
+    expect(result.stdout).toContain(
+      'authenticated sessions and durable dispatch authority are available; executable remote attempts begin in RET5'
+    );
   });
 
   test('provides a stable machine-readable RET1 inspection', async () => {

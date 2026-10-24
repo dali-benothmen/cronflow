@@ -25,6 +25,26 @@ const reviewedRegistryPath = resolve(
   '../../woml/tests/fixtures/remote-execution-targets/target-registry.v1.json'
 );
 const temporary: string[] = [];
+const TEST_CERTIFICATE = `-----BEGIN CERTIFICATE-----
+MIIDFzCCAf+gAwIBAgIULzQJLdEqXGrh/VLqpNZtapZ6UhYwDQYJKoZIhvcNAQEL
+BQAwGzEZMBcGA1UEAwwQd29tbC10ZXN0LXdvcmtlcjAeFw0yNjEwMjQxNjUyMTFa
+Fw0zNjEwMjExNjUyMTFaMBsxGTAXBgNVBAMMEHdvbWwtdGVzdC13b3JrZXIwggEi
+MA0GCSqGSIb3DQEBAQUAA4IBDwAwggEKAoIBAQDb5Yt36LCmOFRawSvHzYgUrBAO
+aG9O6qzOWO1AlNAcRgBXilLSIXGF/O97/XBHEi/WGjKOCacqJCp0s8msVqQd0URo
+QjuniXo1OG1ge/dXV/e/yDxYIGI+iuD+hpRDkguZDwVE75ylnSjX7+F3D8IeYWVr
+uz72XuEjbFHOl6YX0LuzhWxxd4ao5WV3UAwv5wdnZ35PGUbC8Ax/lk+TeXN+XDwt
+gHXAArb4ktMPHyK5ouLZV2SnvqWPItgsOMBoVDZPjFDtWXxdbzb9pTdpHj8e0Dh6
+ZFAwY/ie8v5yuMW0oXt9Wd5HeV3+t7SPGaqUqFYeuwxWXVs8ygtwAlOHB7I/AgMB
+AAGjUzBRMB0GA1UdDgQWBBRdmkkGscbFoVY6VW9HC5DWyohJnjAfBgNVHSMEGDAW
+gBRdmkkGscbFoVY6VW9HC5DWyohJnjAPBgNVHRMBAf8EBTADAQH/MA0GCSqGSIb3
+DQEBCwUAA4IBAQApX564nhgowtp/TVjwr4pg/9iHLSCeDVhAsF4KWziBuuDuqDBz
+9O/YJbLzJcgDND/bfz4GjLokjHbQoCQauh2EErYyYE+ZANS7nTK/iHbZL42i7nVY
+R7vwehQ18MUspau5R0s/5CBZBs1jV2KUzZYGPIgcS7HIE1TGufR5TL6fErko1JGt
+hSoRONuVMbqUR8JZlBbXROuXkCyI+LjH+bI0Ltjf4IIoOEPH7SsGIDfKrgWr9KZ+
+0sXs0LYK1fO0LTf5RoBxpEHYeLAsF41gizfsI364xE8HgeKGkwjvR0oKxxf4XP13
+W2iuw8hR3J80gpsiZcO3PDpjVUwXcsUnP82r
+-----END CERTIFICATE-----
+`;
 
 afterEach(async () => {
   await Promise.all(temporary.splice(0).map(path => rm(path, { recursive: true, force: true })));
@@ -99,7 +119,7 @@ async function fixture() {
     })
   );
   for (const name of ['production.pem', 'maintenance.pem']) {
-    await writeFile(join(root, 'certs', name), '-----BEGIN CERTIFICATE-----\nV09NTA==\n-----END CERTIFICATE-----\n');
+    await writeFile(join(root, 'certs', name), TEST_CERTIFICATE);
   }
   if (process.platform !== 'win32') {
     await chmod(registryPath, 0o600);
@@ -297,7 +317,7 @@ describe('Target Registry v1', () => {
     for (const name of ['production.pem', 'maintenance.pem']) {
       await writeFile(
         join(configurationRoot, 'certs', name),
-        '-----BEGIN CERTIFICATE-----\nV09NTA==\n-----END CERTIFICATE-----\n'
+        TEST_CERTIFICATE
       );
     }
     if (process.platform !== 'win32') {
