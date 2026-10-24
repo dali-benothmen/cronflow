@@ -1,9 +1,7 @@
 # Remote Execution Targets v1
 
-Status: frozen by RET0. Model v21 and Definition Package v16 authoring are
-implemented by RET1. Target Registry v1, trust preflight, and the target CLI
-are implemented by RET2. Authenticated transport, durable dispatch, and worker
-execution remain disabled until RET3–RET5.
+Status: frozen by RET0 and implemented through RET8. Cross-platform release,
+packaging, fault-injection, and public tutorial hardening remain in RET9.
 
 ## Purpose
 
@@ -61,9 +59,12 @@ Model v21 bytes, module artifacts, source graph, placement, and sorted remote
 capability requirements. Imported workflow modules are package artifacts, not
 worker capabilities; reviewed built-in services use `services.<name>` IDs.
 
-RET1 deliberately rejects Model v21 in executable Rust profiles. This prevents
-a targeted step from falling through to local execution before the remote
-dispatch authority exists.
+Local execution profiles deliberately reject Model v21. Remote placement is
+admitted only by the coordinator-owned dispatch path; every ordinary,
+parallel, fork, `for-each`, compensation, and cleanup script path also checks
+placement before opening a local script host. This prevents a targeted step
+from ever falling through to local execution while RET9 finishes packaged
+coordinator activation.
 
 ## Authority
 
@@ -136,10 +137,12 @@ woml target check production-private --registry .woml/targets.json --trust .woml
 woml target inspect production-private --registry .woml/targets.json --trust .woml/target-trust.json --json
 ```
 
-Until RET3 introduces authenticated worker sessions, target health is reported
-as `not_observed`; WOML does not infer reachability from configuration. A
-local-only workflow does not load a target registry, resolve certificates, or
-construct any remote listener or scheduler.
+Configuration-only CLI inspection reports target health as `not_observed`;
+WOML does not infer reachability from files. The authenticated coordinator
+authority reports eligible, saturated, draining, offline, incompatible, and
+unauthorized worker states from live session facts. A local-only workflow does
+not load a target registry, resolve certificates, or construct any remote
+listener or scheduler.
 
 ## Worker Configuration v1
 
@@ -245,7 +248,7 @@ read artifacts outside its grants. Partial and corrupt uploads never publish.
 
 ## Output, progress, and heartbeat
 
-Output batches contain at most 256 records and 1 MiB before the stricter
+Output batches contain at most 128 records and 1 MiB before the stricter
 Operational Output Store v1 limits apply. Records use a monotonically
 increasing remote sequence and are deduplicated by dispatch and sequence.
 Redaction occurs before output leaves the worker.

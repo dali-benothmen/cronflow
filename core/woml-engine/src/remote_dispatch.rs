@@ -198,6 +198,16 @@ pub struct RemoteDispatchInspectionV1 {
   pub failure_code: Option<String>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RemoteOutputBindingV1 {
+  pub workflow_id: String,
+  pub run_id: String,
+  pub node_id: String,
+  pub attempt: u32,
+  pub invocation_id: String,
+  pub phase: crate::OperationalExecutionPhaseV1,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RemoteDispatchResolutionV1 {
   RecordFailure,
@@ -271,7 +281,8 @@ impl DurableEventStore {
         RemoteDispatchStateV1::Requested => "requested",
         RemoteDispatchStateV1::Offered => "offered",
         RemoteDispatchStateV1::Accepted => "accepted",
-        RemoteDispatchStateV1::Started | RemoteDispatchStateV1::CancelRequested => "started",
+        RemoteDispatchStateV1::Started => "started",
+        RemoteDispatchStateV1::CancelRequested => "cancel_requested",
         RemoteDispatchStateV1::Succeeded => "succeeded",
         RemoteDispatchStateV1::Failed => "failed",
         RemoteDispatchStateV1::Cancelled => "cancelled",
@@ -351,6 +362,60 @@ impl DurableEventStore {
     let record = load_dispatch(&transaction, &dispatch_id)?.ok_or(RemoteDispatchError::Corrupt)?;
     transaction.commit()?;
     Ok(record)
+  }
+
+  pub fn authorize_remote_output(
+    &self,
+    dispatch_id: &str,
+    worker_id: &str,
+    session_id: &str,
+  ) -> Result<RemoteOutputBindingV1, RemoteDispatchError> {
+    let dispatch =
+      bound_dispatch_without_offer(&self.connection, dispatch_id, worker_id, session_id)?;
+    if !matches!(
+      dispatch.state,
+      RemoteDispatchStateV1::Started
+        | RemoteDispatchStateV1::CancelRequested
+        | RemoteDispatchStateV1::Ambiguous
+    ) {
+      return Err(RemoteDispatchError::Conflict);
+    }
+    let (workflow_id, model_json) = self
+      .connection
+      .query_row(
+        "SELECT runs.workflow_id, definitions.model_json
+         FROM woml_runs AS runs
+         JOIN woml_definitions AS definitions
+           ON definitions.definition_hash = runs.definition_hash
+         WHERE runs.run_id=?1",
+        [&dispatch.run_id],
+        |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
+      )
+      .optional()?
+      .ok_or(RemoteDispatchError::Corrupt)?;
+    let workflow: CompiledWorkflowDefinition =
+      serde_json::from_str(&model_json).map_err(|_| RemoteDispatchError::Corrupt)?;
+    let corrective = workflow
+      .graph
+      .sagas
+      .as_deref()
+      .unwrap_or_default()
+      .iter()
+      .flat_map(|saga| saga.compensations.iter().chain(saga.cleanup.iter()))
+      .any(|action| action.node.id == dispatch.node_id);
+    let phase = if corrective {
+      crate::OperationalExecutionPhaseV1::Corrective
+    } else {
+      crate::OperationalExecutionPhaseV1::Forward
+    };
+    Ok(RemoteOutputBindingV1 {
+      workflow_id,
+      run_id: dispatch.run_id,
+      node_id: dispatch.node_id,
+      attempt: dispatch.attempt,
+      invocation_id: dispatch.invocation_id,
+      phase,
+    })
   }
 
   #[allow(clippy::too_many_arguments)]
@@ -555,15 +620,14 @@ impl DurableEventStore {
       transaction.commit()?;
       return Ok(existing);
     }
+    let late_reconciliation = existing.state == RemoteDispatchStateV1::Ambiguous;
     if !matches!(
       existing.state,
-      RemoteDispatchStateV1::Started | RemoteDispatchStateV1::CancelRequested
+      RemoteDispatchStateV1::Started
+        | RemoteDispatchStateV1::CancelRequested
+        | RemoteDispatchStateV1::Ambiguous
     ) {
-      return if existing.state == RemoteDispatchStateV1::Ambiguous {
-        Err(RemoteDispatchError::Ambiguous)
-      } else {
-        Err(RemoteDispatchError::Conflict)
-      };
+      return Err(RemoteDispatchError::Conflict);
     }
     transaction.execute(
       "UPDATE woml_remote_dispatches SET state=?2, terminal_digest=?3, ambiguity_reason=NULL, updated_at=?4 WHERE dispatch_id=?1",
@@ -575,7 +639,7 @@ impl DurableEventStore {
       outcome.as_str(),
       worker_id,
       terminal_digest,
-      &json!({}),
+      &json!({"lateReconciliation": late_reconciliation}),
       now,
     )?;
     let record = load_dispatch(&transaction, dispatch_id)?.ok_or(RemoteDispatchError::Corrupt)?;

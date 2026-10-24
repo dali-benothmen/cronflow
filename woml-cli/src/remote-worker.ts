@@ -224,7 +224,7 @@ export async function startWorker(
       workerId: config.workerId, sessionId: session.sessionId,
       sentAt: new Date().toISOString(), target, dispatchId: 'none',
     });
-    if (result.status !== 'idle' || result.dispatch !== null) fail('The session-only worker transport received an executable dispatch before RET7 transport integration.');
+    if ((result.status !== 'idle' && result.status !== 'draining') || result.dispatch !== null) fail('The packaged worker received an unsupported executable dispatch.');
     await Promise.race([shutdown, Bun.sleep(1_000)]);
   }
   await shutdown;

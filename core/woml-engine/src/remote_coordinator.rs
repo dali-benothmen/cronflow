@@ -7,6 +7,7 @@
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 
 use chrono::{DateTime, Duration, Utc};
+use serde::Serialize;
 use thiserror::Error;
 use uuid::Uuid;
 
@@ -38,10 +39,35 @@ pub struct RemoteSessionRecordV1 {
   pub platform: WorkerPlatformV1,
   pub targets: BTreeSet<String>,
   pub capacity: u32,
+  pub active_dispatches: u32,
   pub capabilities: BTreeMap<String, u32>,
   pub created_at: DateTime<Utc>,
   pub last_message_at: DateTime<Utc>,
   pub expires_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RemoteWorkerHealthStatusV1 {
+  Eligible,
+  Saturated,
+  Draining,
+  Offline,
+  Incompatible,
+  Unauthorized,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RemoteWorkerHealthV1 {
+  pub profile: &'static str,
+  pub target: String,
+  pub worker_id: String,
+  pub status: RemoteWorkerHealthStatusV1,
+  pub active_dispatches: u32,
+  pub capacity: u32,
+  #[serde(skip_serializing_if = "Option::is_none")]
+  pub last_heartbeat_at: Option<DateTime<Utc>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
@@ -76,6 +102,8 @@ pub struct RemoteSessionAuthorityV1 {
   supported_capabilities: BTreeMap<String, u32>,
   sessions: HashMap<String, RemoteSessionRecordV1>,
   replay_ids: HashMap<String, DateTime<Utc>>,
+  draining_targets: BTreeSet<String>,
+  draining_workers: BTreeSet<String>,
 }
 
 impl RemoteSessionAuthorityV1 {
@@ -99,6 +127,8 @@ impl RemoteSessionAuthorityV1 {
       supported_capabilities: supported_capabilities.into_iter().collect(),
       sessions: HashMap::new(),
       replay_ids: HashMap::new(),
+      draining_targets: BTreeSet::new(),
+      draining_workers: BTreeSet::new(),
     })
   }
 
@@ -163,6 +193,7 @@ impl RemoteSessionAuthorityV1 {
       platform: hello.platform,
       targets: hello.targets.iter().cloned().collect(),
       capacity: hello.capacity,
+      active_dispatches: 0,
       capabilities,
       created_at: now,
       last_message_at: hello.sent_at,
@@ -207,10 +238,12 @@ impl RemoteSessionAuthorityV1 {
       .ok_or(RemoteCoordinatorError::Unavailable)?;
     session.last_message_at = poll.sent_at;
     session.expires_at = now + Duration::seconds(REMOTE_SESSION_LIFETIME_SECONDS);
+    let draining = self.draining_workers.contains(&poll.worker_id)
+      || self.draining_targets.contains(&poll.target);
     Ok(WorkerPollResultV1 {
       profile: "woml.worker-poll-result/v1",
       session_id: session.session_id.clone(),
-      status: "idle",
+      status: if draining { "draining" } else { "idle" },
       dispatch: None,
       expires_at: session.expires_at,
     })
@@ -241,6 +274,121 @@ impl RemoteSessionAuthorityV1 {
 
   pub fn inspect(&self, session_id: &str) -> Option<&RemoteSessionRecordV1> {
     self.sessions.get(session_id)
+  }
+
+  pub fn begin_drain(&mut self, target_or_worker: &str) -> Result<(), RemoteCoordinatorError> {
+    if self
+      .registry
+      .registry
+      .targets
+      .iter()
+      .any(|target| target.id == target_or_worker)
+    {
+      self.draining_targets.insert(target_or_worker.to_string());
+      return Ok(());
+    }
+    if self.trust.contains_key(target_or_worker) {
+      self.draining_workers.insert(target_or_worker.to_string());
+      return Ok(());
+    }
+    Err(RemoteCoordinatorError::Unauthorized)
+  }
+
+  pub fn end_drain(&mut self, target_or_worker: &str) -> Result<(), RemoteCoordinatorError> {
+    if self.draining_targets.remove(target_or_worker)
+      || self.draining_workers.remove(target_or_worker)
+    {
+      Ok(())
+    } else {
+      Err(RemoteCoordinatorError::Unavailable)
+    }
+  }
+
+  pub fn reserve_dispatch(
+    &mut self,
+    session_id: &str,
+    target: &str,
+  ) -> Result<(), RemoteCoordinatorError> {
+    let session = self
+      .sessions
+      .get_mut(session_id)
+      .ok_or(RemoteCoordinatorError::Unavailable)?;
+    if !session.targets.contains(target)
+      || self.draining_targets.contains(target)
+      || self.draining_workers.contains(&session.worker_id)
+    {
+      return Err(RemoteCoordinatorError::Unavailable);
+    }
+    if session.active_dispatches >= session.capacity {
+      return Err(RemoteCoordinatorError::Capacity);
+    }
+    session.active_dispatches += 1;
+    Ok(())
+  }
+
+  pub fn release_dispatch(&mut self, session_id: &str) -> Result<(), RemoteCoordinatorError> {
+    let session = self
+      .sessions
+      .get_mut(session_id)
+      .ok_or(RemoteCoordinatorError::Unavailable)?;
+    session.active_dispatches = session.active_dispatches.saturating_sub(1);
+    Ok(())
+  }
+
+  pub fn target_health(
+    &self,
+    target_id: &str,
+  ) -> Result<Vec<RemoteWorkerHealthV1>, RemoteCoordinatorError> {
+    let target = self
+      .registry
+      .registry
+      .targets
+      .iter()
+      .find(|target| target.id == target_id)
+      .ok_or(RemoteCoordinatorError::Unavailable)?;
+    Ok(
+      target
+        .allowed_worker_identities
+        .iter()
+        .map(|worker_id| {
+          let session = self
+            .sessions
+            .values()
+            .find(|session| session.worker_id == *worker_id && session.targets.contains(target_id));
+          let (status, active_dispatches, capacity, last_heartbeat_at) =
+            if !self.trust.contains_key(worker_id) {
+              (RemoteWorkerHealthStatusV1::Unauthorized, 0, 0, None)
+            } else if let Some(session) = session {
+              let status = if self.draining_targets.contains(target_id)
+                || self.draining_workers.contains(worker_id)
+              {
+                RemoteWorkerHealthStatusV1::Draining
+              } else if session.active_dispatches >= session.capacity {
+                RemoteWorkerHealthStatusV1::Saturated
+              } else {
+                RemoteWorkerHealthStatusV1::Eligible
+              };
+              (
+                status,
+                session.active_dispatches,
+                session.capacity,
+                Some(session.last_message_at),
+              )
+            } else {
+              (RemoteWorkerHealthStatusV1::Offline, 0, 0, None)
+            };
+          RemoteWorkerHealthV1 {
+            profile: "woml.remote-worker-health/v1",
+            target: target_id.to_string(),
+            worker_id: worker_id.clone(),
+            status,
+            active_dispatches,
+            capacity,
+            last_heartbeat_at,
+          }
+        })
+        .collect(),
+    )
   }
 
   fn accept_message(

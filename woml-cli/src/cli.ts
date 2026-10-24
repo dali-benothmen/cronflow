@@ -8,6 +8,7 @@ import {
   open,
   readFile,
   readdir,
+  rename,
   stat,
   unlink,
   writeFile,
@@ -425,6 +426,7 @@ function targetUsage(): string {
     '  woml target list [--registry <path>] [--trust <path>] [--json]',
     '  woml target check <target> [--registry <path>] [--trust <path>] [--json]',
     '  woml target inspect <target> [--registry <path>] [--trust <path>] --json',
+    '  woml target drain <target-or-worker> [--registry <path>] [--trust <path>] [--state <path>] [--json]',
   ].join('\n');
 }
 
@@ -442,6 +444,105 @@ function dispatchUsage(): string {
     '  woml dispatch inspect <dispatchId> [--state <path>] [--json]',
     '  woml dispatch reconcile <dispatchId> --action <record-failure|authorize-possible-duplicate-retry> --request-id <id> [--reason <text>] [--state <path>] [--json]',
   ].join('\n');
+}
+
+interface RemoteDrainEntryV1 {
+  readonly kind: 'target' | 'worker';
+  readonly id: string;
+  readonly drainedAt: string;
+}
+
+interface RemoteDrainStateV1 {
+  readonly profile: 'woml.remote-drain/v1';
+  readonly version: 1;
+  readonly entries: readonly RemoteDrainEntryV1[];
+}
+
+function isCanonicalDrainTimestamp(value: unknown): value is string {
+  if (typeof value !== 'string') return false;
+  const timestamp = new Date(value);
+  return !Number.isNaN(timestamp.getTime()) && timestamp.toISOString() === value;
+}
+
+async function readRemoteDrainState(path: string): Promise<RemoteDrainStateV1> {
+  if (!existsSync(path)) {
+    return { profile: 'woml.remote-drain/v1', version: 1, entries: [] };
+  }
+  const source = await readFile(path, 'utf8');
+  if (Buffer.byteLength(source) > 256 * 1024) {
+    throw new TargetRegistryError('WOML_TARGET_INVALID', 'The remote drain state exceeds 256 KiB.');
+  }
+  let value: unknown;
+  try {
+    value = JSON.parse(source);
+  } catch {
+    throw new TargetRegistryError('WOML_TARGET_INVALID', 'The remote drain state is malformed.');
+  }
+  if (
+    value === null || typeof value !== 'object' || Array.isArray(value) ||
+    Object.keys(value).sort().join(',') !== 'entries,profile,version' ||
+    (value as { profile?: unknown }).profile !== 'woml.remote-drain/v1' ||
+    (value as { version?: unknown }).version !== 1 ||
+    !Array.isArray((value as { entries?: unknown }).entries)
+  ) {
+    throw new TargetRegistryError('WOML_TARGET_INVALID', 'The remote drain state violates v1.');
+  }
+  const entries = (value as { entries: unknown[] }).entries;
+  if (entries.length > 1_024 || !entries.every(entry => {
+    if (entry === null || typeof entry !== 'object' || Array.isArray(entry)) return false;
+    const record = entry as Record<string, unknown>;
+    return Object.keys(record).sort().join(',') === 'drainedAt,id,kind' &&
+      (record.kind === 'target' || record.kind === 'worker') &&
+      typeof record.id === 'string' && /^[a-z][a-z0-9]*(?:-[a-z0-9]+)*$/u.test(record.id) &&
+      isCanonicalDrainTimestamp(record.drainedAt);
+  })) {
+    throw new TargetRegistryError('WOML_TARGET_INVALID', 'The remote drain entries violate v1.');
+  }
+  return value as RemoteDrainStateV1;
+}
+
+async function persistRemoteDrain(
+  path: string,
+  state: RemoteDrainStateV1,
+  entry: RemoteDrainEntryV1
+): Promise<{ readonly profile: 'woml.remote-drain-result/v1'; readonly status: 'draining'; readonly kind: 'target' | 'worker'; readonly id: string; readonly statePath: string }> {
+  const entries = [
+    ...state.entries.filter(existing => !(existing.kind === entry.kind && existing.id === entry.id)),
+    entry,
+  ].sort((left, right) => `${left.kind}:${left.id}`.localeCompare(`${right.kind}:${right.id}`));
+  await mkdir(dirname(path), { recursive: true, mode: 0o700 });
+  const temporary = `${path}.${randomUUID()}.tmp`;
+  try {
+    await writeFile(temporary, `${JSON.stringify({ profile: 'woml.remote-drain/v1', version: 1, entries })}\n`, {
+      encoding: 'utf8', mode: 0o600, flag: 'wx',
+    });
+    await rename(temporary, path);
+  } finally {
+    await unlink(temporary).catch(() => undefined);
+  }
+  return {
+    profile: 'woml.remote-drain-result/v1',
+    status: 'draining',
+    kind: entry.kind,
+    id: entry.id,
+    statePath: path,
+  };
+}
+
+function remoteDrainHealth(
+  state: RemoteDrainStateV1,
+  target: string,
+  workers: readonly string[],
+  fallback: { readonly status: 'not_observed'; readonly reason: 'worker-transport-not-active' }
+): { readonly status: 'draining'; readonly reason: 'operator-drain'; readonly workers: readonly string[] } | typeof fallback {
+  const targetDrain = state.entries.some(entry => entry.kind === 'target' && entry.id === target);
+  const drainedWorkers = state.entries
+    .filter(entry => entry.kind === 'worker' && workers.includes(entry.id))
+    .map(entry => entry.id)
+    .sort();
+  return targetDrain || drainedWorkers.length > 0
+    ? { status: 'draining', reason: 'operator-drain', workers: drainedWorkers }
+    : fallback;
 }
 
 async function runDispatchCommand(
@@ -501,6 +602,10 @@ async function runDispatchCommand(
               'WOML remote dispatch',
               `Dispatch: ${dispatchId}`,
               `State: ${String((result as { state: string }).state)}`,
+              `Target: ${String((result as { target: string }).target)}`,
+              `Worker: ${String((result as { workerId?: string }).workerId ?? 'unassigned')}`,
+              `Last heartbeat: ${String((result as { lastHeartbeatAt?: string }).lastHeartbeatAt ?? 'none')}`,
+              `Output cursor: ${String((result as { outputSequence: number }).outputSequence)}`,
               `Ambiguous: ${String((result as { ambiguous: boolean }).ambiguous)}`,
             ].join('\n') + '\n'
           : [
@@ -557,7 +662,7 @@ async function runWorkerCommand(
               `Targets: ${result.targets.join(', ')}`,
               `Capacity: ${result.capacity}`,
               'Transport: mutual TLS',
-              'Dispatch transport: session-only until RET7',
+              'Dispatch activation: coordinator-owned; configuration check opens no session',
             ].join('\n') + '\n'
       );
       return 0;
@@ -574,7 +679,7 @@ async function runWorkerCommand(
                 'WOML remote worker session established.',
                 `Worker: ${String(session.workerId)}`,
                 `Session: ${String(session.sessionId)}`,
-                'Status: idle; live dispatch transport completes in RET7',
+                'Status: authenticated and polling',
               ].join('\n') + '\n'
         )
     );
@@ -586,10 +691,11 @@ async function runWorkerCommand(
 }
 
 interface TargetCommandArguments {
-  readonly operation: 'list' | 'check' | 'inspect';
+  readonly operation: 'list' | 'check' | 'inspect' | 'drain';
   readonly target?: string;
   readonly registryPath?: string;
   readonly trustPath?: string;
+  readonly statePath: string;
   readonly json: boolean;
 }
 
@@ -597,7 +703,7 @@ function parseTargetCommandArguments(
   args: readonly string[]
 ): TargetCommandArguments {
   const operation = args[1];
-  if (operation !== 'list' && operation !== 'check' && operation !== 'inspect') {
+  if (operation !== 'list' && operation !== 'check' && operation !== 'inspect' && operation !== 'drain') {
     throw new CliInputError('WOML_CLI_ARGUMENTS_INVALID', targetUsage());
   }
   let index = 2;
@@ -615,6 +721,7 @@ function parseTargetCommandArguments(
   }
   let registryPath: string | undefined;
   let trustPath: string | undefined;
+  let statePath = resolve('.woml/remote-drain.json');
   let json = false;
   for (; index < args.length; index += 1) {
     const argument = args[index]!;
@@ -631,6 +738,8 @@ function parseTargetCommandArguments(
       registryPath = value;
     } else if (argument === '--trust' && trustPath === undefined) {
       trustPath = value;
+    } else if (argument === '--state') {
+      statePath = resolve(value);
     } else {
       throw new CliInputError('WOML_CLI_ARGUMENTS_INVALID', targetUsage());
     }
@@ -646,6 +755,7 @@ function parseTargetCommandArguments(
     ...(target === undefined ? {} : { target }),
     ...(registryPath === undefined ? {} : { registryPath }),
     ...(trustPath === undefined ? {} : { trustPath }),
+    statePath,
     json,
   };
 }
@@ -691,6 +801,12 @@ async function runTargetCommand(
       health: localInspection.health,
     };
     if (parsed.target === 'local') {
+      if (parsed.operation === 'drain') {
+        throw new TargetRegistryError(
+          'WOML_TARGET_INVALID',
+          'The built-in local coordinator target cannot be drained through remote worker controls.'
+        );
+      }
       const result =
         parsed.operation === 'check'
           ? {
@@ -728,6 +844,31 @@ async function runTargetCommand(
       return 0;
     }
     const prepared = await loadTargetRegistry(registryPath, trustPath);
+    const drainState = await readRemoteDrainState(parsed.statePath);
+    if (parsed.operation === 'drain') {
+      const target = prepared.registry.targets.find(entry => entry.id === parsed.target);
+      const worker = prepared.registry.targets
+        .flatMap(entry => entry.allowedWorkerIdentities)
+        .includes(parsed.target!);
+      if (target === undefined && !worker) {
+        throw new TargetRegistryError(
+          'WOML_TARGET_UNKNOWN',
+          `Neither a target nor worker named ${JSON.stringify(parsed.target)} exists in the registry.`
+        );
+      }
+      const kind = target === undefined ? 'worker' as const : 'target' as const;
+      const result = await persistRemoteDrain(parsed.statePath, drainState, {
+        kind,
+        id: parsed.target!,
+        drainedAt: new Date().toISOString(),
+      });
+      io.stdout(
+        parsed.json
+          ? `${JSON.stringify(result)}\n`
+          : `${kind === 'target' ? 'Target' : 'Worker'} ${parsed.target} is draining; accepted work may finish and new dispatch admission is disabled.\n`
+      );
+      return 0;
+    }
     if (parsed.operation === 'list') {
       const result = {
         profile: 'woml.target-list/v1' as const,
@@ -746,7 +887,7 @@ async function runTargetCommand(
               eligibleWorkers: inspected.eligibleWorkers.length,
               minimumWorkerVersion: target.minimumWorkerVersion,
               maximumInFlight: target.maximumInFlight,
-              health: inspected.health,
+              health: remoteDrainHealth(drainState, target.id, target.allowedWorkerIdentities, inspected.health),
             };
           }),
         ],
@@ -767,7 +908,17 @@ async function runTargetCommand(
       );
       return 0;
     }
-    const inspection = inspectTarget(prepared, parsed.target!);
+    const baseInspection = inspectTarget(prepared, parsed.target!);
+    const targetEntry = prepared.registry.targets.find(target => target.id === parsed.target)!;
+    const inspection = {
+      ...baseInspection,
+      health: remoteDrainHealth(
+        drainState,
+        parsed.target!,
+        targetEntry.allowedWorkerIdentities,
+        baseInspection.health
+      ),
+    };
     if (parsed.operation === 'check') {
       if (inspection.eligibleWorkers.length === 0) {
         throw new TargetRegistryError(

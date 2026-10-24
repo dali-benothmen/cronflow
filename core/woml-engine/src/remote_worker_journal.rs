@@ -39,6 +39,20 @@ use crate::{
 
 pub const WORKER_JOURNAL_SCHEMA_VERSION: u32 = 1;
 pub const WORKER_JOURNAL_RECOVERY_LIMIT: usize = 10_000;
+pub const REMOTE_CANCELLATION_CONFIRMATION_TIMEOUT_MS: u64 = 2_000;
+
+#[derive(Debug, Clone, Default)]
+pub struct RemoteWorkerCancellationTokenV1(Arc<AtomicBool>);
+
+impl RemoteWorkerCancellationTokenV1 {
+  pub fn cancel(&self) {
+    self.0.store(true, Ordering::Release);
+  }
+
+  pub fn is_cancelled(&self) -> bool {
+    self.0.load(Ordering::Acquire)
+  }
+}
 
 const CREATE_SCHEMA: &str = r#"
 CREATE TABLE IF NOT EXISTS woml_worker_metadata (
@@ -895,6 +909,17 @@ impl RemoteWorkerAttemptRuntimeV1 {
     prepared: &PreparedRemoteDispatchV1,
     now: DateTime<Utc>,
   ) -> Result<RemoteWorkerTerminalV1, RemoteWorkerError> {
+    self
+      .execute_with_cancellation(prepared, now, RemoteWorkerCancellationTokenV1::default())
+      .await
+  }
+
+  pub async fn execute_with_cancellation(
+    &mut self,
+    prepared: &PreparedRemoteDispatchV1,
+    now: DateTime<Utc>,
+    cancellation: RemoteWorkerCancellationTokenV1,
+  ) -> Result<RemoteWorkerTerminalV1, RemoteWorkerError> {
     if prepared.worker_id != self.worker_id {
       return Err(RemoteWorkerError::Conflict);
     }
@@ -957,6 +982,22 @@ impl RemoteWorkerAttemptRuntimeV1 {
     {
       return Err(RemoteWorkerError::Ambiguous);
     }
+    if cancellation.is_cancelled() {
+      self
+        .journal
+        .start(&prepared.package.dispatch_id, &self.session_id, now)?;
+      let terminal = RemoteWorkerTerminalV1::new(
+        &prepared.package.dispatch_id,
+        &prepared.package.invocation_id,
+        WorkerAttemptStateV1::Cancelled,
+        json!({"code": "WOML_RUN_CANCELLED", "message": "Remote execution was cancelled before script execution."}),
+        Utc::now(),
+      )?;
+      self
+        .journal
+        .terminal(&prepared.package.dispatch_id, &self.session_id, &terminal)?;
+      return Ok(terminal);
+    }
     let mut options = self.host_options.clone();
     options.module_artifacts.clear();
     let host = ScriptHostClient::spawn_with_authority(options, self.capability_authority.clone())
@@ -990,7 +1031,33 @@ impl RemoteWorkerAttemptRuntimeV1 {
       &secrets,
       &module_bindings,
     );
-    let completion = host.execute(&message).await;
+    let completion = {
+      let execution = host.execute(&message);
+      tokio::pin!(execution);
+      loop {
+        tokio::select! {
+          completion = &mut execution => break completion,
+          _ = tokio::time::sleep(std::time::Duration::from_millis(25)) => {
+            if cancellation.is_cancelled() {
+              if host.cancel_run(&prepared.package.invocation_id).await.is_err() {
+                break Err(crate::host::ScriptHostClientError::HostCrashed(
+                  "remote cancellation could not be delivered".to_string(),
+                ));
+              }
+              break match tokio::time::timeout(
+                std::time::Duration::from_millis(REMOTE_CANCELLATION_CONFIRMATION_TIMEOUT_MS),
+                &mut execution,
+              ).await {
+                Ok(completion) => completion,
+                Err(_) => Err(crate::host::ScriptHostClientError::HostCrashed(
+                  "remote cancellation was not confirmed".to_string(),
+                )),
+              };
+            }
+          }
+        }
+      }
+    };
     host.shutdown().await;
     let (state, mut outcome) = match completion {
       Ok(completed) => match completed.outcome {

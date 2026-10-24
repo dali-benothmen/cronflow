@@ -38,6 +38,7 @@ pub mod protocol;
 pub mod remote_coordinator;
 pub mod remote_coordinator_server;
 pub mod remote_dispatch;
+pub mod remote_execution;
 pub mod remote_protocol;
 pub mod remote_worker;
 pub mod remote_worker_journal;
@@ -57,8 +58,9 @@ pub mod workflow_calls;
 
 pub use remote_coordinator::{
   remote_transport_profile, RemoteCoordinatorError, RemoteSessionAuthorityV1,
-  RemoteSessionRecordV1, TrustedWorkerIdentityV1, REMOTE_MAX_REPLAY_IDS, REMOTE_MAX_SESSIONS,
-  REMOTE_MESSAGE_CLOCK_SKEW_SECONDS, REMOTE_SESSION_LIFETIME_SECONDS,
+  RemoteSessionRecordV1, RemoteWorkerHealthStatusV1, RemoteWorkerHealthV1, TrustedWorkerIdentityV1,
+  REMOTE_MAX_REPLAY_IDS, REMOTE_MAX_SESSIONS, REMOTE_MESSAGE_CLOCK_SKEW_SECONDS,
+  REMOTE_SESSION_LIFETIME_SECONDS,
 };
 pub use remote_coordinator_server::{
   RemoteCoordinatorServerError, RemoteCoordinatorServerV1, RemoteCoordinatorTlsOptionsV1,
@@ -68,15 +70,21 @@ pub use remote_coordinator_server::{
 pub use remote_dispatch::{
   derive_remote_dispatch_id, RemoteDispatchError, RemoteDispatchInspectionV1,
   RemoteDispatchRecordV1, RemoteDispatchRequestV1, RemoteDispatchResolutionV1,
-  RemoteDispatchStateV1, REMOTE_DISPATCH_HEARTBEAT_MAX_BYTES, REMOTE_DISPATCH_RECOVERY_BATCH_LIMIT,
+  RemoteDispatchStateV1, RemoteOutputBindingV1, REMOTE_DISPATCH_HEARTBEAT_MAX_BYTES,
+  REMOTE_DISPATCH_RECOVERY_BATCH_LIMIT,
+};
+pub use remote_execution::{
+  ingest_remote_output_batch, RemoteExecutionError, RemoteOutputIngestReportV1,
 };
 pub use remote_protocol::{
-  decode_remote_dispatch_package, decode_worker_hello, decode_worker_poll, decode_worker_shutdown,
-  RemoteArtifactGrantV1, RemoteArtifactOperationV1, RemoteCoordinatorAuthorityV1,
-  RemoteDispatchPackageV1, RemoteEffectiveAuthorityV1, RemoteProtocolError, WorkerArchitectureV1,
-  WorkerCapabilityV1, WorkerHelloV1, WorkerOperatingSystemV1, WorkerPlatformV1, WorkerPollResultV1,
-  WorkerPollV1, WorkerSessionV1, WorkerShutdownV1, REMOTE_DISPATCH_PACKAGE_PROFILE,
-  REMOTE_DISPATCH_PACKAGE_VERSION, REMOTE_TERMINAL_RESULT_MAX_BYTES,
+  decode_remote_dispatch_package, decode_worker_hello, decode_worker_output_batch,
+  decode_worker_poll, decode_worker_shutdown, RemoteArtifactGrantV1, RemoteArtifactOperationV1,
+  RemoteCoordinatorAuthorityV1, RemoteDispatchPackageV1, RemoteEffectiveAuthorityV1,
+  RemoteOperationalRecordV1, RemoteProtocolError, WorkerArchitectureV1, WorkerCapabilityV1,
+  WorkerHelloV1, WorkerOperatingSystemV1, WorkerOutputBatchV1, WorkerPlatformV1,
+  WorkerPollResultV1, WorkerPollV1, WorkerSessionV1, WorkerShutdownV1,
+  REMOTE_DISPATCH_PACKAGE_PROFILE, REMOTE_DISPATCH_PACKAGE_VERSION,
+  REMOTE_OUTPUT_BATCH_MAX_RECORDS, REMOTE_TERMINAL_RESULT_MAX_BYTES,
   WORKER_PROTOCOL_MAX_CAPABILITIES, WORKER_PROTOCOL_MAX_CAPACITY,
   WORKER_PROTOCOL_MAX_MESSAGE_BYTES, WORKER_PROTOCOL_MAX_TARGETS, WORKER_PROTOCOL_PROFILE,
   WORKER_PROTOCOL_VERSION,
@@ -90,8 +98,9 @@ pub use remote_worker::{
 pub use remote_worker_journal::{
   prepare_remote_dispatch, verify_remote_artifact_transfer, EnvironmentRemoteSecretProvider,
   PreparedRemoteDispatchV1, RemoteSecretProvider, RemoteWorkerAttemptRuntimeV1,
-  RemoteWorkerAuthorityV1, RemoteWorkerError, RemoteWorkerTerminalV1, WorkerAttemptRecordV1,
-  WorkerAttemptStateV1, WorkerJournalV1, WORKER_JOURNAL_RECOVERY_LIMIT,
+  RemoteWorkerAuthorityV1, RemoteWorkerCancellationTokenV1, RemoteWorkerError,
+  RemoteWorkerTerminalV1, WorkerAttemptRecordV1, WorkerAttemptStateV1, WorkerJournalV1,
+  REMOTE_CANCELLATION_CONFIRMATION_TIMEOUT_MS, WORKER_JOURNAL_RECOVERY_LIMIT,
   WORKER_JOURNAL_SCHEMA_VERSION,
 };
 pub use target_registry::{
@@ -305,11 +314,12 @@ pub use operational_output::{
   OperationalOutputStore, OperationalOutputStoreInspectionV1, OperationalPageV1,
   OperationalProgressSnapshotV1, OperationalProgressStatusV1, OperationalRecordDraftV1,
   OperationalRecordV1, OperationalSourceV1, OperationalStreamEventV1,
-  DEFAULT_OPERATIONAL_INLINE_RUN_BYTES, DEFAULT_OPERATIONAL_RETENTION_MS,
-  DEFAULT_OPERATIONAL_STORE_BYTES, MAX_OPERATIONAL_CHUNK_BYTES, MAX_OPERATIONAL_FOLLOWERS,
-  MAX_OPERATIONAL_INLINE_RUN_BYTES, MAX_OPERATIONAL_PAGE_BYTES, MAX_OPERATIONAL_PAGE_RECORDS,
-  MAX_OPERATIONAL_TEXT_BYTES, OPERATIONAL_OUTPUT_STORE_SCHEMA_VERSION, OPERATIONAL_PAGE_PROFILE,
-  OPERATIONAL_RECORD_PROFILE, OPERATIONAL_STREAM_PROFILE,
+  RemoteOperationalAppendOutcomeV1, DEFAULT_OPERATIONAL_INLINE_RUN_BYTES,
+  DEFAULT_OPERATIONAL_RETENTION_MS, DEFAULT_OPERATIONAL_STORE_BYTES, MAX_OPERATIONAL_CHUNK_BYTES,
+  MAX_OPERATIONAL_FOLLOWERS, MAX_OPERATIONAL_INLINE_RUN_BYTES, MAX_OPERATIONAL_PAGE_BYTES,
+  MAX_OPERATIONAL_PAGE_RECORDS, MAX_OPERATIONAL_TEXT_BYTES,
+  OPERATIONAL_OUTPUT_STORE_SCHEMA_VERSION, OPERATIONAL_PAGE_PROFILE, OPERATIONAL_RECORD_PROFILE,
+  OPERATIONAL_STREAM_PROFILE,
 };
 pub use presentation::{
   project_run_presentation_v1, recent_run_presentations_from_store_v1,

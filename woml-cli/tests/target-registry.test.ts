@@ -270,6 +270,38 @@ describe('Target Registry v1', () => {
     );
   });
 
+  test('persists explicit target and worker drain intent without abandoning registry state', async () => {
+    const paths = await fixture();
+    const statePath = join(paths.root, 'remote-drain.json');
+    const drained = await invoke([
+      'target', 'drain', 'production-private',
+      '--registry', paths.registryPath,
+      '--trust', paths.trustPath,
+      '--state', statePath,
+      '--json',
+    ]);
+    expect(drained.exitCode).toBe(0);
+    expect(JSON.parse(drained.stdout)).toEqual(expect.objectContaining({
+      profile: 'woml.remote-drain-result/v1',
+      status: 'draining',
+      kind: 'target',
+      id: 'production-private',
+    }));
+    const inspected = await invoke([
+      'target', 'inspect', 'production-private',
+      '--registry', paths.registryPath,
+      '--trust', paths.trustPath,
+      '--state', statePath,
+      '--json',
+    ]);
+    expect(JSON.parse(inspected.stdout).health).toEqual({
+      status: 'draining', reason: 'operator-drain', workers: [],
+    });
+    const state = JSON.parse(await Bun.file(statePath).text());
+    expect(state.profile).toBe('woml.remote-drain/v1');
+    expect(JSON.stringify(state)).not.toContain('BEGIN CERTIFICATE');
+  });
+
   test('integrates trusted target proof into production check before activation', async () => {
     const paths = await fixture();
     const previous = process.cwd();

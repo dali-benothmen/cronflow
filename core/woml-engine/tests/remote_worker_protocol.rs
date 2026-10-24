@@ -4,7 +4,8 @@ use uuid::Uuid;
 use woml_engine::{
   decode_worker_hello, parse_target_registry, parse_worker_configuration,
   prepare_worker_configuration, RemoteCoordinatorError, RemoteSessionAuthorityV1,
-  TrustedWorkerIdentityV1, WorkerPollV1, WorkerShutdownV1, WORKER_PROTOCOL_PROFILE,
+  RemoteWorkerHealthStatusV1, TrustedWorkerIdentityV1, WorkerPollV1, WorkerShutdownV1,
+  WORKER_PROTOCOL_PROFILE,
 };
 
 const REGISTRY: &str =
@@ -109,6 +110,62 @@ fn authenticated_session_is_bound_idle_renewable_and_closable() {
     )
     .unwrap();
   assert!(authority.inspect(&session.session_id).is_none());
+}
+
+#[test]
+fn drain_rejects_new_admission_without_abandoning_active_dispatches() {
+  let now = Utc.with_ymd_and_hms(2026, 10, 24, 12, 0, 0).unwrap();
+  let mut authority = authority();
+  let session = authority
+    .establish(
+      hello(),
+      "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      now,
+    )
+    .unwrap();
+  authority
+    .reserve_dispatch(&session.session_id, "production-private")
+    .unwrap();
+  authority.begin_drain("production-private").unwrap();
+  assert_eq!(
+    authority
+      .reserve_dispatch(&session.session_id, "production-private")
+      .unwrap_err(),
+    RemoteCoordinatorError::Unavailable
+  );
+  let health = authority.target_health("production-private").unwrap();
+  let worker = health
+    .iter()
+    .find(|worker| worker.worker_id == "production-runner-01")
+    .unwrap();
+  assert_eq!(worker.status, RemoteWorkerHealthStatusV1::Draining);
+  assert_eq!(worker.active_dispatches, 1);
+  authority.release_dispatch(&session.session_id).unwrap();
+  assert_eq!(
+    authority
+      .inspect(&session.session_id)
+      .unwrap()
+      .active_dispatches,
+    0
+  );
+  let poll = authority
+    .poll(
+      WorkerPollV1 {
+        profile: WORKER_PROTOCOL_PROFILE.to_string(),
+        protocol_version: 1,
+        message_id: "poll_draining_01".to_string(),
+        message_type: "poll".to_string(),
+        worker_id: session.worker_id,
+        session_id: session.session_id,
+        sent_at: now + Duration::seconds(1),
+        target: "production-private".to_string(),
+        dispatch_id: "none".to_string(),
+      },
+      "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      now + Duration::seconds(1),
+    )
+    .unwrap();
+  assert_eq!(poll.status, "draining");
 }
 
 #[test]

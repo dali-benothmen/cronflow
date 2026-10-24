@@ -13,7 +13,7 @@ use serde_json_canonicalizer::to_vec as canonical_json;
 use sha2::{Digest, Sha256};
 use thiserror::Error;
 
-use crate::{CompiledWorkflowNode, WorkflowContext};
+use crate::{CompiledWorkflowNode, OperationalBodyV1, WorkflowContext};
 
 pub const WORKER_PROTOCOL_PROFILE: &str = "woml.worker-protocol/v1";
 pub const WORKER_PROTOCOL_VERSION: u32 = 1;
@@ -24,6 +24,7 @@ pub const WORKER_PROTOCOL_MAX_CAPACITY: u32 = 64;
 pub const REMOTE_DISPATCH_PACKAGE_PROFILE: &str = "woml.dispatch-package/v1";
 pub const REMOTE_DISPATCH_PACKAGE_VERSION: u32 = 1;
 pub const REMOTE_TERMINAL_RESULT_MAX_BYTES: usize = 1024 * 1024;
+pub const REMOTE_OUTPUT_BATCH_MAX_RECORDS: usize = 128;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -185,6 +186,42 @@ pub struct WorkerShutdownV1 {
   pub sent_at: DateTime<Utc>,
 }
 
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct RemoteOperationalRecordV1 {
+  pub sequence: u64,
+  pub body: OperationalBodyV1,
+  pub record_digest: String,
+}
+
+impl RemoteOperationalRecordV1 {
+  pub fn computed_digest(&self) -> Result<String, RemoteProtocolError> {
+    let mut value =
+      serde_json::to_value(self).map_err(|_| invalid("output record cannot be encoded"))?;
+    value
+      .as_object_mut()
+      .ok_or_else(|| invalid("output record is not an object"))?
+      .insert("recordDigest".to_string(), Value::String(String::new()));
+    let bytes =
+      canonical_json(&value).map_err(|_| invalid("output record cannot be canonicalized"))?;
+    Ok(format!("sha256:{:x}", Sha256::digest(bytes)))
+  }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct WorkerOutputBatchV1 {
+  pub profile: String,
+  pub protocol_version: u32,
+  pub message_id: String,
+  pub message_type: String,
+  pub worker_id: String,
+  pub session_id: String,
+  pub sent_at: DateTime<Utc>,
+  pub dispatch_id: String,
+  pub records: Vec<RemoteOperationalRecordV1>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct WorkerSessionV1 {
@@ -307,6 +344,39 @@ pub fn decode_worker_shutdown(source: &[u8]) -> Result<WorkerShutdownV1, RemoteP
   Ok(message)
 }
 
+pub fn decode_worker_output_batch(
+  source: &[u8],
+) -> Result<WorkerOutputBatchV1, RemoteProtocolError> {
+  let message: WorkerOutputBatchV1 = decode(source)?;
+  validate_base(
+    &message.profile,
+    message.protocol_version,
+    &message.message_id,
+    &message.worker_id,
+  )?;
+  if message.message_type != "output"
+    || !valid_protocol_id(&message.session_id)
+    || !valid_dispatch_id(&message.dispatch_id)
+    || message.records.is_empty()
+    || message.records.len() > REMOTE_OUTPUT_BATCH_MAX_RECORDS
+  {
+    return Err(invalid("output batch identity or size is invalid"));
+  }
+  let mut previous = None;
+  for record in &message.records {
+    if record.sequence == 0
+      || previous.is_some_and(|value| record.sequence != value + 1)
+      || record.record_digest != record.computed_digest()?
+    {
+      return Err(invalid(
+        "output records are unordered or fail integrity validation",
+      ));
+    }
+    previous = Some(record.sequence);
+  }
+  Ok(message)
+}
+
 fn decode<T: for<'de> Deserialize<'de>>(source: &[u8]) -> Result<T, RemoteProtocolError> {
   if source.len() > WORKER_PROTOCOL_MAX_MESSAGE_BYTES {
     return Err(RemoteProtocolError::TooLarge);
@@ -378,6 +448,12 @@ fn valid_protocol_id(value: &str) -> bool {
     && value
       .bytes()
       .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b':' | b'_' | b'-'))
+}
+
+fn valid_dispatch_id(value: &str) -> bool {
+  value.len() == 73
+    && value.starts_with("dispatch_")
+    && value[9..].bytes().all(|byte| byte.is_ascii_hexdigit())
 }
 
 pub(crate) fn valid_semver(value: &str) -> bool {

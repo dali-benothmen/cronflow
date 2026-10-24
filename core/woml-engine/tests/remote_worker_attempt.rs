@@ -9,13 +9,14 @@ use serde_json::{json, Map};
 use sha2::{Digest, Sha256};
 use uuid::Uuid;
 use woml_engine::{
-  decode_remote_dispatch_package, derive_remote_dispatch_id, prepare_remote_dispatch,
-  verify_remote_artifact_transfer, CompiledWorkflowDefinition, EnvironmentRemoteSecretProvider,
-  RemoteArtifactGrantV1, RemoteArtifactOperationV1, RemoteCoordinatorAuthorityV1,
-  RemoteDispatchPackageV1, RemoteDispatchRequestV1, RemoteSecretProvider,
-  RemoteWorkerAttemptRuntimeV1, RemoteWorkerAuthorityV1, RemoteWorkerError,
-  ScriptHostProcessOptions, WorkerAttemptStateV1, WorkerCapabilityV1, WorkerJournalV1,
-  WorkflowContext,
+  decode_remote_dispatch_package, decode_worker_output_batch, derive_remote_dispatch_id,
+  prepare_remote_dispatch, verify_remote_artifact_transfer, CompiledWorkflowDefinition,
+  EnvironmentRemoteSecretProvider, OperationalBodyV1, OperationalSourceV1, RemoteArtifactGrantV1,
+  RemoteArtifactOperationV1, RemoteCoordinatorAuthorityV1, RemoteDispatchPackageV1,
+  RemoteDispatchRequestV1, RemoteOperationalRecordV1, RemoteSecretProvider,
+  RemoteWorkerAttemptRuntimeV1, RemoteWorkerAuthorityV1, RemoteWorkerCancellationTokenV1,
+  RemoteWorkerError, ScriptHostProcessOptions, WorkerAttemptStateV1, WorkerCapabilityV1,
+  WorkerJournalV1, WorkerOutputBatchV1, WorkflowContext,
 };
 
 const MODEL: &str =
@@ -180,6 +181,43 @@ fn dispatch_package_decoder_is_strict_and_integrity_bound() {
     .unwrap()
     .insert("unexpected".to_string(), json!(true));
   assert!(decode_remote_dispatch_package(&serde_json::to_vec(&unknown).unwrap()).is_err());
+}
+
+#[test]
+fn output_batch_decoder_requires_integrity_and_strict_sequence() {
+  let mut first = RemoteOperationalRecordV1 {
+    sequence: 1,
+    body: OperationalBodyV1::Output {
+      source: OperationalSourceV1::Stdout,
+      level: None,
+      text: "one\n".to_string(),
+      byte_count: 4,
+    },
+    record_digest: String::new(),
+  };
+  first.record_digest = first.computed_digest().unwrap();
+  let mut second = first.clone();
+  second.sequence = 2;
+  second.record_digest = second.computed_digest().unwrap();
+  let batch = WorkerOutputBatchV1 {
+    profile: "woml.worker-protocol/v1".to_string(),
+    protocol_version: 1,
+    message_id: "output_01".to_string(),
+    message_type: "output".to_string(),
+    worker_id: "production-runner-01".to_string(),
+    session_id: "session_01".to_string(),
+    sent_at: now(),
+    dispatch_id: format!("dispatch_{}", "a".repeat(64)),
+    records: vec![first, second],
+  };
+  assert_eq!(
+    decode_worker_output_batch(&serde_json::to_vec(&batch).unwrap()).unwrap(),
+    batch
+  );
+  let mut reordered = batch;
+  reordered.records[1].sequence = 3;
+  reordered.records[1].record_digest = reordered.records[1].computed_digest().unwrap();
+  assert!(decode_worker_output_batch(&serde_json::to_vec(&reordered).unwrap()).is_err());
 }
 
 #[test]
@@ -406,6 +444,53 @@ async fn a_real_remote_step_matches_local_result_shape_and_terminal_redelivery_i
       .unwrap(),
     Some(first)
   );
+}
+
+#[tokio::test]
+async fn confirmed_cancellation_stops_script_work_and_records_a_cancelled_terminal() {
+  let Some(host) = host_options() else {
+    return;
+  };
+  let mut package = package();
+  let woml_engine::ValueExpression::Object { fields } = &mut package.node.inputs else {
+    panic!("source object");
+  };
+  fields.insert(
+    "source".to_string(),
+    woml_engine::ValueExpression::Literal {
+      value: json!(
+        "await new Promise(resolve => setTimeout(resolve, 10_000)); return { late: true };"
+      ),
+    },
+  );
+  package.package_digest = package.computed_digest().unwrap();
+  let prepared = prepare(package).unwrap();
+  let mut runtime = RemoteWorkerAttemptRuntimeV1::new(
+    WorkerJournalV1::open_in_memory().unwrap(),
+    "production-runner-01",
+    "session_01",
+    1,
+    host,
+    None,
+    Arc::new(EnvironmentRemoteSecretProvider),
+  )
+  .unwrap();
+  let cancellation = RemoteWorkerCancellationTokenV1::default();
+  let request = cancellation.clone();
+  let execution = tokio::spawn(async move {
+    runtime
+      .execute_with_cancellation(&prepared, now(), request)
+      .await
+  });
+  tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+  cancellation.cancel();
+  let terminal = tokio::time::timeout(std::time::Duration::from_secs(5), execution)
+    .await
+    .expect("cancellation settles within the confirmation window")
+    .unwrap()
+    .unwrap();
+  assert_eq!(terminal.state, WorkerAttemptStateV1::Cancelled);
+  assert_eq!(terminal.outcome["code"], "WOML_SCRIPT_CANCELLED");
 }
 
 struct StaticSecretProvider;

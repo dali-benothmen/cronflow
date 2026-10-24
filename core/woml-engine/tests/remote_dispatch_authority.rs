@@ -4,9 +4,12 @@ use serde_json::{json, Map};
 use std::path::{Path, PathBuf};
 use uuid::Uuid;
 use woml_engine::{
-  CompiledWorkflowDefinition, DurableEventStore, DurableStoreError, RemoteDispatchError,
-  RemoteDispatchRequestV1, RemoteDispatchResolutionV1, RemoteDispatchStateV1,
-  RemoteDispatchTransitionedData, RunEvent, RunEventPayload, TriggerAdmissionRequest,
+  ingest_remote_output_batch, CompiledWorkflowDefinition, DurableEventStore, DurableStoreError,
+  OperationalBodyV1, OperationalExecutionPhaseV1, OperationalIdentityV1, OperationalLogLevelV1,
+  OperationalOutputLimitsV1, OperationalOutputStore, OperationalRecordDraftV1, OperationalSourceV1,
+  RemoteDispatchError, RemoteDispatchRequestV1, RemoteDispatchResolutionV1, RemoteDispatchStateV1,
+  RemoteDispatchTransitionedData, RemoteOperationalAppendOutcomeV1, RemoteOperationalRecordV1,
+  RunEvent, RunEventPayload, TriggerAdmissionRequest, WorkerOutputBatchV1,
   DURABLE_STORE_SCHEMA_VERSION, RUN_EVENT_SCHEMA_VERSION_V20,
 };
 
@@ -275,39 +278,27 @@ fn loss_after_acceptance_is_ambiguous_until_explicit_reconciliation() {
     .unwrap();
   assert_eq!(lost[0].state, RemoteDispatchStateV1::Ambiguous);
   assert_eq!(store.recover_remote_dispatches(100).unwrap().len(), 1);
-  assert!(matches!(
-    store.terminal_remote_dispatch(
+  let late = store
+    .terminal_remote_dispatch(
       &requested.dispatch_id,
       "production-runner-01",
       "session_01",
       RemoteDispatchStateV1::Succeeded,
       "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
       now + Duration::seconds(11),
-    ),
-    Err(RemoteDispatchError::Ambiguous)
-  ));
-  let reconciled = store
-    .reconcile_remote_dispatch(
+    )
+    .unwrap();
+  assert_eq!(late.state, RemoteDispatchStateV1::Succeeded);
+  assert!(matches!(
+    store.reconcile_remote_dispatch(
       &requested.dispatch_id,
       RemoteDispatchResolutionV1::AuthorizePossibleDuplicateRetry,
       "operator-one",
       "sha256:eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
       now + Duration::seconds(12),
-    )
-    .unwrap();
-  assert_eq!(reconciled.state, RemoteDispatchStateV1::Abandoned);
-  assert_eq!(
-    store
-      .reconcile_remote_dispatch(
-        &requested.dispatch_id,
-        RemoteDispatchResolutionV1::AuthorizePossibleDuplicateRetry,
-        "operator-one",
-        "sha256:eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
-        now + Duration::seconds(13),
-      )
-      .unwrap(),
-    reconciled
-  );
+    ),
+    Err(RemoteDispatchError::Conflict)
+  ));
   assert!(matches!(
     store.reconcile_remote_dispatch(
       &requested.dispatch_id,
@@ -329,6 +320,135 @@ fn loss_after_acceptance_is_ambiguous_until_explicit_reconciliation() {
     ),
     Err(RemoteDispatchError::Conflict)
   ));
+}
+
+#[test]
+fn remote_output_is_ordered_deduplicated_and_cursor_compatible() {
+  let now = Utc::now();
+  let (mut store, run_id) = store_and_run();
+  let requested = store
+    .request_remote_dispatch(&request(&run_id, now))
+    .unwrap();
+  store
+    .offer_remote_dispatch(
+      &requested.dispatch_id,
+      "production-runner-01",
+      "session_01",
+      "offer_01",
+      now + Duration::seconds(30),
+      now,
+    )
+    .unwrap();
+  store
+    .accept_remote_dispatch(
+      &requested.dispatch_id,
+      "production-runner-01",
+      "session_01",
+      "offer_01",
+      now,
+    )
+    .unwrap();
+  store
+    .start_remote_dispatch(
+      &requested.dispatch_id,
+      "production-runner-01",
+      "session_01",
+      now,
+    )
+    .unwrap();
+  let output_database = TemporaryDatabase::new("output");
+  let output = OperationalOutputStore::open(output_database.path(), "deployment-remote").unwrap();
+  let mut record = RemoteOperationalRecordV1 {
+    sequence: 1,
+    body: OperationalBodyV1::Output {
+      source: OperationalSourceV1::Stdout,
+      level: Some(OperationalLogLevelV1::Info),
+      text: "remote line\n".to_string(),
+      byte_count: 12,
+    },
+    record_digest: String::new(),
+  };
+  record.record_digest = record.computed_digest().unwrap();
+  let batch = WorkerOutputBatchV1 {
+    profile: "woml.worker-protocol/v1".to_string(),
+    protocol_version: 1,
+    message_id: "output_01".to_string(),
+    message_type: "output".to_string(),
+    worker_id: "production-runner-01".to_string(),
+    session_id: "session_01".to_string(),
+    sent_at: now,
+    dispatch_id: requested.dispatch_id.clone(),
+    records: vec![record.clone()],
+  };
+  let first = ingest_remote_output_batch(&mut store, &output, &batch, now).unwrap();
+  assert_eq!((first.accepted, first.duplicates), (1, 0));
+  let replay = ingest_remote_output_batch(&mut store, &output, &batch, now).unwrap();
+  assert_eq!((replay.accepted, replay.duplicates), (0, 1));
+  let page = output.read_run_page(&run_id, 0, 10).unwrap();
+  assert_eq!(page.records.len(), 1);
+  assert_eq!(page.next_after, first.last_local_sequence);
+
+  let mut reordered = record;
+  reordered.sequence = 3;
+  reordered.record_digest = reordered.computed_digest().unwrap();
+  let mut invalid_batch = batch;
+  invalid_batch.message_id = "output_03".to_string();
+  invalid_batch.records = vec![reordered];
+  assert!(ingest_remote_output_batch(&mut store, &output, &invalid_batch, now).is_err());
+}
+
+#[test]
+fn dropped_remote_output_still_advances_the_durable_remote_cursor() {
+  let database = TemporaryDatabase::new("bounded-output");
+  let output = OperationalOutputStore::open_with_limits(
+    database.path(),
+    "deployment-remote",
+    OperationalOutputLimitsV1 {
+      max_attempt_bytes: 10,
+      max_run_bytes: 15,
+      max_store_bytes: 20,
+      retention_ms: 60_000,
+    },
+  )
+  .unwrap();
+  let dispatch_id = format!("dispatch_{}", "a".repeat(64));
+  let draft = |text: &str| OperationalRecordDraftV1 {
+    identity: OperationalIdentityV1 {
+      workflow_id: "remote-output-budget".to_string(),
+      run_id: "run_remote_output_budget".to_string(),
+      node_id: Some("remoteStep".to_string()),
+      attempt: Some(1),
+      invocation_id: Some("inv_remote_output_budget".to_string()),
+      phase: OperationalExecutionPhaseV1::Forward,
+    },
+    body: OperationalBodyV1::Output {
+      source: OperationalSourceV1::Stdout,
+      level: Some(OperationalLogLevelV1::Info),
+      text: text.to_string(),
+      byte_count: text.len() as u64,
+    },
+  };
+  let digest = |sequence: u64| format!("sha256:{sequence:064x}");
+
+  output
+    .append_remote_bounded(&dispatch_id, 1, &digest(1), draft("12345678"))
+    .unwrap();
+  output
+    .append_remote_bounded(&dispatch_id, 2, &digest(2), draft("abcd"))
+    .unwrap();
+  output
+    .append_remote_bounded(&dispatch_id, 3, &digest(3), draft("dropped"))
+    .unwrap();
+  let replay = output
+    .append_remote_bounded(&dispatch_id, 3, &digest(3), draft("dropped"))
+    .unwrap();
+  assert!(matches!(
+    replay,
+    RemoteOperationalAppendOutcomeV1::Duplicate { .. }
+  ));
+  output
+    .append_remote_bounded(&dispatch_id, 4, &digest(4), draft("also dropped"))
+    .expect("the sequence after a dropped record remains admissible");
 }
 
 #[test]
