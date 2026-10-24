@@ -386,6 +386,11 @@ struct WorkflowCallExecutionConfig {
   schedule_progress_reporter: Option<ScheduleProgressReporter>,
   interval_progress_reporter: Option<IntervalProgressReporter>,
   workflow_call_progress_reporter: Option<WorkflowCallProgressReporter>,
+  telemetry_reporter: Option<crate::TelemetrySignalReporter>,
+  telemetry_context: Option<crate::TelemetrySignalContext>,
+  telemetry_admission_link_reporter: Option<crate::TelemetryAdmissionLinkReporter>,
+  telemetry_propagation: Arc<std::sync::atomic::AtomicBool>,
+  telemetry_sampling_ratio: Arc<std::sync::RwLock<f64>>,
   resolved_secrets: Arc<BTreeMap<String, String>>,
   capability_registry: Weak<CapabilityRegistry>,
   policy_execution_registry: PolicyExecutionRegistry,
@@ -403,6 +408,11 @@ impl WorkflowCallExecutionConfig {
       schedule_progress_reporter: options.schedule_progress_reporter.clone(),
       interval_progress_reporter: options.interval_progress_reporter.clone(),
       workflow_call_progress_reporter: options.workflow_call_progress_reporter.clone(),
+      telemetry_reporter: options.telemetry_reporter.clone(),
+      telemetry_context: options.telemetry_context.clone(),
+      telemetry_admission_link_reporter: options.telemetry_admission_link_reporter.clone(),
+      telemetry_propagation: Arc::clone(&options.telemetry_propagation),
+      telemetry_sampling_ratio: Arc::clone(&options.telemetry_sampling_ratio),
       resolved_secrets: Arc::clone(&options.resolved_secrets),
       capability_registry: Arc::downgrade(&options.capability_registry),
       policy_execution_registry: options.policy_execution_registry(),
@@ -424,6 +434,11 @@ impl WorkflowCallExecutionConfig {
     options.schedule_progress_reporter = self.schedule_progress_reporter.clone();
     options.interval_progress_reporter = self.interval_progress_reporter.clone();
     options.workflow_call_progress_reporter = self.workflow_call_progress_reporter.clone();
+    options.telemetry_reporter = self.telemetry_reporter.clone();
+    options.telemetry_context = self.telemetry_context.clone();
+    options.telemetry_admission_link_reporter = self.telemetry_admission_link_reporter.clone();
+    options.telemetry_propagation = Arc::clone(&self.telemetry_propagation);
+    options.telemetry_sampling_ratio = Arc::clone(&self.telemetry_sampling_ratio);
     options.resolved_secrets = Arc::clone(&self.resolved_secrets);
     Ok(options)
   }
@@ -685,6 +700,26 @@ impl CapabilityHandler for ManagedWorkflowCallsHandler {
     let database_path = self.database_path.clone();
     let execution = self.execution.clone();
     let mode = self.mode;
+    let parent_trace_context = crate::W3cTraceContext {
+      trace_id: crate::trace_id_v1(&call.run_id),
+      span_id: crate::span_id_v1(
+        &call.run_id,
+        crate::TelemetrySignalKind::Attempt.as_str(),
+        &format!(
+          "{}:{}:{}",
+          call.node_id, call.attempt_number, call.invocation_id
+        ),
+      ),
+      sampled: crate::woml_trace_sampled(
+        &call.run_id,
+        *self
+          .execution
+          .as_ref()
+          .and_then(|execution| execution.telemetry_sampling_ratio.read().ok())
+          .as_deref()
+          .unwrap_or(&0.0),
+      ),
+    };
     Box::pin(async move {
       if cancellation.is_cancelled() {
         return Err(workflow_call_cancelled());
@@ -700,6 +735,27 @@ impl CapabilityHandler for ManagedWorkflowCallsHandler {
       let Some(execution) = execution else {
         return Ok(admission_result(&outcome));
       };
+      if execution
+        .telemetry_propagation
+        .load(std::sync::atomic::Ordering::Acquire)
+      {
+        if let (Some(reporter), Some(context)) = (
+          execution.telemetry_admission_link_reporter.as_ref(),
+          execution.telemetry_context.as_ref(),
+        ) {
+          reporter(crate::TelemetryAdmissionLinkV1 {
+            profile: crate::TELEMETRY_ADMISSION_LINK_PROFILE,
+            occurred_at: Utc::now(),
+            runtime_instance_id: context.runtime_instance_id.clone(),
+            deployment_id: context.deployment_id.clone(),
+            run_id: outcome.admission.child_run_id.clone(),
+            status: crate::TelemetryAdmissionLinkStatus::Linked,
+            trace_id: Some(parent_trace_context.trace_id),
+            span_id: Some(parent_trace_context.span_id),
+            sampled: Some(parent_trace_context.sampled),
+          });
+        }
+      }
       report_workflow_call_admitted(execution.workflow_call_progress_reporter.as_ref(), &outcome);
       match mode {
         WorkflowInvocationMode::Call => {

@@ -270,6 +270,11 @@ pub struct RuntimeExecutionOptions {
   pub workflow_call_progress_reporter: Option<WorkflowCallProgressReporter>,
   pub runtime_policy_progress_reporter: Option<RuntimePolicyProgressReporter>,
   pub operational_output_reporter: Option<crate::OperationalOutputReporter>,
+  pub telemetry_reporter: Option<crate::TelemetrySignalReporter>,
+  pub telemetry_context: Option<crate::TelemetrySignalContext>,
+  pub telemetry_admission_link_reporter: Option<crate::TelemetryAdmissionLinkReporter>,
+  pub telemetry_propagation: Arc<AtomicBool>,
+  pub telemetry_sampling_ratio: Arc<RwLock<f64>>,
   pub resolved_secrets: Arc<BTreeMap<String, String>>,
   pub(crate) signal_ingress_token: Option<String>,
   pub capability_registry: Arc<CapabilityRegistry>,
@@ -416,6 +421,14 @@ impl std::fmt::Debug for RuntimeExecutionOptions {
           .as_ref()
           .map(|_| "configured"),
       )
+      .field(
+        "telemetry_reporter",
+        &self.telemetry_reporter.as_ref().map(|_| "configured"),
+      )
+      .field(
+        "telemetry_context",
+        &self.telemetry_context.as_ref().map(|_| "configured"),
+      )
       .finish()
   }
 }
@@ -444,10 +457,16 @@ impl RuntimeExecutionOptions {
     });
     let capability_registry = Arc::new(CapabilityRegistry::default());
     let managed_storage_store = Arc::new(crate::ManagedStorageStore::default());
+    let telemetry_propagation = Arc::new(AtomicBool::new(false));
+    let telemetry_sampling_ratio = Arc::new(RwLock::new(0.0));
     capability_registry
-      .register(Arc::new(crate::ManagedHttpHandler::with_storage(
-        Arc::clone(&managed_storage_store),
-      )))
+      .register(Arc::new(
+        crate::ManagedHttpHandler::with_storage_and_propagation(
+          Arc::clone(&managed_storage_store),
+          Arc::clone(&telemetry_propagation),
+          Arc::clone(&telemetry_sampling_ratio),
+        ),
+      ))
       .expect("the production HTTP capability is registered exactly once");
     capability_registry
       .register(Arc::new(crate::ManagedTelegramHandler::default()))
@@ -504,6 +523,11 @@ impl RuntimeExecutionOptions {
       workflow_call_progress_reporter: None,
       runtime_policy_progress_reporter: None,
       operational_output_reporter: None,
+      telemetry_reporter: None,
+      telemetry_context: None,
+      telemetry_admission_link_reporter: None,
+      telemetry_propagation,
+      telemetry_sampling_ratio,
       resolved_secrets: Arc::new(BTreeMap::new()),
       signal_ingress_token: None,
       capability_registry,
@@ -544,6 +568,74 @@ impl RuntimeExecutionOptions {
   pub fn with_progress_reporter(mut self, reporter: ExecutionProgressReporter) -> Self {
     self.progress_reporter = Some(reporter);
     self
+  }
+
+  pub fn with_telemetry_reporter(
+    mut self,
+    context: crate::TelemetrySignalContext,
+    reporter: crate::TelemetrySignalReporter,
+  ) -> Self {
+    self.telemetry_context = Some(context);
+    self.telemetry_reporter = Some(reporter);
+    self
+  }
+
+  pub fn with_telemetry_propagation(
+    mut self,
+    enabled: bool,
+    sampling_ratio: f64,
+    reporter: Option<crate::TelemetryAdmissionLinkReporter>,
+  ) -> Self {
+    self.telemetry_propagation.store(enabled, Ordering::Release);
+    *self
+      .telemetry_sampling_ratio
+      .write()
+      .expect("telemetry sampling ratio lock") = sampling_ratio.clamp(0.0, 1.0);
+    self.telemetry_admission_link_reporter = reporter;
+    self
+  }
+
+  pub fn report_telemetry_admission_context(
+    &self,
+    run_id: &str,
+    context: crate::InboundTraceContext,
+    occurred_at: chrono::DateTime<chrono::Utc>,
+  ) {
+    if !self.telemetry_propagation.load(Ordering::Acquire) {
+      return;
+    }
+    let (Some(reporter), Some(signal_context)) = (
+      self.telemetry_admission_link_reporter.as_ref(),
+      self.telemetry_context.as_ref(),
+    ) else {
+      return;
+    };
+    let (status, trace_id, span_id, sampled) = match context {
+      crate::InboundTraceContext::Absent => return,
+      crate::InboundTraceContext::Invalid => (
+        crate::TelemetryAdmissionLinkStatus::Invalid,
+        None,
+        None,
+        None,
+      ),
+      crate::InboundTraceContext::Valid(context) => (
+        crate::TelemetryAdmissionLinkStatus::Linked,
+        Some(context.trace_id),
+        Some(context.span_id),
+        Some(context.sampled),
+      ),
+    };
+    reporter(crate::TelemetryAdmissionLinkV1 {
+      profile: crate::TELEMETRY_ADMISSION_LINK_PROFILE,
+      occurred_at,
+      runtime_instance_id: signal_context.runtime_instance_id.clone(),
+      deployment_id: signal_context.deployment_id.clone(),
+      run_id: run_id.to_string(),
+      status,
+      trace_id,
+      span_id,
+      sampled,
+    });
   }
 
   pub fn with_lifecycle_progress_reporter(mut self, reporter: LifecycleProgressReporter) -> Self {
@@ -2749,10 +2841,19 @@ async fn execute_with_engine<E: RuntimeDagEngine>(
 ) -> Result<WorkflowRuntimeOutcome, RuntimeExecutionError> {
   let mut span = crate::performance::PerformanceSpan::new("runtime", "runtime.run_engine");
   span.count("nodes", engine.workflow().graph.nodes.len());
-  let result = execute_with_engine_unprofiled(engine, trigger, options).await;
-  if let Ok(outcome) = &result {
-    span.run_id(runtime_outcome_run_id(outcome).to_string());
-    span.succeed();
+  let result = execute_with_engine_unprofiled(engine, trigger, options.clone()).await;
+  match &result {
+    Ok(outcome) => {
+      let run_id = runtime_outcome_run_id(outcome);
+      report_telemetry_history(engine, run_id, &options);
+      span.run_id(run_id.to_string());
+      span.succeed();
+    }
+    Err(error) => {
+      if let Some(events) = runtime_error_events(error) {
+        report_telemetry_events(&engine.workflow().workflow_id, events, &options);
+      }
+    }
   }
   result
 }
@@ -2999,11 +3100,54 @@ async fn resume_with_engine<E: RuntimeDagEngine>(
   span.run_id(run_id.to_string());
   span.count("nodes", engine.workflow().graph.nodes.len());
   let result = resume_with_engine_unprofiled(engine, run_id, options.clone()).await;
+  report_telemetry_history(engine, run_id, &options);
   settle_operational_run(engine, run_id, &options);
   if result.is_ok() {
     span.succeed();
   }
   result
+}
+
+fn report_telemetry_history<E: RuntimeDagEngine>(
+  engine: &E,
+  run_id: &str,
+  options: &RuntimeExecutionOptions,
+) {
+  if options.telemetry_reporter.is_none() || options.telemetry_context.is_none() {
+    return;
+  }
+  let Ok(events) = engine.events(run_id) else {
+    return;
+  };
+  report_telemetry_events(&engine.workflow().workflow_id, &events, options);
+}
+
+fn report_telemetry_events(
+  workflow_id: &str,
+  events: &[RunEvent],
+  options: &RuntimeExecutionOptions,
+) {
+  let (Some(reporter), Some(context)) = (
+    options.telemetry_reporter.as_ref(),
+    options.telemetry_context.as_ref(),
+  ) else {
+    return;
+  };
+  for signal in crate::project_telemetry_signals(events, workflow_id, context) {
+    reporter(signal);
+  }
+}
+
+fn runtime_error_events(error: &RuntimeExecutionError) -> Option<&[RunEvent]> {
+  match error {
+    RuntimeExecutionError::RunFailed(details) => Some(&details.events),
+    RuntimeExecutionError::BranchFailed(details) => Some(&details.events),
+    RuntimeExecutionError::ParallelFailed(details) => Some(&details.events),
+    RuntimeExecutionError::ApprovalFailed(details) => Some(&details.events),
+    RuntimeExecutionError::NotificationFailed(details) => Some(&details.events),
+    RuntimeExecutionError::RunCancelled(details) => Some(&details.events),
+    _ => None,
+  }
 }
 
 fn settle_operational_run<E: RuntimeDagEngine>(

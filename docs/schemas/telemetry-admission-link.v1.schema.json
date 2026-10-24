@@ -1,0 +1,39 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://woml.dev/schemas/telemetry-admission-link/v1",
+  "title": "WOML Telemetry Admission Link v1",
+  "x-status": "opentelemetry-export-ote4-frozen",
+  "description": "A transient, value-free W3C admission relationship that is never stored in the durable workflow database.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["profile", "occurredAt", "runtimeInstanceId", "deploymentId", "runId", "status"],
+  "properties": {
+    "profile": { "const": "woml.telemetry-admission-link/v1" },
+    "occurredAt": { "type": "string", "format": "date-time" },
+    "runtimeInstanceId": { "$ref": "#/$defs/id" },
+    "deploymentId": { "$ref": "#/$defs/id" },
+    "runId": { "$ref": "#/$defs/id" },
+    "status": { "enum": ["linked", "invalid"] },
+    "traceId": { "type": "string", "pattern": "^[0-9a-f]{32}$", "not": { "pattern": "^0+$" } },
+    "spanId": { "type": "string", "pattern": "^[0-9a-f]{16}$", "not": { "pattern": "^0+$" } },
+    "sampled": { "type": "boolean" }
+  },
+  "allOf": [
+    {
+      "if": { "properties": { "status": { "const": "linked" } } },
+      "then": { "required": ["traceId", "spanId", "sampled"] },
+      "else": {
+        "not": {
+          "anyOf": [
+            { "required": ["traceId"] },
+            { "required": ["spanId"] },
+            { "required": ["sampled"] }
+          ]
+        }
+      }
+    }
+  ],
+  "$defs": {
+    "id": { "type": "string", "minLength": 1, "maxLength": 320, "pattern": "^[^\\u0000-\\u001f\\u007f]+$" }
+  }
+}

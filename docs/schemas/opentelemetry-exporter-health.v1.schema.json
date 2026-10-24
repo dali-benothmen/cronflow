@@ -1,0 +1,27 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://woml.dev/schemas/opentelemetry-exporter-health/v1",
+  "title": "WOML OpenTelemetry Exporter Health v1",
+  "x-status": "opentelemetry-export-ote0-frozen",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["profile", "state", "enabled", "protocol", "signals", "queue", "dropped"],
+  "properties": {
+    "profile": { "const": "woml.opentelemetry-exporter-health/v1" },
+    "state": { "enum": ["disabled", "starting", "healthy", "degraded", "flushing", "stopped"] },
+    "enabled": { "type": "boolean" },
+    "protocol": { "const": "http/protobuf" },
+    "signals": { "type": "array", "uniqueItems": true, "maxItems": 3, "items": { "enum": ["traces", "metrics", "logs"] } },
+    "queue": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["size", "capacity"],
+      "properties": {
+        "size": { "type": "integer", "minimum": 0, "maximum": 65536 },
+        "capacity": { "type": "integer", "minimum": 128, "maximum": 65536 }
+      }
+    },
+    "dropped": { "type": "integer", "minimum": 0 },
+    "lastErrorCode": { "type": "string", "pattern": "^WOML_[A-Z0-9_]+$", "maxLength": 128 }
+  }
+}

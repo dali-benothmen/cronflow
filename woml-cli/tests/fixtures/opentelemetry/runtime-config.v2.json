@@ -1,0 +1,23 @@
+{
+  "schemaVersion": 2,
+  "deploymentName": "checkout-production",
+  "statePath": "./state/workflow-history.sqlite",
+  "observability": {
+    "health": true,
+    "metrics": true,
+    "openTelemetry": {
+      "enabled": true,
+      "protocol": "http/protobuf",
+      "traces": true,
+      "metrics": true,
+      "logs": false,
+      "samplingRatio": 0.25,
+      "exportIntervalMs": 10000,
+      "exportTimeoutMs": 5000,
+      "shutdownTimeoutMs": 5000,
+      "maxQueueSize": 2048,
+      "maxExportBatchSize": 512,
+      "propagation": true
+    }
+  }
+}

@@ -23,6 +23,10 @@ import { profileAsync, profileSync } from './performance-profiler';
 import type { ProcessRuntimeAuthorityV1 } from './process-policy';
 import type { ArtifactRuntimeAuthorityV1 } from './artifact-policy';
 import type { InfrastructurePolicyRuntimeAuthorityV1 } from './infrastructure-policy';
+import type {
+  TelemetryAdmissionLinkV1,
+  TelemetrySignalV1,
+} from './opentelemetry-signal';
 import {
   decodeOperationalObservationV1,
   decodeOperationalPageV1,
@@ -364,6 +368,13 @@ export interface WebhookRuntimeOptions extends RustExecutorOptions {
   readonly startSuspended?: boolean;
   /** Dedicated bearer token for the optional public external-signal endpoint. */
   readonly signalIngressToken?: string;
+  readonly telemetryEnabled?: boolean;
+  readonly telemetryPropagation?: boolean;
+  readonly telemetrySamplingRatio?: number;
+  readonly decodeTelemetrySignal?: (json: string) => TelemetrySignalV1;
+  readonly decodeTelemetryAdmissionLink?: (
+    json: string
+  ) => TelemetryAdmissionLinkV1;
   readonly onTriggerProgress?: (progress: TriggerProgressV1) => void;
   readonly onScheduleProgress?: (progress: ScheduleProgressV1) => void;
   readonly onIntervalProgress?: (progress: IntervalProgressV1) => void;
@@ -372,6 +383,8 @@ export interface WebhookRuntimeOptions extends RustExecutorOptions {
     progress: RuntimePolicyProgressV1
   ) => void;
   readonly onRuntimeLifecycle?: (progress: RuntimeInstanceV1) => void;
+  readonly onTelemetrySignal?: (signal: TelemetrySignalV1) => void;
+  readonly onTelemetryAdmissionLink?: (link: TelemetryAdmissionLinkV1) => void;
 }
 
 export interface ExternalSignalAdmissionRequestV1 {
@@ -1166,6 +1179,9 @@ interface NativeCore {
     startSuspended: boolean,
     runtimeCapabilitiesJson: string | undefined,
     signalIngressToken: string | undefined,
+    telemetryEnabled: boolean,
+    telemetryPropagation: boolean,
+    telemetrySamplingRatio: number,
     progressCallback: (message: string) => void
   ) => Promise<string>;
   readonly activateWomlWebhookRuntime: (runtimeId: string) => Promise<void>;
@@ -3261,6 +3277,9 @@ export async function startWebhookRuntimeWithRust(
             ? undefined
             : JSON.stringify(options.runtimeCapabilities),
           options.signalIngressToken,
+          options.telemetryEnabled ?? false,
+          options.telemetryPropagation ?? false,
+          options.telemetrySamplingRatio ?? 0,
           message => {
             const decoded: unknown = JSON.parse(message);
             if (
@@ -3270,6 +3289,31 @@ export async function startWebhookRuntimeWithRust(
               options.onOperationalOutput?.(
                 parseOperationalOutputWakeup(message)
               );
+              return;
+            }
+            if (
+              record(decoded) &&
+              decoded.profile === 'woml.telemetry-signal/v1'
+            ) {
+              try {
+                const signal = options.decodeTelemetrySignal?.(message);
+                if (signal !== undefined) options.onTelemetrySignal?.(signal);
+              } catch {
+                // Telemetry is an optional, fail-isolated sink. A malformed
+                // callback record is rejected without affecting execution.
+              }
+              return;
+            }
+            if (
+              record(decoded) &&
+              decoded.profile === 'woml.telemetry-admission-link/v1'
+            ) {
+              try {
+                const link = options.decodeTelemetryAdmissionLink?.(message);
+                if (link !== undefined) options.onTelemetryAdmissionLink?.(link);
+              } catch {
+                // Invalid optional context never affects workflow execution.
+              }
               return;
             }
             if (

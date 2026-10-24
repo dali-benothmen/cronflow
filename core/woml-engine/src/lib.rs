@@ -42,6 +42,8 @@ pub mod schedule;
 pub mod storage;
 pub mod store;
 pub mod telegram;
+pub mod telemetry;
+pub mod telemetry_propagation;
 pub mod webhook;
 pub mod whatsapp;
 pub mod workflow_calls;
@@ -326,6 +328,16 @@ pub use schedule::{
 pub use storage::{ManagedStorageHandler, ManagedStorageStore, StorageObjectReference};
 pub use store::{EventStoreError, InMemoryEventStore};
 pub use telegram::ManagedTelegramHandler;
+pub use telemetry::{
+  bounded_telemetry_reporter, project_telemetry_signals, span_id_v1, trace_id_v1,
+  TelemetryAttributeValue, TelemetrySignalContext, TelemetrySignalKind, TelemetrySignalReporter,
+  TelemetrySignalStatus, TelemetrySignalV1, TELEMETRY_SIGNAL_PROFILE,
+};
+pub use telemetry_propagation::{
+  parse_w3c_trace_context, woml_trace_sampled, woml_traceparent, InboundTraceContext,
+  TelemetryAdmissionLinkReporter, TelemetryAdmissionLinkStatus, TelemetryAdmissionLinkV1,
+  W3cTraceContext, MAX_TRACESTATE_BYTES, TELEMETRY_ADMISSION_LINK_PROFILE,
+};
 pub use webhook::{
   ExternalTriggerAdmissionCommand, ExternalTriggerAdmissionReceiver, TriggerProgress,
   TriggerProgressReporter, WebhookDefinitionRegistration, WebhookRuntimeError, WomlWebhookServer,

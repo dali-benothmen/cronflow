@@ -2,7 +2,8 @@
 
 use std::{
   collections::HashMap,
-  sync::{Arc, Mutex},
+  sync::atomic::{AtomicBool, Ordering},
+  sync::{Arc, Mutex, RwLock},
   time::Duration,
 };
 
@@ -99,6 +100,8 @@ struct ManagedHttpRequest {
 pub struct ManagedHttpHandler {
   clients: Mutex<HashMap<(RedirectMode, usize), Client>>,
   storage: Option<Arc<crate::ManagedStorageStore>>,
+  telemetry_propagation: Arc<AtomicBool>,
+  telemetry_sampling_ratio: Arc<RwLock<f64>>,
 }
 
 impl std::fmt::Debug for ManagedHttpHandler {
@@ -112,6 +115,8 @@ impl Default for ManagedHttpHandler {
     Self {
       clients: Mutex::new(HashMap::new()),
       storage: None,
+      telemetry_propagation: Arc::new(AtomicBool::new(false)),
+      telemetry_sampling_ratio: Arc::new(RwLock::new(0.0)),
     }
   }
 }
@@ -121,6 +126,21 @@ impl ManagedHttpHandler {
     Self {
       clients: Mutex::new(HashMap::new()),
       storage: Some(storage),
+      telemetry_propagation: Arc::new(AtomicBool::new(false)),
+      telemetry_sampling_ratio: Arc::new(RwLock::new(0.0)),
+    }
+  }
+
+  pub fn with_storage_and_propagation(
+    storage: Arc<crate::ManagedStorageStore>,
+    telemetry_propagation: Arc<AtomicBool>,
+    telemetry_sampling_ratio: Arc<RwLock<f64>>,
+  ) -> Self {
+    Self {
+      clients: Mutex::new(HashMap::new()),
+      storage: Some(storage),
+      telemetry_propagation,
+      telemetry_sampling_ratio,
     }
   }
 
@@ -234,9 +254,51 @@ impl CapabilityHandler for ManagedHttpHandler {
       Err(error) => return Box::pin(async move { Err(error) }),
     };
     let storage = self.storage.clone();
-    Box::pin(
-      async move { execute_request(client, request, json_body, cancellation, storage).await },
-    )
+    Box::pin(async move {
+      execute_request(client, request, json_body, cancellation, storage, None).await
+    })
+  }
+
+  fn execute_request_scoped(
+    &self,
+    call: &CapabilityCallRequest,
+    _workflow_scope: Option<String>,
+    cancellation: CapabilityCancellationToken,
+  ) -> BoxFuture<'static, Result<Value, CapabilityFailure>> {
+    let request = match parse_request(&call.input) {
+      Ok(request) => request,
+      Err(error) => return Box::pin(async move { Err(error) }),
+    };
+    let json_body = call.input.get("json").cloned();
+    let client = match self.client(request.redirect, request.maximum_redirects) {
+      Ok(client) => client,
+      Err(error) => return Box::pin(async move { Err(error) }),
+    };
+    let storage = self.storage.clone();
+    let propagation = self.telemetry_propagation.load(Ordering::Acquire).then(|| {
+      let ratio = *self
+        .telemetry_sampling_ratio
+        .read()
+        .expect("telemetry sampling ratio lock");
+      crate::woml_traceparent(
+        &call.run_id,
+        &call.node_id,
+        call.attempt_number,
+        &call.invocation_id,
+        crate::woml_trace_sampled(&call.run_id, ratio),
+      )
+    });
+    Box::pin(async move {
+      execute_request(
+        client,
+        request,
+        json_body,
+        cancellation,
+        storage,
+        propagation,
+      )
+      .await
+    })
   }
 }
 
@@ -343,6 +405,7 @@ async fn execute_request(
   json_body: Option<Value>,
   cancellation: CapabilityCancellationToken,
   storage: Option<Arc<crate::ManagedStorageStore>>,
+  traceparent: Option<String>,
 ) -> Result<Value, CapabilityFailure> {
   let method = request.method.parse::<Method>().expect("validated method");
   let read = is_read_method(&request.method);
@@ -372,6 +435,7 @@ async fn execute_request(
       HeaderValue::from_str(value).expect("validated header value"),
     );
   }
+  apply_telemetry_propagation(&mut headers, traceparent.as_deref());
   if let Some(idempotency) = &request.idempotency {
     headers.insert(
       HeaderName::from_bytes(idempotency.header.as_bytes()).expect("validated idempotency header"),
@@ -592,6 +656,19 @@ fn validate_headers(headers: &HashMap<String, String>) -> Result<(), CapabilityF
   Ok(())
 }
 
+fn apply_telemetry_propagation(headers: &mut HeaderMap, traceparent: Option<&str>) {
+  let Some(traceparent) = traceparent else {
+    return;
+  };
+  headers.remove("traceparent");
+  headers.remove("tracestate");
+  headers.remove("baggage");
+  headers.insert(
+    HeaderName::from_static("traceparent"),
+    HeaderValue::from_str(traceparent).expect("WOML traceparent is valid"),
+  );
+}
+
 fn validate_query(query: Option<&HashMap<String, Value>>) -> Result<(), CapabilityFailure> {
   let Some(query) = query else { return Ok(()) };
   if query.len() > 128 {
@@ -690,5 +767,41 @@ fn failure(
     retryable,
     ambiguous,
     details: None,
+  }
+}
+
+#[cfg(test)]
+mod tests {
+  use super::*;
+
+  #[test]
+  fn managed_propagation_replaces_forged_context_and_denies_baggage() {
+    let mut headers = HeaderMap::new();
+    headers.insert("traceparent", HeaderValue::from_static("forged"));
+    headers.insert("tracestate", HeaderValue::from_static("secret=value"));
+    headers.insert("baggage", HeaderValue::from_static("customer=42"));
+    let owned = crate::woml_traceparent("run_42", "request", 1, "inv_1", true);
+    apply_telemetry_propagation(&mut headers, Some(&owned));
+    assert_eq!(
+      headers
+        .get("traceparent")
+        .and_then(|value| value.to_str().ok()),
+      Some(owned.as_str())
+    );
+    assert!(!headers.contains_key("tracestate"));
+    assert!(!headers.contains_key("baggage"));
+  }
+
+  #[test]
+  fn disabled_propagation_preserves_author_headers() {
+    let mut headers = HeaderMap::new();
+    headers.insert("traceparent", HeaderValue::from_static("author-value"));
+    apply_telemetry_propagation(&mut headers, None);
+    assert_eq!(
+      headers
+        .get("traceparent")
+        .and_then(|value| value.to_str().ok()),
+      Some("author-value")
+    );
   }
 }

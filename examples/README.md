@@ -110,6 +110,10 @@ as a production-policy template after replacing its executable paths. Read the
 
 ## 6. Operate a complete deployment
 
+To connect WOML to an OpenTelemetry Collector and inspect the same run in
+Jaeger, Prometheus, collector logs, and `woml inspect`, use the copy-ready
+[`openTelemetry/`](openTelemetry/) stack and workflow family.
+
 [`production/complete/`](production/complete/) combines workflows, a local
 module, runtime configuration, workflow calls, webhook/event ingress, schedule,
 runtime policy, and operator instructions. Deployment assets under

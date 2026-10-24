@@ -11,6 +11,7 @@ import {
   consumeOperationsStream,
   type OperationsStreamEventV1,
 } from './operations-stream';
+import type { OpenTelemetryInspectorView } from './opentelemetry-runtime';
 
 export const inspectUsage =
   'Usage: woml inspect [--state <path>] [--no-color]';
@@ -88,6 +89,7 @@ export interface InspectorSnapshotV1 {
   readonly runs: readonly InspectorRunV1[];
   readonly components: readonly InspectorComponentV1[];
   readonly alerts: readonly InspectorAlertV1[];
+  readonly openTelemetryView?: OpenTelemetryInspectorView;
 }
 
 export type InspectorStreamEventV1 = OperationsStreamEventV1;
@@ -358,6 +360,10 @@ function runtimeLines(snapshot: InspectorSnapshotV1) {
     lines.push('No runtime components reported.');
     colors.push('dim');
   }
+  if (snapshot.openTelemetryView !== undefined) {
+    lines.push(...snapshot.openTelemetryView.lines);
+    colors.push(...snapshot.openTelemetryView.colors);
+  }
   lines.push('', `Runtime ID: ${snapshot.runtimeInstanceId}`, `Captured: ${snapshot.capturedAt}`);
   colors.push(undefined, 'dim', 'dim');
   return { lines, colors };
@@ -495,7 +501,30 @@ async function fetchSnapshot(descriptor: RuntimeDescriptorV1, fetcher: typeof fe
     headers: { authorization: `Bearer ${descriptor.capability}` },
   });
   if (!response.ok) throw new Error(`Runtime snapshot request failed with HTTP ${response.status}.`);
-  return decodeSnapshot(await response.json());
+  const snapshot = decodeSnapshot(await response.json());
+  try {
+    const healthResponse = await fetcher(`${descriptor.adminUrl}/v1/health`, {
+      headers: { authorization: `Bearer ${descriptor.capability}` },
+    });
+    if (!healthResponse.ok) return snapshot;
+    const runtimeModulePath = new URL(
+      `opentelemetry-runtime.${import.meta.url.endsWith('.ts') ? 'ts' : 'js'}`,
+      import.meta.url
+    ).href;
+    const { openTelemetryInspectorView } = (await import(runtimeModulePath)) as {
+      readonly openTelemetryInspectorView: (
+        value: unknown
+      ) => OpenTelemetryInspectorView | undefined;
+    };
+    const openTelemetryView = openTelemetryInspectorView(
+      await healthResponse.json()
+    );
+    return openTelemetryView === undefined
+      ? snapshot
+      : { ...snapshot, openTelemetryView };
+  } catch {
+    return snapshot;
+  }
 }
 
 export async function runRuntimeInspector(options: {

@@ -18,3 +18,10 @@ their respective open-source licenses. The exact dependency graph is frozen by
 `woml-cli/bun.lock`, `woml/bun.lock`, and `core/Cargo.lock`. The reviewed
 license families and release disposition are recorded in
 https://github.com/dali-benothmen/woml/blob/master/docs/release/v1.0.0-dependency-review.md.
+
+## OpenTelemetry
+
+The optional OpenTelemetry export bundles the official `@opentelemetry/api`,
+`@opentelemetry/resources`, `@opentelemetry/sdk-trace`,
+`@opentelemetry/sdk-metrics`, `@opentelemetry/sdk-logs`, and OTLP protobuf
+exporter packages. These components are provided under the Apache License 2.0.

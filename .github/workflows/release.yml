@@ -84,6 +84,8 @@ jobs:
           bun scripts/verify-infrastructure-policy-release.ts
           bun run test:streaming-output-contracts
           bun scripts/verify-streaming-output-release.ts
+          bun run test:opentelemetry
+          bun scripts/verify-opentelemetry-release.ts
       - name: Run the final source and dependency security review
         run: |
           bun run test:final-review

@@ -25,6 +25,8 @@
     "dist/notification-provider-host.js",
     "dist/custom-notification-provider-host.js",
     "dist/custom-notification-provider-worker.js",
+    "dist/opentelemetry-runtime.js",
+    "dist/opentelemetry-sdk.js",
     "slack/README.md",
     "slack/manifest.json",
     "README.md",
@@ -39,7 +41,7 @@
   },
   "overrides": {
     "ajv": "8.20.0",
-    "fast-uri": "3.1.8"
+    "fast-uri": "3.1.9"
   },
   "scripts": {
     "build": "bun run build:native && bun run build:js",
@@ -106,6 +108,10 @@
     "benchmark:streaming-output": "cargo test --config profile.dev.debug=0 --config profile.dev.incremental=false -j 1 --locked --manifest-path ../core/Cargo.toml -p woml-engine --test operational_output_store publication_budgets_cover_activation_append_replay_progress_concurrency_and_prune -- --exact --test-threads=1 --nocapture",
     "test:streaming-output-package": "bun test tests/streaming-output-packaged-release.test.ts --max-concurrency=1",
     "test:streaming-output-release": "bun run build && bun run test:streaming-output-contracts && bun run test:streaming-output-hardening && bun run benchmark:streaming-output && bun scripts/verify-streaming-output-release.ts && bun run build:release && bun run test:streaming-output-package && bun run test:documentation && bun ../woml-vscode/scripts/check-extension.ts && bun run verify:native-exports && bun run typecheck",
+    "test:opentelemetry-foundation": "bun test tests/opentelemetry-foundation.test.ts tests/opentelemetry-signal.test.ts tests/observability.test.ts tests/runtime-inspector.test.ts --max-concurrency=1 && cargo test --config profile.dev.debug=0 --config profile.dev.incremental=false -j 1 --locked --manifest-path ../core/Cargo.toml -p woml-engine --lib telemetry -- --test-threads=1 && cargo test --config profile.dev.debug=0 --config profile.dev.incremental=false -j 1 --locked --manifest-path ../core/Cargo.toml -p woml-engine --lib http::tests -- --test-threads=1 && bun run build:js && bun run typecheck",
+    "benchmark:opentelemetry": "bun run build:js && bun scripts/benchmark-opentelemetry.ts",
+    "test:opentelemetry-package": "bun test tests/opentelemetry-packaged-release.test.ts --max-concurrency=1",
+    "test:opentelemetry": "bun run build:js && bun test tests/opentelemetry-foundation.test.ts tests/opentelemetry-signal.test.ts tests/opentelemetry-release.test.ts tests/observability.test.ts tests/runtime-inspector.test.ts tests/production-runtime-contracts.test.ts --max-concurrency=1 && bun scripts/benchmark-opentelemetry.ts && bun scripts/verify-opentelemetry-release.ts && bun run typecheck",
     "test:locks-and-leases-composition": "bun run build:native && bun run build:js && bun test tests/locks-and-leases-check.test.ts --max-concurrency=1 && cargo test --config profile.dev.debug=0 --config profile.dev.incremental=false -j 1 --locked --manifest-path ../core/Cargo.toml -p woml-engine --test locks_and_leases -- --test-threads=1",
     "test:locks-and-leases-hardening": "cargo test --config profile.dev.debug=0 --config profile.dev.incremental=false -j 1 --locked --manifest-path ../core/Cargo.toml -p woml-engine --test locks_and_leases --test backup_restore --test retention -- --test-threads=1",
     "benchmark:locks-and-leases": "cargo test --config profile.dev.debug=0 --config profile.dev.incremental=false -j 1 --locked --manifest-path ../core/Cargo.toml -p woml-engine --test locks_and_leases ten_thousand_due_waiters_are_recovered_in_bounded_batches -- --exact --test-threads=1 --nocapture",
@@ -248,10 +254,18 @@
     "typecheck": "tsc --noEmit"
   },
   "devDependencies": {
+    "@opentelemetry/api": "1.10.0",
+    "@opentelemetry/exporter-logs-otlp-proto": "0.300.0",
+    "@opentelemetry/exporter-metrics-otlp-proto": "0.300.0",
+    "@opentelemetry/exporter-trace-otlp-proto": "0.300.0",
+    "@opentelemetry/resources": "3.0.0",
+    "@opentelemetry/sdk-logs": "3.0.0",
+    "@opentelemetry/sdk-metrics": "3.0.0",
+    "@opentelemetry/sdk-trace": "3.0.0",
     "@types/bun": "1.3.14",
+    "@woml/compiler": "file:../woml",
     "ajv": "8.20.0",
     "ajv-formats": "3.0.1",
-    "typescript": "7.0.2",
-    "@woml/compiler": "file:../woml"
+    "typescript": "7.0.2"
   }
 }

@@ -1,0 +1,125 @@
+{
+  "resolvedConfiguration": {
+    "profile": "woml.opentelemetry-configuration/v1",
+    "enabled": true,
+    "protocol": "http/protobuf",
+    "serviceName": "checkout-runtime",
+    "resourceAttributes": {
+      "deployment.environment.name": "production",
+      "service.namespace": "commerce"
+    },
+    "signals": { "traces": true, "metrics": true, "logs": false },
+    "endpoints": {
+      "traces": "https://collector.example.test/v1/traces",
+      "metrics": "https://collector.example.test/v1/metrics",
+      "logs": "https://collector.example.test/v1/logs"
+    },
+    "headerNames": {
+      "common": ["authorization"],
+      "traces": [],
+      "metrics": [],
+      "logs": []
+    },
+    "sampler": { "name": "parentbased_traceidratio", "ratio": 0.25 },
+    "exportIntervalMs": 10000,
+    "exportTimeoutMs": 5000,
+    "shutdownTimeoutMs": 5000,
+    "maxQueueSize": 2048,
+    "maxExportBatchSize": 512,
+    "propagation": true,
+    "sources": {
+      "enabled": "environment",
+      "serviceName": "environment",
+      "resourceAttributes": "environment",
+      "traces": "default",
+      "metrics": "default",
+      "logs": "default",
+      "sampler": "config",
+      "endpoints": {
+        "traces": "environment",
+        "metrics": "environment",
+        "logs": "environment"
+      }
+    }
+  },
+  "health": {
+    "profile": "woml.opentelemetry-exporter-health/v1",
+    "state": "healthy",
+    "enabled": true,
+    "protocol": "http/protobuf",
+    "signals": ["traces", "metrics"],
+    "queue": { "size": 0, "capacity": 2048 },
+    "dropped": 0
+  },
+  "signal": {
+    "profile": "woml.telemetry-signal/v1",
+    "signalId": "telemetry_run_01HXTRACE_settled",
+    "kind": "attempt",
+    "occurredAt": "2026-10-23T12:00:00.125Z",
+    "startedAt": "2026-10-23T12:00:00.000Z",
+    "endedAt": "2026-10-23T12:00:00.125Z",
+    "runtimeInstanceId": "runtime_01HX",
+    "deploymentId": "deployment_01HX",
+    "workflowId": "checkout",
+    "runId": "run_01HXTRACE",
+    "nodeId": "prepare",
+    "attempt": 1,
+    "invocationId": "inv_01",
+    "status": "succeeded",
+    "durationMs": 125,
+    "attributes": {
+      "handler.category": "runtime.script",
+      "node.kind": "step",
+      "retry.scheduled": false
+    }
+  },
+  "traceIdentities": {
+    "algorithm": "sha256-prefix-v1",
+    "runId": "run_01HXTRACE",
+    "traceId": "71bbd5822afe17d9d00bf8eaa62854b3",
+    "runSpanId": "0868430ecec5cefe",
+    "attemptSpanId": "8a857c39a28e38ba"
+  },
+  "attributePolicy": {
+    "spanAttributeCountMax": 32,
+    "spanAttributeValueCharactersMax": 256,
+    "spanEventCountMax": 16,
+    "metricDimensions": ["durable.status", "trigger.type", "handler.category", "capability.category", "corrective.phase", "error.family"],
+    "deniedClasses": ["workflow.value", "secret", "source", "artifact.content", "approval.content", "process.argument", "process.environment", "process.output", "http.body", "http.sensitive_header", "database.statement", "exception.message", "exception.stack", "author.label"]
+  },
+  "mapping": {
+    "run": "woml.run",
+    "attempt": "woml.step",
+    "retry": "woml.retry.wait",
+    "wait": "woml.wait",
+    "approval": "woml.approval",
+    "lock": "woml.lock",
+    "capability": "woml.capability",
+    "workflowCall": "woml.workflow.call",
+    "compensation": "woml.compensation",
+    "cleanup": "woml.cleanup",
+    "recovery": "woml.recovery"
+  },
+  "performanceBudgets": {
+    "baseline": {
+      "cliBytes": 1096988,
+      "cliMeasurement": "master@7819469ee49d90c90df31187b9ab036b093c1ae8+fast-uri@3.1.9-clean-install",
+      "coldActivationMedianMs": 551.08,
+      "shortRunMedianMs": 66.95
+    },
+    "disabled": {
+      "activationRegressionPercentMax": 2,
+      "activationRegressionMsMax": 5,
+      "shortRunRegressionPercentMax": 2,
+      "shortRunRegressionMsMax": 2,
+      "rssBytesMax": 2097152,
+      "timers": 0,
+      "sockets": 0
+    },
+    "packaging": {
+      "mainBundleIncreaseBytesMax": 20480,
+      "sdkBundleBytesMax": 2621440,
+      "installedIncreaseBytesMax": 3145728
+    }
+  }
+}

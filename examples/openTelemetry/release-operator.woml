@@ -1,0 +1,106 @@
+<woml>
+  <workflow id="observed-release" name="Observed production release" description="Demonstrates process, HTTP, approval, external signal, child workflow, compensation, and cleanup telemetry." version="1.0.0">
+    <triggers><manual id="start" /></triggers>
+    <steps>
+      <step id="releaseIdentity" name="Create release identity">
+        <script>
+          return { releaseId: context.payload.releaseId ?? "release-demo" };
+        </script>
+      </step>
+
+      <saga id="prepareRelease" name="Prepare release">
+        <step id="inspectRepository" name="Inspect repository">
+          <script>
+            return await services.process.run({
+              executable: "git",
+              args: ["status", "--short"],
+              timeout: "30s",
+              output: { stdout: "capture", stderr: "capture", maxBytes: 32768 }
+            }, { name: "git-status" });
+          </script>
+        </step>
+        <step id="reserveCandidate" name="Reserve release candidate">
+          <script>
+            return { reservationId: `reservation-${context.steps.releaseIdentity.releaseId}` };
+          </script>
+          <compensate retry="3">
+            <script>
+              // Release the candidate reservation if a later preparation effect fails.
+              return { released: context.steps.reserveCandidate.reservationId };
+            </script>
+          </compensate>
+        </step>
+        <step id="checkDependency" name="Check deployment dependency">
+          <script>
+            return await services.http.request({
+              method: "GET",
+              url: "https://status.example.test/release-readiness"
+            }, { name: "release-readiness" });
+          </script>
+        </step>
+        <cleanup>
+          <step id="removeScratchState" name="Remove scratch state">
+            <script>
+              // Remove temporary local files whether preparation succeeds or fails.
+              return { removed: true };
+            </script>
+          </step>
+        </cleanup>
+      </saga>
+
+      <step id="review" name="Build release review">
+        <script>
+          return {
+            review: {
+              title: `Release ${context.steps.releaseIdentity.releaseId}`,
+              summary: "Approve the prepared candidate before deployment begins.",
+              risk: "medium",
+              facts: [
+                { label: "Repository check", value: "completed" },
+                { label: "Dependency check", value: "completed" }
+              ],
+              changes: [
+                { action: "update", target: "production application", summary: "Deploy the reviewed release candidate." }
+              ],
+              checks: [{ name: "Preparation", status: "passed" }],
+              artifacts: []
+            }
+          };
+        </script>
+      </step>
+
+      <approval id="approveRelease" name="Approve release" review="{{context.steps.review.review}}" approvals="1" required-roles="release-manager" timeout="30m" on-timeout="reject">
+        <when-approved>
+          <step id="approved"><script>return { approved: true };</script></step>
+        </when-approved>
+        <when-rejected>
+          <step id="rejected"><script>throw new Error("release review rejected");</script></step>
+        </when-rejected>
+      </approval>
+
+      <wait-for id="deploymentResult" name="Wait for deployment callback" correlation="{{context.steps.releaseIdentity.releaseId}}" timeout="1h" on-timeout="fail">
+        <accept signal="release.deployed">
+          <schema>{ "type": "object", "required": ["environment"], "properties": { "environment": { "const": "production" } }, "additionalProperties": false }</schema>
+        </accept>
+      </wait-for>
+
+      <step id="verifyChild" name="Verify through child workflow">
+        <script>
+          return await services.workflows.call("observed-release-health", {
+            releaseId: context.steps.releaseIdentity.releaseId
+          });
+        </script>
+      </step>
+
+      <step id="summary" name="Summarize release">
+        <script>
+          return {
+            releaseId: context.steps.releaseIdentity.releaseId,
+            deployed: context.steps.deploymentResult.payload.environment,
+            healthy: context.steps.verifyChild.healthy
+          };
+        </script>
+      </step>
+    </steps>
+  </workflow>
+</woml>

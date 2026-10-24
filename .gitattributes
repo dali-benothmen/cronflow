@@ -1,0 +1,3 @@
+# Prometheus exposition fixtures are compared byte-for-byte with runtime output,
+# which intentionally uses LF on every supported platform.
+*.prom text eol=lf

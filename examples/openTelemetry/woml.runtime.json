@@ -1,0 +1,28 @@
+{
+  "schemaVersion": 2,
+  "deploymentName": "observed-release",
+  "statePath": "./.woml/state.sqlite",
+  "public": { "host": "127.0.0.1", "port": 3000 },
+  "admin": { "host": "127.0.0.1", "port": 3001 },
+  "logging": { "format": "json", "level": "info", "directory": "./.woml/logs" },
+  "workers": 2,
+  "shutdownTimeoutMs": 10000,
+  "observability": {
+    "health": true,
+    "metrics": true,
+    "openTelemetry": {
+      "enabled": true,
+      "protocol": "http/protobuf",
+      "traces": true,
+      "metrics": true,
+      "logs": true,
+      "samplingRatio": 1,
+      "exportIntervalMs": 5000,
+      "exportTimeoutMs": 2000,
+      "shutdownTimeoutMs": 5000,
+      "maxQueueSize": 2048,
+      "maxExportBatchSize": 512,
+      "propagation": true
+    }
+  }
+}

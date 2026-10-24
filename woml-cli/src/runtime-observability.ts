@@ -5,6 +5,7 @@ import type {
   RustRuntimeObservationV1,
 } from './rust-executor';
 import type { OperationalOutputObservationV1 } from './operational-output';
+import type { OpenTelemetryExporterHealthV2 } from './opentelemetry-runtime';
 
 export type RuntimeLifecycle =
   | 'starting'
@@ -77,8 +78,23 @@ export interface RuntimeObservabilitySurface {
   snapshot(): Promise<unknown>;
   metrics(): Promise<readonly unknown[]>;
   prometheusMetrics(): Promise<string>;
+  recordTelemetryObservation(observation: RuntimeTelemetryObservation): void;
   stream(afterSequence?: number): Response;
   closeStreams(): void;
+}
+
+export interface RuntimeTelemetryObservation {
+  readonly signalId: string;
+  readonly metrics: readonly {
+    readonly identity: string;
+    readonly name: string;
+    readonly instrument: 'counter' | 'histogram';
+    readonly value: number;
+  }[];
+  readonly gauges: readonly {
+    readonly name: string;
+    readonly value: number;
+  }[];
 }
 
 type RuntimeComponentKind =
@@ -204,6 +220,20 @@ export class RuntimeObservability implements RuntimeObservabilitySurface {
   readonly #currentNodes = new Map<string, string>();
   readonly #parentRuns = new Map<string, string>();
   readonly #forEachProgress = new Map<string, ObservedForEachProgress>();
+  readonly #telemetryMetricSeries = new Map<
+    string,
+    {
+      name: string;
+      instrument: 'counter' | 'histogram';
+      sum: number;
+      count: number;
+    }
+  >();
+  #telemetryActive: RuntimeTelemetryObservation['gauges'] = [];
+  readonly #telemetrySignalIds = new Set<string>();
+  #openTelemetryHealth?: OpenTelemetryExporterHealthV2;
+  #openTelemetryComponentIdentity?: string;
+  #telemetryObserved = false;
   #nextSubscriberId = 1;
   #sequence = 0;
   #lifecycle: RuntimeLifecycle = 'starting';
@@ -398,6 +428,82 @@ export class RuntimeObservability implements RuntimeObservabilitySurface {
     );
   }
 
+  recordTelemetryObservation(observation: RuntimeTelemetryObservation): void {
+    if (this.#telemetrySignalIds.has(observation.signalId)) return;
+    while (this.#telemetrySignalIds.size >= 10_000) {
+      const oldest = this.#telemetrySignalIds.values().next().value;
+      if (oldest === undefined) break;
+      this.#telemetrySignalIds.delete(oldest);
+    }
+    this.#telemetrySignalIds.add(observation.signalId);
+    this.#telemetryObserved = true;
+    this.#telemetryActive = observation.gauges;
+    for (const metric of observation.metrics) {
+      const existing = this.#telemetryMetricSeries.get(metric.identity);
+      if (existing === undefined) {
+        this.#telemetryMetricSeries.set(metric.identity, {
+          name: metric.name,
+          instrument: metric.instrument,
+          sum: metric.value,
+          count: 1,
+        });
+      } else {
+        existing.sum += metric.value;
+        existing.count += 1;
+      }
+    }
+  }
+
+  setOpenTelemetryHealth(health: OpenTelemetryExporterHealthV2): void {
+    const previous = this.#openTelemetryHealth;
+    this.#openTelemetryHealth = health;
+    const status =
+      health.state === 'healthy'
+        ? 'ready'
+        : health.state === 'degraded'
+          ? 'degraded'
+          : health.state === 'starting' || health.state === 'flushing'
+            ? 'unready'
+            : 'stopped';
+    const identity = `${status}:${health.lastErrorCode ?? ''}`;
+    if (identity !== this.#openTelemetryComponentIdentity) {
+      this.#openTelemetryComponentIdentity = identity;
+      this.setComponent(
+        'opentelemetry',
+        'provider',
+        status,
+        health.lastErrorCode
+      );
+    }
+    if ((previous?.exports ?? 0) < health.exports) {
+      this.record('provider', 'opentelemetry', 'exported');
+    }
+    if ((previous?.failures ?? 0) < health.failures) {
+      this.record(
+        'provider',
+        'opentelemetry',
+        'failed',
+        health.lastErrorCode
+      );
+    }
+    if ((previous?.timeouts ?? 0) < health.timeouts) {
+      this.record(
+        'provider',
+        'opentelemetry',
+        'timed_out',
+        health.lastErrorCode
+      );
+    }
+    if ((previous?.dropped ?? 0) < health.dropped) {
+      this.record(
+        'provider',
+        'opentelemetry',
+        'dropped',
+        health.lastErrorCode
+      );
+    }
+  }
+
   alert(code: string, message: string, level: 'warn' | 'error' = 'error'): void {
     const normalizedCode = safeCode(code) ?? 'WOML_OBSERVABILITY_ALERT';
     const safeMessage = bounded(message, 'WOML runtime alert.', 1024);
@@ -478,7 +584,10 @@ export class RuntimeObservability implements RuntimeObservabilitySurface {
           ? 'degraded'
           : 'unready';
     return {
-      profile: 'woml.runtime-health/v1',
+      profile:
+        this.#openTelemetryHealth === undefined
+          ? 'woml.runtime-health/v1'
+          : 'woml.runtime-health/v2',
       kind: 'detail',
       status,
       runtimeInstanceId: this.#runtimeInstanceId,
@@ -500,6 +609,9 @@ export class RuntimeObservability implements RuntimeObservabilitySurface {
               },
             ]),
       ],
+      ...(this.#openTelemetryHealth === undefined
+        ? {}
+        : { openTelemetry: this.#openTelemetryHealth }),
     };
   }
 
@@ -586,6 +698,17 @@ export class RuntimeObservability implements RuntimeObservabilitySurface {
       value,
       labels: { backend },
     });
+    const exporterMetric = (
+      name: string,
+      type: 'gauge' | 'counter',
+      value: number
+    ) => ({
+      profile: 'woml.runtime-metrics/v3',
+      name,
+      type,
+      value,
+      labels: {},
+    });
     const durable = this.#observeDurable?.();
     const artifacts = this.#observeArtifacts?.();
     const locks = this.#observeLocks?.();
@@ -614,6 +737,32 @@ export class RuntimeObservability implements RuntimeObservabilitySurface {
       metric('woml_run_duration_seconds', 'histogram', snapshot.runs.length === 0 ? 0 : snapshot.runs.reduce((sum, run) => sum + run.durationMs, 0) / snapshot.runs.length / 1000),
       metric('woml_store_size_bytes', 'gauge', await this.#storeSize(), { provider: 'sqlite' }),
     ];
+    if (this.#openTelemetryHealth !== undefined) {
+      const health = this.#openTelemetryHealth;
+      results.push(
+        exporterMetric('woml_exporter_queue_size', 'gauge', health.queue.size),
+        exporterMetric(
+          'woml_exporter_queue_capacity',
+          'gauge',
+          health.queue.capacity
+        ),
+        exporterMetric(
+          'woml_exporter_queue_utilization',
+          'gauge',
+          health.queue.utilization
+        ),
+        exporterMetric('woml_exporter_exports_total', 'counter', health.exports),
+        exporterMetric('woml_exporter_failures_total', 'counter', health.failures),
+        exporterMetric('woml_exporter_timeouts_total', 'counter', health.timeouts),
+        exporterMetric('woml_exporter_dropped_total', 'counter', health.dropped),
+        exporterMetric('woml_exporter_flushes_total', 'counter', health.flushes),
+        exporterMetric(
+          'woml_exporter_circuit_open',
+          'gauge',
+          health.circuit === 'open' ? 1 : 0
+        )
+      );
+    }
     for (const status of ['queued', 'running', 'waiting', 'retrying', 'succeeded', 'failed', 'cancelled']) {
       const value =
         status === 'queued'
@@ -734,6 +883,21 @@ export class RuntimeObservability implements RuntimeObservabilitySurface {
       lines.push(
         `${metric.name}${labels.length === 0 ? '' : `{${labels.map(([key, value]) => `${key}="${value}"`).join(',')}}`} ${Number.isFinite(metric.value) ? metric.value : 0}`
       );
+    }
+    if (this.#telemetryObserved) {
+      for (const [identity, fact] of this.#telemetryMetricSeries) {
+        lines.push(
+          `# TYPE ${fact.name.replaceAll('.', '_')} ${fact.instrument === 'counter' ? 'counter' : 'gauge'}`
+        );
+        lines.push(
+          `${identity} ${fact.instrument === 'counter' ? fact.sum : fact.sum / fact.count}`
+        );
+      }
+      for (const fact of this.#telemetryActive) {
+        const name = fact.name.replaceAll('.', '_');
+        lines.push(`# TYPE ${name} gauge`);
+        lines.push(`${name} ${fact.value}`);
+      }
     }
     return `${lines.join('\n')}\n`;
   }

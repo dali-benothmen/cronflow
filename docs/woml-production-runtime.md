@@ -216,6 +216,11 @@ workflow truth. Slow or broken telemetry clients are isolated from execution.
 See [WOML Runtime Observability](woml-observability.md) for the endpoints,
 redaction rules, stream resynchronization, limits, and monitoring guidance.
 
+For OTLP/HTTP traces, metrics, and correlated safe logs, Runtime Configuration
+v2 adds optional `observability.openTelemetry`. Configuration, standard
+`OTEL_*` environment variables, collector setup, queue health, and failure
+isolation are documented in [OpenTelemetry export](woml-opentelemetry.md).
+
 ## Backup, restore, and upgrades
 
 Create a coherent verified snapshot of the default durable state location:

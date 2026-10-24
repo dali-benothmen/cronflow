@@ -1,0 +1,91 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://woml.dev/schemas/opentelemetry-configuration/v1",
+  "title": "WOML Resolved OpenTelemetry Configuration v1",
+  "x-status": "opentelemetry-export-ote0-frozen",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["profile", "enabled", "protocol", "serviceName", "resourceAttributes", "signals", "endpoints", "headerNames", "sampler", "exportIntervalMs", "exportTimeoutMs", "shutdownTimeoutMs", "maxQueueSize", "maxExportBatchSize", "propagation", "sources"],
+  "properties": {
+    "profile": { "const": "woml.opentelemetry-configuration/v1" },
+    "enabled": { "type": "boolean" },
+    "protocol": { "const": "http/protobuf" },
+    "serviceName": { "type": "string", "pattern": "^[a-zA-Z0-9][a-zA-Z0-9._/-]{0,127}$" },
+    "resourceAttributes": {
+      "type": "object",
+      "additionalProperties": false,
+      "maxProperties": 4,
+      "properties": {
+        "cloud.provider": { "$ref": "#/$defs/attributeValue" },
+        "cloud.region": { "$ref": "#/$defs/attributeValue" },
+        "deployment.environment.name": { "$ref": "#/$defs/attributeValue" },
+        "service.namespace": { "$ref": "#/$defs/attributeValue" }
+      }
+    },
+    "signals": { "$ref": "#/$defs/signals" },
+    "endpoints": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["traces", "metrics", "logs"],
+      "properties": {
+        "traces": { "$ref": "#/$defs/endpoint" },
+        "metrics": { "$ref": "#/$defs/endpoint" },
+        "logs": { "$ref": "#/$defs/endpoint" }
+      }
+    },
+    "headerNames": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["common", "traces", "metrics", "logs"],
+      "properties": {
+        "common": { "$ref": "#/$defs/headerNames" },
+        "traces": { "$ref": "#/$defs/headerNames" },
+        "metrics": { "$ref": "#/$defs/headerNames" },
+        "logs": { "$ref": "#/$defs/headerNames" }
+      }
+    },
+    "sampler": {
+      "oneOf": [
+        { "type": "object", "additionalProperties": false, "required": ["name"], "properties": { "name": { "enum": ["always_on", "always_off"] } } },
+        { "type": "object", "additionalProperties": false, "required": ["name", "ratio"], "properties": { "name": { "const": "parentbased_traceidratio" }, "ratio": { "type": "number", "minimum": 0, "maximum": 1 } } }
+      ]
+    },
+    "exportIntervalMs": { "type": "integer", "minimum": 1000, "maximum": 300000 },
+    "exportTimeoutMs": { "type": "integer", "minimum": 100, "maximum": 30000 },
+    "shutdownTimeoutMs": { "type": "integer", "minimum": 100, "maximum": 30000 },
+    "maxQueueSize": { "type": "integer", "minimum": 128, "maximum": 65536 },
+    "maxExportBatchSize": { "type": "integer", "minimum": 1, "maximum": 1024 },
+    "propagation": { "type": "boolean" },
+    "sources": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["enabled", "serviceName", "resourceAttributes", "traces", "metrics", "logs", "sampler", "endpoints"],
+      "properties": {
+        "enabled": { "$ref": "#/$defs/source" },
+        "serviceName": { "$ref": "#/$defs/source" },
+        "resourceAttributes": { "$ref": "#/$defs/source" },
+        "traces": { "$ref": "#/$defs/source" },
+        "metrics": { "$ref": "#/$defs/source" },
+        "logs": { "$ref": "#/$defs/source" },
+        "sampler": { "$ref": "#/$defs/source" },
+        "endpoints": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["traces", "metrics", "logs"],
+          "properties": {
+            "traces": { "$ref": "#/$defs/source" },
+            "metrics": { "$ref": "#/$defs/source" },
+            "logs": { "$ref": "#/$defs/source" }
+          }
+        }
+      }
+    }
+  },
+  "$defs": {
+    "source": { "enum": ["environment", "config", "default"] },
+    "attributeValue": { "type": "string", "minLength": 1, "maxLength": 256, "pattern": "^[^\\u0000-\\u001f\\u007f]+$" },
+    "endpoint": { "type": "string", "format": "uri", "pattern": "^https?://", "maxLength": 2048 },
+    "signals": { "type": "object", "additionalProperties": false, "required": ["traces", "metrics", "logs"], "properties": { "traces": { "type": "boolean" }, "metrics": { "type": "boolean" }, "logs": { "type": "boolean" } } },
+    "headerNames": { "type": "array", "maxItems": 32, "uniqueItems": true, "items": { "type": "string", "pattern": "^[a-z0-9][a-z0-9_.-]{0,127}$" } }
+  }
+}

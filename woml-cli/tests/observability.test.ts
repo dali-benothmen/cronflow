@@ -4,6 +4,14 @@ import Ajv2020 from 'ajv/dist/2020';
 import { RuntimeObservability } from '../src/runtime-observability';
 import { startRuntimeControl } from '../src/runtime-control';
 import type { RustRunListV1 } from '../src/rust-executor';
+import { parseTelemetrySignal } from '../src/opentelemetry-signal';
+import {
+  createTelemetryObservationProjector,
+} from '../src/opentelemetry-runtime';
+import {
+  metricFactsForTelemetrySignal,
+  prometheusIdentity,
+} from '../src/opentelemetry-observation';
 
 const controls: { close(): Promise<void> }[] = [];
 
@@ -22,13 +30,16 @@ async function validators() {
   ajv.addFormat('date-time', {
     validate: (value: string) => Number.isFinite(Date.parse(value)),
   });
+  ajv.addSchema(await schema('opentelemetry-exporter-health.v2.schema.json'));
   return {
     snapshot: ajv.compile(await schema('runtime-operations-snapshot.v1.schema.json')),
     stream: ajv.compile(await schema('runtime-operations-stream.v1.schema.json')),
     log: ajv.compile(await schema('runtime-log-record.v1.schema.json')),
     metric: ajv.compile(await schema('runtime-metrics.v1.schema.json')),
     metricV2: ajv.compile(await schema('runtime-metrics.v2.schema.json')),
+    metricV3: ajv.compile(await schema('runtime-metrics.v3.schema.json')),
     health: ajv.compile(await schema('runtime-health.v1.schema.json')),
+    healthV2: ajv.compile(await schema('runtime-health.v2.schema.json')),
   };
 }
 
@@ -106,6 +117,27 @@ function authorization(capability: string): HeadersInit {
 }
 
 describe('Frozen observability artifacts', () => {
+  test('Prometheus and OTLP consume the same reviewed telemetry facts', async () => {
+    const contracts = await Bun.file(
+      new URL('./fixtures/opentelemetry/contracts.v1.json', import.meta.url)
+    ).json();
+    const signal = parseTelemetrySignal(JSON.stringify(contracts.signal));
+    const observed = fixture();
+    const projector = createTelemetryObservationProjector();
+    observed.recordTelemetryObservation(projector.observe(signal));
+    observed.recordTelemetryObservation(projector.observe(signal));
+    const prometheus = await observed.prometheusMetrics();
+    for (const fact of metricFactsForTelemetrySignal(signal)) {
+      expect(prometheus).toContain(prometheusIdentity(fact));
+    }
+    expect(prometheus).toContain(
+      `${prometheusIdentity(metricFactsForTelemetrySignal(signal)[0]!)} 1`
+    );
+    expect(prometheus).not.toContain(signal.runId!);
+    expect(prometheus).not.toContain(signal.nodeId!);
+    expect(prometheus).not.toContain(signal.invocationId!);
+  });
+
   test('matches the reviewed golden snapshot, log, and Prometheus fixtures', async () => {
     const logs: string[] = [];
     const instant = Date.parse('2026-08-12T09:00:02.000Z');
@@ -260,6 +292,53 @@ describe('Frozen observability artifacts', () => {
     expect(await observed.prometheusMetrics()).toContain(
       'woml_artifact_backend_healthy{backend="local"} 1'
     );
+  });
+
+  test('publishes exporter pressure and failure facts without changing workflow readiness', async () => {
+    const validate = await validators();
+    const observed = fixture();
+    observed.setLifecycle('ready');
+    observed.setOpenTelemetryHealth({
+      profile: 'woml.opentelemetry-exporter-health/v2',
+      state: 'degraded',
+      enabled: true,
+      protocol: 'http/protobuf',
+      signals: ['traces', 'metrics'],
+      queue: { size: 96, capacity: 128, utilization: 0.75 },
+      exports: 12,
+      failures: 2,
+      timeouts: 1,
+      dropped: 3,
+      flushes: 1,
+      consecutiveFailures: 2,
+      circuit: 'open',
+      lastSuccessAt: '2026-10-23T11:59:00.000Z',
+      lastFailureAt: '2026-10-23T12:00:00.000Z',
+      retryAt: '2026-10-23T12:00:05.000Z',
+      lastErrorCode: 'WOML_OTEL_EXPORT_FAILED',
+    });
+    expect(observed.minimalHealth('readiness')).toMatchObject({ status: 'ok' });
+    const health = observed.detailedHealth();
+    expect(validate.healthV2(health), validate.healthV2.errors?.join('\n')).toBe(true);
+    expect(health).toMatchObject({
+      status: 'degraded',
+      openTelemetry: {
+        queue: { size: 96, capacity: 128 },
+        failures: 2,
+        dropped: 3,
+      },
+    });
+    const metrics = await observed.metrics();
+    const exporterMetrics = metrics.filter(
+      metric => (metric as { profile?: string }).profile === 'woml.runtime-metrics/v3'
+    );
+    expect(exporterMetrics).toHaveLength(9);
+    for (const metric of exporterMetrics) {
+      expect(validate.metricV3(metric), validate.metricV3.errors?.join('\n')).toBe(true);
+    }
+    const prometheus = await observed.prometheusMetrics();
+    expect(prometheus).toContain('woml_exporter_queue_utilization 0.75');
+    expect(prometheus).toContain('woml_exporter_dropped_total 3');
   });
 
   test('assigns monotonic sequence numbers and requires snapshot resync after a gap', async () => {

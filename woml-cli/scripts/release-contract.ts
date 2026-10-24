@@ -5,6 +5,8 @@ export const publicJavaScriptFiles = [
   'dist/notification-provider-host.js',
   'dist/custom-notification-provider-host.js',
   'dist/custom-notification-provider-worker.js',
+  'dist/opentelemetry-runtime.js',
+  'dist/opentelemetry-sdk.js',
 ] as const;
 
 export const publicSourceMapFiles = publicJavaScriptFiles.map(
