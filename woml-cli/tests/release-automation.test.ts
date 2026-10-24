@@ -16,7 +16,10 @@ interface WorkflowJob {
     readonly matrix?: { readonly include?: readonly Record<string, unknown>[] };
   };
   readonly steps?: ReadonlyArray<{
+    readonly name?: string;
     readonly uses?: string;
+    readonly run?: string;
+    readonly 'working-directory'?: string;
     readonly with?: Readonly<Record<string, unknown>>;
   }>;
 }
@@ -63,6 +66,11 @@ describe('WOML release automation', () => {
     expect(source).toContain('actions/checkout@v6');
     expect(source).toContain('actions/upload-artifact@v6');
     expect(source).not.toMatch(/actions\/(?:checkout|setup-node|upload-artifact|download-artifact)@v[1-5]\b/u);
+    expect(document.jobs?.opentelemetry?.steps).toContainEqual({
+      name: 'Install compiler dependencies',
+      'working-directory': 'woml',
+      run: 'bun install --frozen-lockfile',
+    });
   });
 
   test('builds every frozen native target on its matching runner', async () => {

@@ -41,7 +41,7 @@
   },
   "overrides": {
     "ajv": "8.20.0",
-    "fast-uri": "3.1.8"
+    "fast-uri": "3.1.9"
   },
   "scripts": {
     "build": "bun run build:native && bun run build:js",
