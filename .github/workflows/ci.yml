@@ -196,6 +196,7 @@ jobs:
           --test rich_plan_approval_model
           --test rich_plan_approval_authority
           --test rich_plan_approval_runtime
+          --test remote_execution_targets_model
           --test infrastructure_policy_contract
           --test infrastructure_policy_authority
           --test operational_output_store

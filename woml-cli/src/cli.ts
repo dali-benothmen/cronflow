@@ -55,6 +55,7 @@ import {
   type WomlDefinitionPackageV13,
   type WomlDefinitionPackageV14,
   type WomlDefinitionPackageV15,
+  type WomlDefinitionPackageV16,
 } from '@woml/compiler';
 import {
   compiledDefinitionHash,
@@ -2209,7 +2210,8 @@ function promoteForLifecycleAuthority(
     workflow.schemaVersion === 17 ||
     workflow.schemaVersion === 18 ||
     workflow.schemaVersion === 19 ||
-    workflow.schemaVersion === 20
+    workflow.schemaVersion === 20 ||
+    workflow.schemaVersion === 21
   ) {
     return workflow;
   }
@@ -2293,6 +2295,7 @@ function runtimeModulesFromPackage(
     | WomlDefinitionPackageV13
     | WomlDefinitionPackageV14
     | WomlDefinitionPackageV15
+    | WomlDefinitionPackageV16
 ): readonly RustRuntimeModuleArtifact[] {
   const modules = definitionPackage.modules.map(module => {
     const bundle = definitionPackage.artifacts.find(
@@ -2322,7 +2325,8 @@ function runtimeModulesFromPackage(
     definitionPackage.schemaVersion !== 12 &&
     definitionPackage.schemaVersion !== 13 &&
     definitionPackage.schemaVersion !== 14 &&
-    definitionPackage.schemaVersion !== 15
+    definitionPackage.schemaVersion !== 15 &&
+    definitionPackage.schemaVersion !== 16
   )
     return modules;
   const seen = new Set<string>();
@@ -3167,9 +3171,16 @@ async function runSingleCheckCommand(
         child => child.kind === 'element' && declaresSaga(child)
       );
     const hasSaga = declaresSaga(document.root);
+    const declaresRemoteTarget = (element: WomlSourceElement): boolean =>
+      (element.name === 'step' && element.attributes.target !== undefined) ||
+      element.children.some(
+        child => child.kind === 'element' && declaresRemoteTarget(child)
+      );
+    const hasRemoteTarget = declaresRemoteTarget(document.root);
     if (
-      reusableGraph.root.kind !== 'workflow' ||
-      reusableGraph.definitions.length > 0
+      !hasRemoteTarget &&
+      (reusableGraph.root.kind !== 'workflow' ||
+        reusableGraph.definitions.length > 0)
     ) {
       await validateReusableModuleEntrypoints(reusableGraph, projectRoot);
       validateResolvedReusableWorkflow(document, reusableGraph);
@@ -3217,7 +3228,9 @@ async function runSingleCheckCommand(
         );
       }
       io.stdout(
-        reusablePackage?.schemaVersion === 14
+        reusablePackage?.schemaVersion === 16
+          ? `Compiled Model v21 package: ${reusablePackage.rootHash}\nExecution: remote target authoring is validated; authenticated dispatch begins in RET2–RET5.\n`
+          : reusablePackage?.schemaVersion === 14
           ? `Compiled Model v19 package: ${reusablePackage.rootHash}\nExecution: compensation and cleanup authoring is validated; durable correction execution begins in CC2–CC4.\n`
           : reusablePackage?.schemaVersion === 13
             ? `Compiled Model v18 package: ${reusablePackage.rootHash}\nExecution: lock authoring and lowering are validated; the durable lock runtime begins in LL2–LL4.\n`
@@ -3235,6 +3248,80 @@ async function runSingleCheckCommand(
                     : reusableGraph.root.kind === 'workflow'
                       ? 'Execution: reusable provider source is validated; custom notification providers begin in SCP5.\n'
                       : 'Execution: reusable definitions are imported by workflows and are not independently runnable.\n'
+      );
+      return 0;
+    }
+    if (hasRemoteTarget) {
+      const inspectionPackage = buildWomlDefinitionPackage(document, {
+        sourcePath: filePath,
+        projectRoot,
+      });
+      const executablePackage =
+        inspectionPackage.modules.length === 0
+          ? undefined
+          : await buildWomlExecutableDefinitionPackage(document, {
+              sourcePath: filePath,
+              projectRoot,
+            });
+      const compiled =
+        executablePackage?.workflow.model ?? compileWoml(document);
+      if (compiled.schemaVersion !== 21) {
+        throw new CliInputError(
+          'WOML_REMOTE_EXECUTION_MODEL_INVALID',
+          'A targeted <step> did not lower to the frozen compiled Model v21 contract.'
+        );
+      }
+      if (executablePackage !== undefined) {
+        await refreshEditorTypes(filePath, executablePackage.modules, io);
+      }
+      const placedNodes = [
+        ...compiled.graph.nodes,
+        ...compiled.graph.forEach.flatMap(loop => loop.body.nodes),
+        ...compiled.graph.sagas.flatMap(saga => [
+          ...saga.compensations.map(action => action.node),
+          ...saga.cleanup.map(action => action.node),
+        ]),
+      ]
+        .filter(node => node.execution !== undefined)
+        .map(node => ({
+          stepId: node.id,
+          target: node.execution!.target,
+        }));
+      const workflowElement = document.root.children.find(
+        (child): child is WomlSourceElement =>
+          child.kind === 'element' && child.name === 'workflow'
+      );
+      if (options[0] === '--json') {
+        io.stdout(
+          `${JSON.stringify(
+            {
+              profile: 'woml.model-validation/v1',
+              valid: true,
+              workflowId: workflowElement?.attributes.id?.value,
+              feature: 'remote-execution-targets',
+              executable: false,
+              modelVersion: compiled.schemaVersion,
+              packageVersion: executablePackage?.schemaVersion,
+              runtimePhase: 'RET1',
+              placements: placedNodes,
+            },
+            null,
+            2
+          )}\n`
+        );
+        return 0;
+      }
+      io.stdout(
+        `WOML check passed for workflow "${workflowElement?.attributes.id?.value ?? filePath}".\n`
+      );
+      io.stdout(
+        'Compiled Model v21 passed Remote Execution Targets frontend validation.\n'
+      );
+      for (const placement of placedNodes) {
+        io.stdout(`Target: ${placement.stepId} -> ${placement.target}\n`);
+      }
+      io.stdout(
+        'Execution: authenticated remote dispatch begins in RET2–RET5; targeted workflows cannot run yet.\n'
       );
       return 0;
     }
