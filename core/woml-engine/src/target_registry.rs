@@ -133,7 +133,7 @@ pub fn prepare_target_registry(
 }
 
 fn normalize_set(
-  values: &mut Vec<String>,
+  values: &mut [String],
   maximum: usize,
   capability: bool,
   label: &str,

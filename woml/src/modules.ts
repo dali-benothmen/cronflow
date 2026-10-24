@@ -826,10 +826,18 @@ export function buildWomlDefinitionPackage(
   options: WomlModuleResolverOptions = {}
 ): WomlDefinitionPackageV1 {
   const validated = inspectValidatedWomlDocument(document);
-  const sourcePath = resolve(options.sourcePath ?? document.file);
+  const lexicalSourcePath = resolve(options.sourcePath ?? document.file);
   const lexicalProjectRoot = resolve(
-    options.projectRoot ?? dirname(sourcePath)
+    options.projectRoot ?? dirname(lexicalSourcePath)
   );
+  if (!isWithin(lexicalProjectRoot, lexicalSourcePath)) {
+    throw compileDiagnostic(
+      document.file,
+      'WOML_MODULE_DOCUMENT_ESCAPE',
+      'The importing WOML document is outside the configured project boundary.',
+      document.root.openTagSpan
+    );
+  }
   let projectRoot: string;
   try {
     projectRoot = realpathSync(lexicalProjectRoot);
@@ -841,19 +849,12 @@ export function buildWomlDefinitionPackage(
       document.root.openTagSpan
     );
   }
-  if (!isWithin(projectRoot, sourcePath)) {
-    throw compileDiagnostic(
-      document.file,
-      'WOML_MODULE_DOCUMENT_ESCAPE',
-      'The importing WOML document is outside the configured project boundary.',
-      document.root.openTagSpan
-    );
-  }
+  let sourcePath: string;
   try {
-    const realSourcePath = realpathSync(sourcePath);
+    sourcePath = realpathSync(lexicalSourcePath);
     if (
-      !statSync(realSourcePath).isFile() ||
-      !isWithin(projectRoot, realSourcePath)
+      !statSync(sourcePath).isFile() ||
+      !isWithin(projectRoot, sourcePath)
     ) {
       throw new Error('outside project boundary');
     }

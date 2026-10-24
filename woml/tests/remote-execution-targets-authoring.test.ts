@@ -117,7 +117,9 @@ describe('WOML Remote Execution Targets', () => {
         file: 'model.reviewed.woml',
       })
     );
-    expect(compiled).toEqual(JSON.parse(fixture('model.v21.reviewed.json')));
+    expect(JSON.stringify(compiled)).toBe(
+      JSON.stringify(JSON.parse(fixture('model.v21.reviewed.json')))
+    );
     expect(compiled.schemaVersion).toBe(21);
     if (compiled.schemaVersion !== 21) throw new Error('Expected Model v21.');
 
