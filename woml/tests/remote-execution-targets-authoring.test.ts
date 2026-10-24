@@ -112,14 +112,25 @@ describe('WOML Remote Execution Targets', () => {
   });
 
   test('deep-equals the reviewed Model v21 fixture and preserves correction placement', () => {
+    const source = fixture('model.reviewed.woml');
+    const reviewed = JSON.stringify(
+      JSON.parse(fixture('model.v21.reviewed.json'))
+    );
     const compiled = compileWoml(
-      parseWoml(fixture('model.reviewed.woml'), {
+      parseWoml(source, {
         file: 'model.reviewed.woml',
       })
     );
-    expect(JSON.stringify(compiled)).toBe(
-      JSON.stringify(JSON.parse(fixture('model.v21.reviewed.json')))
-    );
+    expect(JSON.stringify(compiled)).toBe(reviewed);
+    expect(
+      JSON.stringify(
+        compileWoml(
+          parseWoml(source.replaceAll('\n', '\r\n'), {
+            file: 'model.reviewed.woml',
+          })
+        )
+      )
+    ).toBe(reviewed);
     expect(compiled.schemaVersion).toBe(21);
     if (compiled.schemaVersion !== 21) throw new Error('Expected Model v21.');
 
