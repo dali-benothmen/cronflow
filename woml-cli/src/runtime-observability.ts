@@ -5,13 +5,6 @@ import type {
   RustRuntimeObservationV1,
 } from './rust-executor';
 import type { OperationalOutputObservationV1 } from './operational-output';
-import {
-  metricFactsForTelemetrySignal,
-  prometheusIdentity,
-  TelemetryActiveGaugeState,
-  type TelemetryMetricFactV1,
-} from './opentelemetry-observation';
-import type { TelemetrySignalV1 } from './opentelemetry-signal';
 import type { OpenTelemetryExporterHealthV2 } from './opentelemetry-runtime';
 
 export type RuntimeLifecycle =
@@ -85,9 +78,23 @@ export interface RuntimeObservabilitySurface {
   snapshot(): Promise<unknown>;
   metrics(): Promise<readonly unknown[]>;
   prometheusMetrics(): Promise<string>;
-  recordTelemetrySignal(signal: TelemetrySignalV1): void;
+  recordTelemetryObservation(observation: RuntimeTelemetryObservation): void;
   stream(afterSequence?: number): Response;
   closeStreams(): void;
+}
+
+export interface RuntimeTelemetryObservation {
+  readonly signalId: string;
+  readonly metrics: readonly {
+    readonly identity: string;
+    readonly name: string;
+    readonly instrument: 'counter' | 'histogram';
+    readonly value: number;
+  }[];
+  readonly gauges: readonly {
+    readonly name: string;
+    readonly value: number;
+  }[];
 }
 
 type RuntimeComponentKind =
@@ -215,9 +222,14 @@ export class RuntimeObservability implements RuntimeObservabilitySurface {
   readonly #forEachProgress = new Map<string, ObservedForEachProgress>();
   readonly #telemetryMetricSeries = new Map<
     string,
-    { fact: TelemetryMetricFactV1; sum: number; count: number }
+    {
+      name: string;
+      instrument: 'counter' | 'histogram';
+      sum: number;
+      count: number;
+    }
   >();
-  readonly #telemetryActive = new TelemetryActiveGaugeState();
+  #telemetryActive: RuntimeTelemetryObservation['gauges'] = [];
   readonly #telemetrySignalIds = new Set<string>();
   #openTelemetryHealth?: OpenTelemetryExporterHealthV2;
   #openTelemetryComponentIdentity?: string;
@@ -416,27 +428,27 @@ export class RuntimeObservability implements RuntimeObservabilitySurface {
     );
   }
 
-  recordTelemetrySignal(signal: TelemetrySignalV1): void {
-    if (this.#telemetrySignalIds.has(signal.signalId)) return;
+  recordTelemetryObservation(observation: RuntimeTelemetryObservation): void {
+    if (this.#telemetrySignalIds.has(observation.signalId)) return;
     while (this.#telemetrySignalIds.size >= 10_000) {
       const oldest = this.#telemetrySignalIds.values().next().value;
       if (oldest === undefined) break;
       this.#telemetrySignalIds.delete(oldest);
     }
-    this.#telemetrySignalIds.add(signal.signalId);
+    this.#telemetrySignalIds.add(observation.signalId);
     this.#telemetryObserved = true;
-    this.#telemetryActive.observe(signal);
-    for (const fact of metricFactsForTelemetrySignal(signal)) {
-      const identity = prometheusIdentity(fact);
-      const existing = this.#telemetryMetricSeries.get(identity);
+    this.#telemetryActive = observation.gauges;
+    for (const metric of observation.metrics) {
+      const existing = this.#telemetryMetricSeries.get(metric.identity);
       if (existing === undefined) {
-        this.#telemetryMetricSeries.set(identity, {
-          fact,
-          sum: fact.value,
+        this.#telemetryMetricSeries.set(metric.identity, {
+          name: metric.name,
+          instrument: metric.instrument,
+          sum: metric.value,
           count: 1,
         });
       } else {
-        existing.sum += fact.value;
+        existing.sum += metric.value;
         existing.count += 1;
       }
     }
@@ -873,16 +885,15 @@ export class RuntimeObservability implements RuntimeObservabilitySurface {
       );
     }
     if (this.#telemetryObserved) {
-      for (const { fact, sum, count } of this.#telemetryMetricSeries.values()) {
-        const identity = prometheusIdentity(fact);
+      for (const [identity, fact] of this.#telemetryMetricSeries) {
         lines.push(
           `# TYPE ${fact.name.replaceAll('.', '_')} ${fact.instrument === 'counter' ? 'counter' : 'gauge'}`
         );
         lines.push(
-          `${identity} ${fact.instrument === 'counter' ? sum : sum / count}`
+          `${identity} ${fact.instrument === 'counter' ? fact.sum : fact.sum / fact.count}`
         );
       }
-      for (const fact of this.#telemetryActive.facts()) {
+      for (const fact of this.#telemetryActive) {
         const name = fact.name.replaceAll('.', '_');
         lines.push(`# TYPE ${name} gauge`);
         lines.push(`${name} ${fact.value}`);

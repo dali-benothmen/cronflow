@@ -198,14 +198,30 @@ import {
   type ResolvedRuntimeConfiguration,
   type RuntimePreflightV1,
 } from './runtime-config';
-import {
+import type {
   OpenTelemetryRuntime,
-  type OpenTelemetrySdkLoader,
+  OpenTelemetryRuntimeOptions,
+  OpenTelemetrySdkLoader,
+  TelemetryObservationProjector,
 } from './opentelemetry-runtime';
 import type {
   TelemetryAdmissionLinkV1,
   TelemetrySignalV1,
 } from './opentelemetry-signal';
+
+interface OpenTelemetryRuntimeModule {
+  readonly OpenTelemetryRuntime: {
+    start(
+      configuration: ResolvedOpenTelemetryConfigurationV1,
+      options: OpenTelemetryRuntimeOptions
+    ): Promise<OpenTelemetryRuntime>;
+  };
+  readonly parseTelemetrySignal: (json: string) => TelemetrySignalV1;
+  readonly parseTelemetryAdmissionLink: (
+    json: string
+  ) => TelemetryAdmissionLinkV1;
+  readonly createTelemetryObservationProjector: () => TelemetryObservationProjector;
+}
 import {
   readRuntimeDescriptor,
   removeRuntimeDescriptor,
@@ -5744,6 +5760,8 @@ async function activateWorkflows(
   let runtimeControl: RuntimeControlHandle | undefined;
   let observability: RuntimeObservability | undefined;
   let openTelemetryRuntime: OpenTelemetryRuntime | undefined;
+  let openTelemetryModule: OpenTelemetryRuntimeModule | undefined;
+  let telemetryObservationProjector: TelemetryObservationProjector | undefined;
   const pendingTelemetrySignals: TelemetrySignalV1[] = [];
   const pendingTelemetryLinks: TelemetryAdmissionLinkV1[] = [];
   const observedTelemetrySignalIds = new Set<string>();
@@ -5954,6 +5972,17 @@ async function activateWorkflows(
         signalIngressToken !== undefined;
       const currentActivationId = activationIdentity(productionSources);
       const currentDeploymentId = deploymentIdentity(args.statePath);
+      if (args.openTelemetry?.enabled === true) {
+        const runtimeModulePath = new URL(
+          `opentelemetry-runtime.${import.meta.url.endsWith('.ts') ? 'ts' : 'js'}`,
+          import.meta.url
+        ).href;
+        openTelemetryModule = (await import(
+          runtimeModulePath
+        )) as OpenTelemetryRuntimeModule;
+        telemetryObservationProjector =
+          openTelemetryModule.createTelemetryObservationProjector();
+      }
       const runtime = await profileAsync(
         'runtime',
         'runtime.start_core_services',
@@ -5987,10 +6016,16 @@ async function activateWorkflows(
                     : args.openTelemetry.sampler.name === 'always_on'
                       ? 1
                       : 0,
+              decodeTelemetrySignal: openTelemetryModule?.parseTelemetrySignal,
+              decodeTelemetryAdmissionLink:
+                openTelemetryModule?.parseTelemetryAdmissionLink,
               onOperationalOutput: observeOperationalOutput,
               onTelemetrySignal: signal => {
                 if (observability !== undefined) {
-                  observability.recordTelemetrySignal(signal);
+                  const observation = telemetryObservationProjector?.observe(signal);
+                  if (observation !== undefined) {
+                    observability.recordTelemetryObservation(observation);
+                  }
                   if (openTelemetryRuntime === undefined) {
                     observedTelemetrySignalIds.add(signal.signalId);
                   }
@@ -6260,8 +6295,12 @@ async function activateWorkflows(
           pendingObservabilityProgress.length = 0;
         }
       );
-      if (args.openTelemetry !== undefined) {
-        openTelemetryRuntime = await OpenTelemetryRuntime.start(
+      if (args.openTelemetry?.enabled === true) {
+        if (openTelemetryModule === undefined) {
+          throw new Error('OpenTelemetry runtime host was not loaded.');
+        }
+        const { OpenTelemetryRuntime: RuntimeHost } = openTelemetryModule;
+        openTelemetryRuntime = await RuntimeHost.start(
           args.openTelemetry,
           {
             runtimeInstanceId: runtime.runtimeId,
@@ -6280,7 +6319,10 @@ async function activateWorkflows(
         }
         for (const signal of pendingTelemetrySignals.splice(0)) {
           if (!observedTelemetrySignalIds.delete(signal.signalId)) {
-            observability?.recordTelemetrySignal(signal);
+            const observation = telemetryObservationProjector?.observe(signal);
+            if (observation !== undefined) {
+              observability?.recordTelemetryObservation(observation);
+            }
           }
           openTelemetryRuntime.record(signal);
         }

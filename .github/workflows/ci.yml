@@ -408,6 +408,30 @@ jobs:
           cargo --version
           git status --short
 
+  opentelemetry:
+    name: OpenTelemetry Export (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, macos-15, windows-2022]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v6
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: ${{ env.BUN_VERSION }}
+      - name: Install locked runtime dependencies
+        working-directory: woml-cli
+        run: bun install --frozen-lockfile
+      - name: Test local OTLP export, failure isolation, privacy, and budgets
+        working-directory: woml-cli
+        run: bun run test:opentelemetry
+      - name: Failure diagnostics
+        if: failure()
+        run: |
+          bun --version
+          git status --short
+
   lock-authority:
     name: Lock authority (${{ matrix.os }})
     strategy:
@@ -533,6 +557,9 @@ jobs:
       - name: Test Streaming Output and Progress from the clean release package
         working-directory: woml-cli
         run: bun test tests/streaming-output-packaged-release.test.ts --max-concurrency=1
+      - name: Test OpenTelemetry Export from the clean release package
+        working-directory: woml-cli
+        run: bun test tests/opentelemetry-packaged-release.test.ts --max-concurrency=1
       - name: Pack, seal, and reverify the main artifact
         run: |
           bun woml-cli/scripts/release-artifact.ts pack --root release/main

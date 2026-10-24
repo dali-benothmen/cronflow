@@ -6,6 +6,9 @@ import { startRuntimeControl } from '../src/runtime-control';
 import type { RustRunListV1 } from '../src/rust-executor';
 import { parseTelemetrySignal } from '../src/opentelemetry-signal';
 import {
+  createTelemetryObservationProjector,
+} from '../src/opentelemetry-runtime';
+import {
   metricFactsForTelemetrySignal,
   prometheusIdentity,
 } from '../src/opentelemetry-observation';
@@ -120,8 +123,9 @@ describe('Frozen observability artifacts', () => {
     ).json();
     const signal = parseTelemetrySignal(JSON.stringify(contracts.signal));
     const observed = fixture();
-    observed.recordTelemetrySignal(signal);
-    observed.recordTelemetrySignal(signal);
+    const projector = createTelemetryObservationProjector();
+    observed.recordTelemetryObservation(projector.observe(signal));
+    observed.recordTelemetryObservation(projector.observe(signal));
     const prometheus = await observed.prometheusMetrics();
     for (const fact of metricFactsForTelemetrySignal(signal)) {
       expect(prometheus).toContain(prometheusIdentity(fact));

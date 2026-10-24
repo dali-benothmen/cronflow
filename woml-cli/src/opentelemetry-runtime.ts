@@ -7,6 +7,43 @@ import type {
   TelemetryAdmissionLinkV1,
   TelemetrySignalV1,
 } from './opentelemetry-signal';
+import {
+  metricFactsForTelemetrySignal,
+  prometheusIdentity,
+  TelemetryActiveGaugeState,
+} from './opentelemetry-observation';
+import type { RuntimeTelemetryObservation } from './runtime-observability';
+
+export {
+  parseTelemetryAdmissionLink,
+  parseTelemetrySignal,
+} from './opentelemetry-signal';
+
+export interface TelemetryObservationProjector {
+  observe(signal: TelemetrySignalV1): RuntimeTelemetryObservation;
+}
+
+export function createTelemetryObservationProjector(): TelemetryObservationProjector {
+  const active = new TelemetryActiveGaugeState();
+  return {
+    observe(signal) {
+      active.observe(signal);
+      return {
+        signalId: signal.signalId,
+        metrics: metricFactsForTelemetrySignal(signal).map(fact => ({
+          identity: prometheusIdentity(fact),
+          name: fact.name,
+          instrument: fact.instrument,
+          value: fact.value,
+        })),
+        gauges: active.facts().map(fact => ({
+          name: fact.name,
+          value: fact.value,
+        })),
+      };
+    },
+  };
+}
 
 export const OPEN_TELEMETRY_EXPORTER_HEALTH_PROFILE_V1 =
   'woml.opentelemetry-exporter-health/v1';
@@ -58,6 +95,79 @@ export interface OpenTelemetryExporterHealthV2 {
   readonly lastFlushAt?: string;
   readonly retryAt?: string;
   readonly lastErrorCode?: string;
+}
+
+export interface OpenTelemetryInspectorView {
+  readonly lines: readonly string[];
+  readonly colors: readonly (
+    | 'cyan'
+    | 'green'
+    | 'yellow'
+    | 'dim'
+    | undefined
+  )[];
+}
+
+function record(value: unknown): value is Record<string, unknown> {
+  return value !== null && typeof value === 'object' && !Array.isArray(value);
+}
+
+function count(value: unknown): value is number {
+  return Number.isSafeInteger(value) && Number(value) >= 0;
+}
+
+export function openTelemetryInspectorView(
+  value: unknown
+): OpenTelemetryInspectorView | undefined {
+  if (
+    !record(value) ||
+    value.profile !== 'woml.runtime-health/v2' ||
+    !record(value.openTelemetry)
+  ) {
+    return undefined;
+  }
+  const health = value.openTelemetry;
+  if (
+    health.profile !== OPEN_TELEMETRY_EXPORTER_HEALTH_PROFILE ||
+    !record(health.queue) ||
+    !count(health.queue.size) ||
+    !count(health.queue.capacity) ||
+    typeof health.queue.utilization !== 'number' ||
+    !Number.isFinite(health.queue.utilization) ||
+    health.queue.utilization < 0 ||
+    health.queue.utilization > 1 ||
+    !count(health.exports) ||
+    !count(health.failures) ||
+    !count(health.timeouts) ||
+    !count(health.dropped) ||
+    !count(health.flushes) ||
+    !['closed', 'open', 'half_open'].includes(String(health.circuit))
+  ) {
+    return undefined;
+  }
+  const retry = typeof health.retryAt === 'string' ? health.retryAt : undefined;
+  const lastSuccess =
+    typeof health.lastSuccessAt === 'string' ? health.lastSuccessAt : '—';
+  const lastFlush =
+    typeof health.lastFlushAt === 'string' ? health.lastFlushAt : '—';
+  return {
+    lines: [
+      '',
+      'OPENTELEMETRY EXPORT',
+      `Queue: ${health.queue.size} / ${health.queue.capacity} (${Math.round(health.queue.utilization * 100)}%)`,
+      `Exports: ${health.exports}  Failures: ${health.failures}  Timeouts: ${health.timeouts}  Dropped: ${health.dropped}`,
+      `Circuit: ${health.circuit}${retry === undefined ? '' : `  Retry: ${retry}`}`,
+      `Last success: ${lastSuccess}  Last flush: ${lastFlush}`,
+    ],
+    colors: [
+      undefined,
+      'cyan',
+      health.queue.utilization >= 0.8 ? 'yellow' : 'green',
+      health.failures > 0 || health.dropped > 0 ? 'yellow' : 'green',
+      health.circuit === 'closed' ? 'green' : 'yellow',
+      'dim',
+    ],
+  };
 }
 
 export type OpenTelemetryExporterEventKind =
@@ -114,9 +224,10 @@ export interface OpenTelemetryRuntimeOptions {
 async function loadBundledSdk(
   options: OpenTelemetrySdkStartOptions
 ): Promise<OpenTelemetrySdkHandle> {
-  const modulePath = import.meta.url.endsWith('.ts')
-    ? './opentelemetry-sdk.ts'
-    : './opentelemetry-sdk.js';
+  const modulePath = new URL(
+    `opentelemetry-sdk.${import.meta.url.endsWith('.ts') ? 'ts' : 'js'}`,
+    import.meta.url
+  ).href;
   const module = (await import(modulePath)) as {
     startOpenTelemetrySdk(
       input: OpenTelemetrySdkStartOptions

@@ -23,11 +23,9 @@ import { profileAsync, profileSync } from './performance-profiler';
 import type { ProcessRuntimeAuthorityV1 } from './process-policy';
 import type { ArtifactRuntimeAuthorityV1 } from './artifact-policy';
 import type { InfrastructurePolicyRuntimeAuthorityV1 } from './infrastructure-policy';
-import {
-  parseTelemetrySignal,
-  parseTelemetryAdmissionLink,
-  type TelemetryAdmissionLinkV1,
-  type TelemetrySignalV1,
+import type {
+  TelemetryAdmissionLinkV1,
+  TelemetrySignalV1,
 } from './opentelemetry-signal';
 import {
   decodeOperationalObservationV1,
@@ -373,6 +371,10 @@ export interface WebhookRuntimeOptions extends RustExecutorOptions {
   readonly telemetryEnabled?: boolean;
   readonly telemetryPropagation?: boolean;
   readonly telemetrySamplingRatio?: number;
+  readonly decodeTelemetrySignal?: (json: string) => TelemetrySignalV1;
+  readonly decodeTelemetryAdmissionLink?: (
+    json: string
+  ) => TelemetryAdmissionLinkV1;
   readonly onTriggerProgress?: (progress: TriggerProgressV1) => void;
   readonly onScheduleProgress?: (progress: ScheduleProgressV1) => void;
   readonly onIntervalProgress?: (progress: IntervalProgressV1) => void;
@@ -3294,7 +3296,8 @@ export async function startWebhookRuntimeWithRust(
               decoded.profile === 'woml.telemetry-signal/v1'
             ) {
               try {
-                options.onTelemetrySignal?.(parseTelemetrySignal(message));
+                const signal = options.decodeTelemetrySignal?.(message);
+                if (signal !== undefined) options.onTelemetrySignal?.(signal);
               } catch {
                 // Telemetry is an optional, fail-isolated sink. A malformed
                 // callback record is rejected without affecting execution.
@@ -3306,9 +3309,8 @@ export async function startWebhookRuntimeWithRust(
               decoded.profile === 'woml.telemetry-admission-link/v1'
             ) {
               try {
-                options.onTelemetryAdmissionLink?.(
-                  parseTelemetryAdmissionLink(message)
-                );
+                const link = options.decodeTelemetryAdmissionLink?.(message);
+                if (link !== undefined) options.onTelemetryAdmissionLink?.(link);
               } catch {
                 // Invalid optional context never affects workflow execution.
               }

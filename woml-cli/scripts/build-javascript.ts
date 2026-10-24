@@ -19,6 +19,7 @@ const entrypoints = [
   'notification-provider-host.ts',
   'custom-notification-provider-host.ts',
   'custom-notification-provider-worker.ts',
+  'opentelemetry-runtime.ts',
   'opentelemetry-sdk.ts',
 ].map(path => resolve(sourceRoot, path));
 
@@ -40,6 +41,12 @@ const result = await Bun.build({
   format: 'esm',
   sourcemap: 'external',
   minify: true,
+  external: [
+    './opentelemetry-runtime.ts',
+    './opentelemetry-runtime.js',
+    './opentelemetry-sdk.ts',
+    './opentelemetry-sdk.js',
+  ],
   naming: '[name].[ext]',
 });
 
