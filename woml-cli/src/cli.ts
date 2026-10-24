@@ -302,6 +302,7 @@ import {
 } from './provider-doctor';
 import {
   readCompiledWorkflowCache,
+  sourceSnapshotDigest,
   writeCompiledWorkflowCache,
   type CompiledWorkflowCacheOptions,
 } from './compiled-workflow-cache';
@@ -2735,7 +2736,7 @@ async function assertStableSourceSnapshotUnprofiled(
           `source "${snapshot.path}" changed or became unreadable during activation.`
         );
       }
-      if (sourceDigest(content) !== snapshot.digest) {
+      if (sourceSnapshotDigest(snapshot.path, content) !== snapshot.digest) {
         throw new CliInputError(
           'WOML_SOURCE_CHANGED_DURING_ACTIVATION',
           `source "${snapshot.path}" changed while the deployment was being compiled; run the command again.`
