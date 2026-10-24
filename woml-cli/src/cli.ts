@@ -557,7 +557,7 @@ async function runWorkerCommand(
               `Targets: ${result.targets.join(', ')}`,
               `Capacity: ${result.capacity}`,
               'Transport: mutual TLS',
-              'Dispatch: disabled until RET5',
+              'Dispatch transport: session-only until RET7',
             ].join('\n') + '\n'
       );
       return 0;
@@ -574,7 +574,7 @@ async function runWorkerCommand(
                 'WOML remote worker session established.',
                 `Worker: ${String(session.workerId)}`,
                 `Session: ${String(session.sessionId)}`,
-                'Status: idle; executable dispatch is disabled until RET5',
+                'Status: idle; live dispatch transport completes in RET7',
               ].join('\n') + '\n'
         )
     );
@@ -3687,7 +3687,7 @@ async function runSingleCheckCommand(
       }
       io.stdout(
         reusablePackage?.schemaVersion === 16
-          ? `Compiled Model v21 package: ${reusablePackage.rootHash}\nExecution: remote placement, authenticated sessions, and durable dispatch authority are validated; executable remote attempts begin in RET5.\n`
+          ? `Compiled Model v21 package: ${reusablePackage.rootHash}\nExecution: remote placement, authenticated sessions, durable dispatch authority, and the worker attempt runtime are validated; live dispatch transport completes in RET7.\n`
           : reusablePackage?.schemaVersion === 14
           ? `Compiled Model v19 package: ${reusablePackage.rootHash}\nExecution: compensation and cleanup authoring is validated; durable correction execution begins in CC2–CC4.\n`
           : reusablePackage?.schemaVersion === 13
@@ -3779,7 +3779,7 @@ async function runSingleCheckCommand(
         io.stdout(`Target: ${placement.stepId} -> ${placement.target}\n`);
       }
       io.stdout(
-        'Execution: authenticated sessions and durable dispatch authority are available; executable remote attempts begin in RET5.\n'
+        'Execution: authenticated sessions, durable dispatch authority, and the worker attempt runtime are available; live dispatch transport completes in RET7.\n'
       );
       return 0;
     }

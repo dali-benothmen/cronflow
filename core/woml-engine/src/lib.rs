@@ -40,6 +40,7 @@ pub mod remote_coordinator_server;
 pub mod remote_dispatch;
 pub mod remote_protocol;
 pub mod remote_worker;
+pub mod remote_worker_journal;
 pub mod retention;
 pub mod rich_approval;
 pub mod runtime;
@@ -70,9 +71,12 @@ pub use remote_dispatch::{
   RemoteDispatchStateV1, REMOTE_DISPATCH_HEARTBEAT_MAX_BYTES, REMOTE_DISPATCH_RECOVERY_BATCH_LIMIT,
 };
 pub use remote_protocol::{
-  decode_worker_hello, decode_worker_poll, decode_worker_shutdown, RemoteProtocolError,
-  WorkerArchitectureV1, WorkerCapabilityV1, WorkerHelloV1, WorkerOperatingSystemV1,
-  WorkerPlatformV1, WorkerPollResultV1, WorkerPollV1, WorkerSessionV1, WorkerShutdownV1,
+  decode_remote_dispatch_package, decode_worker_hello, decode_worker_poll, decode_worker_shutdown,
+  RemoteArtifactGrantV1, RemoteArtifactOperationV1, RemoteCoordinatorAuthorityV1,
+  RemoteDispatchPackageV1, RemoteEffectiveAuthorityV1, RemoteProtocolError, WorkerArchitectureV1,
+  WorkerCapabilityV1, WorkerHelloV1, WorkerOperatingSystemV1, WorkerPlatformV1, WorkerPollResultV1,
+  WorkerPollV1, WorkerSessionV1, WorkerShutdownV1, REMOTE_DISPATCH_PACKAGE_PROFILE,
+  REMOTE_DISPATCH_PACKAGE_VERSION, REMOTE_TERMINAL_RESULT_MAX_BYTES,
   WORKER_PROTOCOL_MAX_CAPABILITIES, WORKER_PROTOCOL_MAX_CAPACITY,
   WORKER_PROTOCOL_MAX_MESSAGE_BYTES, WORKER_PROTOCOL_MAX_TARGETS, WORKER_PROTOCOL_PROFILE,
   WORKER_PROTOCOL_VERSION,
@@ -82,6 +86,13 @@ pub use remote_worker::{
   RemoteWorkerConfigurationError, WorkerConfigurationV1, WorkerSecretProviderV1,
   WorkerTlsReferencesV1, WORKER_CONFIGURATION_MAX_BYTES, WORKER_CONFIGURATION_PROFILE,
   WORKER_CONFIGURATION_VERSION,
+};
+pub use remote_worker_journal::{
+  prepare_remote_dispatch, verify_remote_artifact_transfer, EnvironmentRemoteSecretProvider,
+  PreparedRemoteDispatchV1, RemoteSecretProvider, RemoteWorkerAttemptRuntimeV1,
+  RemoteWorkerAuthorityV1, RemoteWorkerError, RemoteWorkerTerminalV1, WorkerAttemptRecordV1,
+  WorkerAttemptStateV1, WorkerJournalV1, WORKER_JOURNAL_RECOVERY_LIMIT,
+  WORKER_JOURNAL_SCHEMA_VERSION,
 };
 pub use target_registry::{
   parse_target_registry, prepare_target_registry, PreparedTargetRegistryV1, TargetRegistryEntryV1,
@@ -264,9 +275,9 @@ pub use model::{
   CompiledLifecycleDefinition, CompiledLifecycleHook, CompiledLock, CompiledModuleBinding,
   CompiledModuleRuntime, CompiledQueuePolicy, CompiledRateLimitPolicy, CompiledReusableInvocation,
   CompiledRuntimePolicy, CompiledSaga, CompiledWait, CompiledWaitSignal,
-  CompiledWorkflowDefinition, LifecycleEventName, ModelIssue, ModelIssueCode, ModelValidationError,
-  NotificationDefinition, QueueDiscipline, RateLimitAlgorithm, ScriptRuntimeBindings,
-  ValueExpression,
+  CompiledWorkflowDefinition, CompiledWorkflowNode, LifecycleEventName, ModelIssue, ModelIssueCode,
+  ModelValidationError, NotificationDefinition, QueueDiscipline, RateLimitAlgorithm,
+  ScriptRuntimeBindings, ValueExpression,
 };
 pub use notification_host::{
   NotificationHostClient, NotificationHostClientError, NotificationHostProcessOptions,

@@ -1,14 +1,19 @@
 //! Frozen Worker Protocol v1 messages and fail-closed decoding.
 //!
-//! RET3 deliberately contains no executable dispatch handler. A successfully
-//! authenticated worker may establish, renew, poll, and close a session only.
+//! The protocol authenticates worker sessions and carries one integrity-bound
+//! node attempt per dispatch package. Workflow scheduling remains coordinator
+//! authority and is never delegated to the worker.
 
 use std::collections::BTreeSet;
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use serde_json_canonicalizer::to_vec as canonical_json;
+use sha2::{Digest, Sha256};
 use thiserror::Error;
+
+use crate::{CompiledWorkflowNode, WorkflowContext};
 
 pub const WORKER_PROTOCOL_PROFILE: &str = "woml.worker-protocol/v1";
 pub const WORKER_PROTOCOL_VERSION: u32 = 1;
@@ -16,6 +21,9 @@ pub const WORKER_PROTOCOL_MAX_MESSAGE_BYTES: usize = 1024 * 1024;
 pub const WORKER_PROTOCOL_MAX_TARGETS: usize = 32;
 pub const WORKER_PROTOCOL_MAX_CAPABILITIES: usize = 128;
 pub const WORKER_PROTOCOL_MAX_CAPACITY: u32 = 64;
+pub const REMOTE_DISPATCH_PACKAGE_PROFILE: &str = "woml.dispatch-package/v1";
+pub const REMOTE_DISPATCH_PACKAGE_VERSION: u32 = 1;
+pub const REMOTE_TERMINAL_RESULT_MAX_BYTES: usize = 1024 * 1024;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -44,6 +52,95 @@ pub enum WorkerArchitectureV1 {
 pub struct WorkerCapabilityV1 {
   pub id: String,
   pub version: u32,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RemoteArtifactOperationV1 {
+  Read,
+  Write,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct RemoteArtifactGrantV1 {
+  pub artifact_id: String,
+  pub operation: RemoteArtifactOperationV1,
+  pub expires_at: DateTime<Utc>,
+  pub digest: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct RemoteCoordinatorAuthorityV1 {
+  pub policy_digest: String,
+  pub allowed_capabilities: Vec<WorkerCapabilityV1>,
+  pub allowed_secret_names: Vec<String>,
+}
+
+/// One integrity-bound attempt. The package intentionally contains one node,
+/// not a workflow graph, so a worker cannot schedule or select additional work.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct RemoteDispatchPackageV1 {
+  pub profile: String,
+  pub version: u32,
+  pub dispatch_id: String,
+  pub run_id: String,
+  pub node_id: String,
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub iteration_key: Option<String>,
+  pub attempt: u32,
+  pub invocation_id: String,
+  pub target: String,
+  pub target_registry_digest: String,
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub infrastructure_policy_digest: Option<String>,
+  pub definition_package_root_hash: String,
+  pub node: CompiledWorkflowNode,
+  pub context: WorkflowContext,
+  pub required_capabilities: Vec<String>,
+  pub required_secrets: Vec<String>,
+  pub artifact_grants: Vec<RemoteArtifactGrantV1>,
+  pub deadline: DateTime<Utc>,
+  pub package_digest: String,
+}
+
+impl RemoteDispatchPackageV1 {
+  pub fn computed_digest(&self) -> Result<String, RemoteProtocolError> {
+    let mut value =
+      serde_json::to_value(self).map_err(|_| invalid("dispatch cannot be encoded"))?;
+    let object = value
+      .as_object_mut()
+      .ok_or_else(|| invalid("dispatch package is not an object"))?;
+    object.insert("packageDigest".to_string(), Value::String(String::new()));
+    let bytes = canonical_json(&value).map_err(|_| invalid("dispatch cannot be canonicalized"))?;
+    Ok(format!("sha256:{:x}", Sha256::digest(bytes)))
+  }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct RemoteEffectiveAuthorityV1 {
+  pub coordinator_policy_digest: String,
+  pub worker_policy_digest: String,
+  pub capabilities: Vec<WorkerCapabilityV1>,
+  pub secret_names: Vec<String>,
+  pub artifact_grant_ids: Vec<String>,
+  pub authority_digest: String,
+}
+
+impl RemoteEffectiveAuthorityV1 {
+  pub fn computed_digest(&self) -> Result<String, RemoteProtocolError> {
+    let mut value =
+      serde_json::to_value(self).map_err(|_| invalid("authority cannot be encoded"))?;
+    value
+      .as_object_mut()
+      .ok_or_else(|| invalid("authority is not an object"))?
+      .insert("authorityDigest".to_string(), Value::String(String::new()));
+    let bytes = canonical_json(&value).map_err(|_| invalid("authority cannot be canonicalized"))?;
+    Ok(format!("sha256:{:x}", Sha256::digest(bytes)))
+  }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -163,6 +260,19 @@ pub fn decode_worker_hello(source: &[u8]) -> Result<WorkerHelloV1, RemoteProtoco
     }
   }
   Ok(message)
+}
+
+pub fn decode_remote_dispatch_package(
+  source: &[u8],
+) -> Result<RemoteDispatchPackageV1, RemoteProtocolError> {
+  let package: RemoteDispatchPackageV1 = decode(source)?;
+  if package.profile != REMOTE_DISPATCH_PACKAGE_PROFILE
+    || package.version != REMOTE_DISPATCH_PACKAGE_VERSION
+    || package.package_digest != package.computed_digest()?
+  {
+    return Err(invalid("dispatch package version or digest is invalid"));
+  }
+  Ok(package)
 }
 
 pub fn decode_worker_poll(source: &[u8]) -> Result<WorkerPollV1, RemoteProtocolError> {

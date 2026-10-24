@@ -37,7 +37,7 @@ describe('Remote Execution Targets CLI boundary', () => {
       'Target: deploy:cleanup:removeTemporaryFiles -> maintenance-runner'
     );
     expect(result.stdout).toContain(
-      'authenticated sessions and durable dispatch authority are available; executable remote attempts begin in RET5'
+      'authenticated sessions, durable dispatch authority, and the worker attempt runtime are available; live dispatch transport completes in RET7'
     );
   });
 
