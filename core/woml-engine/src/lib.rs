@@ -41,12 +41,19 @@ pub mod runtime;
 pub mod schedule;
 pub mod storage;
 pub mod store;
+pub mod target_registry;
 pub mod telegram;
 pub mod telemetry;
 pub mod telemetry_propagation;
 pub mod webhook;
 pub mod whatsapp;
 pub mod workflow_calls;
+
+pub use target_registry::{
+  parse_target_registry, prepare_target_registry, PreparedTargetRegistryV1, TargetRegistryEntryV1,
+  TargetRegistryError, TargetRegistryV1, TARGET_REGISTRY_MAX_BYTES, TARGET_REGISTRY_MAX_TARGETS,
+  TARGET_REGISTRY_PROFILE, TARGET_REGISTRY_VERSION,
+};
 
 pub use artifacts::{
   export_artifact, export_artifact_backup, inspect_artifact, inspect_run_artifacts,

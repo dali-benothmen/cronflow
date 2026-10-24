@@ -303,6 +303,15 @@ import {
   type CompiledWorkflowCacheOptions,
 } from './compiled-workflow-cache';
 import { runtimeActivationRequirements } from './runtime-activation';
+import {
+  inspectTarget,
+  loadTargetRegistry,
+  preflightRemoteTargets,
+  remoteTargetRequirements,
+  TargetRegistryError,
+  type PreparedTargetRegistryV1,
+  type TargetPreflightV1,
+} from './target-registry';
 
 export interface CliIo {
   readonly stdout: (text: string) => void;
@@ -332,11 +341,11 @@ class CliInputError extends Error {
 }
 
 function runUsage(): string {
-  return 'Usage: woml run <workflow.woml|directory>... [--config <path>] [--policy <name|path>] [--emergency-deny <name|path>] [--policy-trust <path>] [--require-policy-signature] [--process-policy <path>|--allow-process <aliases>] [--artifact-policy <path>] [--reviewer-directory <path>] [--host <address>] [--port <port>] [--state <path>] [--trigger <manualTriggerId>] [--resume <runId>] [--approval-port <port>] [--json] [--verbose] [--color=auto|always|never] [--background|-d]';
+  return 'Usage: woml run <workflow.woml|directory>... [--config <path>] [--target-registry <path>] [--target-trust <path>] [--policy <name|path>] [--emergency-deny <name|path>] [--policy-trust <path>] [--require-policy-signature] [--process-policy <path>|--allow-process <aliases>] [--artifact-policy <path>] [--reviewer-directory <path>] [--host <address>] [--port <port>] [--state <path>] [--trigger <manualTriggerId>] [--resume <runId>] [--approval-port <port>] [--json] [--verbose] [--color=auto|always|never] [--background|-d]';
 }
 
 function testUsage(): string {
-  return 'Usage: woml test <workflow.woml> [--policy <name|path>] [--emergency-deny <name|path>] [--policy-trust <path>] [--require-policy-signature] [--process-policy <path>|--allow-process <aliases>] [--artifact-policy <path>] [--reviewer-directory <path>] [--state <path>] [--trigger <manualTriggerId>] [--resume <runId>] [--approval-port <port>]';
+  return 'Usage: woml test <workflow.woml> [--target-registry <path>] [--target-trust <path>] [--policy <name|path>] [--emergency-deny <name|path>] [--policy-trust <path>] [--require-policy-signature] [--process-policy <path>|--allow-process <aliases>] [--artifact-policy <path>] [--reviewer-directory <path>] [--state <path>] [--trigger <manualTriggerId>] [--resume <runId>] [--approval-port <port>]';
 }
 
 function policyUsage(): string {
@@ -400,7 +409,242 @@ function signalUsage(): string {
 }
 
 function checkUsage(): string {
-  return 'Usage: woml check <workflow.woml|directory>... [--config <path>] [--policy <name|path>] [--policy-trust <path>] [--require-policy-signature] [--process-policy <path>] [--artifact-policy <path>] [--json]';
+  return 'Usage: woml check <workflow.woml|directory>... [--config <path>] [--target-registry <path>] [--target-trust <path>] [--policy <name|path>] [--policy-trust <path>] [--require-policy-signature] [--process-policy <path>] [--artifact-policy <path>] [--json]';
+}
+
+function targetUsage(): string {
+  return [
+    'Usage:',
+    '  woml target list [--registry <path>] [--trust <path>] [--json]',
+    '  woml target check <target> [--registry <path>] [--trust <path>] [--json]',
+    '  woml target inspect <target> [--registry <path>] [--trust <path>] --json',
+  ].join('\n');
+}
+
+interface TargetCommandArguments {
+  readonly operation: 'list' | 'check' | 'inspect';
+  readonly target?: string;
+  readonly registryPath?: string;
+  readonly trustPath?: string;
+  readonly json: boolean;
+}
+
+function parseTargetCommandArguments(
+  args: readonly string[]
+): TargetCommandArguments {
+  const operation = args[1];
+  if (operation !== 'list' && operation !== 'check' && operation !== 'inspect') {
+    throw new CliInputError('WOML_CLI_ARGUMENTS_INVALID', targetUsage());
+  }
+  let index = 2;
+  let target: string | undefined;
+  if (operation !== 'list') {
+    target = args[index];
+    if (
+      target === undefined ||
+      !/^[a-z][a-z0-9]*(?:-[a-z0-9]+)*$/u.test(target) ||
+      target.length > 128
+    ) {
+      throw new CliInputError('WOML_CLI_ARGUMENTS_INVALID', targetUsage());
+    }
+    index += 1;
+  }
+  let registryPath: string | undefined;
+  let trustPath: string | undefined;
+  let json = false;
+  for (; index < args.length; index += 1) {
+    const argument = args[index]!;
+    if (argument === '--json') {
+      if (json) throw new CliInputError('WOML_CLI_ARGUMENTS_INVALID', targetUsage());
+      json = true;
+      continue;
+    }
+    const value = args[index + 1];
+    if (value === undefined || value.startsWith('--')) {
+      throw new CliInputError('WOML_CLI_ARGUMENTS_INVALID', targetUsage());
+    }
+    if (argument === '--registry' && registryPath === undefined) {
+      registryPath = value;
+    } else if (argument === '--trust' && trustPath === undefined) {
+      trustPath = value;
+    } else {
+      throw new CliInputError('WOML_CLI_ARGUMENTS_INVALID', targetUsage());
+    }
+    index += 1;
+  }
+  if (
+    (operation === 'inspect' && !json)
+  ) {
+    throw new CliInputError('WOML_CLI_ARGUMENTS_INVALID', targetUsage());
+  }
+  return {
+    operation,
+    ...(target === undefined ? {} : { target }),
+    ...(registryPath === undefined ? {} : { registryPath }),
+    ...(trustPath === undefined ? {} : { trustPath }),
+    json,
+  };
+}
+
+async function runTargetCommand(
+  args: readonly string[],
+  io: CliIo
+): Promise<number> {
+  let parsed: TargetCommandArguments;
+  try {
+    parsed = parseTargetCommandArguments(args);
+  } catch (error) {
+    io.stderr(`${error instanceof Error && error.message !== targetUsage() ? `${error.message}\n` : ''}${targetUsage()}\n`);
+    return 2;
+  }
+  try {
+    const defaultRegistry = resolve('.woml/targets.json');
+    const defaultTrust = resolve('.woml/target-trust.json');
+    const registryPath =
+      parsed.registryPath ??
+      (existsSync(defaultRegistry) ? defaultRegistry : undefined);
+    const trustPath =
+      parsed.trustPath ?? (existsSync(defaultTrust) ? defaultTrust : undefined);
+    const localInspection = {
+      profile: 'woml.target-inspection/v1' as const,
+      target: 'local',
+      source: 'built-in' as const,
+      kind: 'local' as const,
+      requiredCapabilities: [] as readonly string[],
+      allowedWorkers: ['coordinator'] as readonly string[],
+      eligibleWorkers: ['coordinator'] as readonly string[],
+      minimumWorkerVersion: WOML_CLI_VERSION,
+      maximumInFlight: null,
+      health: { status: 'ready' as const, reason: 'coordinator-local' as const },
+    };
+    const localListEntry = {
+      id: 'local',
+      source: 'built-in' as const,
+      kind: 'local' as const,
+      requiredCapabilities: [] as readonly string[],
+      eligibleWorkers: 1,
+      maximumInFlight: null,
+      health: localInspection.health,
+    };
+    if (parsed.target === 'local') {
+      const result =
+        parsed.operation === 'check'
+          ? {
+              ...localInspection,
+              profile: 'woml.target-check/v1' as const,
+              status: 'passed' as const,
+            }
+          : localInspection;
+      io.stdout(
+        parsed.json
+          ? `${JSON.stringify(result)}\n`
+          : 'Target local passed built-in coordinator preflight.\n'
+      );
+      return 0;
+    }
+    if (registryPath === undefined) {
+      if (parsed.operation !== 'list') {
+        throw new TargetRegistryError(
+          'WOML_TARGET_UNKNOWN',
+          'No target registry was provided and .woml/targets.json does not exist.'
+        );
+      }
+      const result = {
+        profile: 'woml.target-list/v1' as const,
+        registryPath: null,
+        registryDigest: null,
+        trustStatus: 'not_configured' as const,
+        targets: [localListEntry],
+      };
+      io.stdout(
+        parsed.json
+          ? `${JSON.stringify(result)}\n`
+          : 'local · built-in coordinator · ready\n'
+      );
+      return 0;
+    }
+    const prepared = await loadTargetRegistry(registryPath, trustPath);
+    if (parsed.operation === 'list') {
+      const result = {
+        profile: 'woml.target-list/v1' as const,
+        registryPath: prepared.path,
+        registryDigest: prepared.digest,
+        trustStatus: prepared.trust === undefined ? 'not_configured' : 'verified',
+        targets: [
+          localListEntry,
+          ...prepared.registry.targets.map(target => {
+            const inspected = inspectTarget(prepared, target.id);
+            return {
+              id: target.id,
+              source: 'operator-registry' as const,
+              kind: target.kind,
+              requiredCapabilities: target.requiredCapabilities,
+              eligibleWorkers: inspected.eligibleWorkers.length,
+              minimumWorkerVersion: target.minimumWorkerVersion,
+              maximumInFlight: target.maximumInFlight,
+              health: inspected.health,
+            };
+          }),
+        ],
+      };
+      io.stdout(
+        parsed.json
+          ? `${JSON.stringify(result)}\n`
+          : result.targets.length === 0
+            ? `No remote targets are configured in ${result.registryPath}.\n`
+            : [
+                `Target registry ${result.registryDigest} · trust ${result.trustStatus}`,
+                ...result.targets.map(target =>
+                  target.id === 'local'
+                    ? 'local · built-in coordinator · ready'
+                    : `${target.id} · operator registry · ${target.requiredCapabilities.join(', ')} · ${target.eligibleWorkers} eligible worker${target.eligibleWorkers === 1 ? '' : 's'} · health not observed`
+                ),
+              ].join('\n') + '\n'
+      );
+      return 0;
+    }
+    const inspection = inspectTarget(prepared, parsed.target!);
+    if (parsed.operation === 'check') {
+      if (inspection.eligibleWorkers.length === 0) {
+        throw new TargetRegistryError(
+          'WOML_TARGET_UNAUTHORIZED',
+          `Target ${JSON.stringify(inspection.target)} has no worker identity anchored by the target trust file.`
+        );
+      }
+      const result = {
+        ...inspection,
+        profile: 'woml.target-check/v1' as const,
+        status: 'passed' as const,
+      };
+      io.stdout(
+        parsed.json
+          ? `${JSON.stringify(result)}\n`
+          : `Target ${inspection.target} passed registry and trust preflight · ${inspection.eligibleWorkers.length} eligible worker${inspection.eligibleWorkers.length === 1 ? '' : 's'} · health not observed.\n`
+      );
+      return 0;
+    }
+    io.stdout(`${JSON.stringify(inspection)}\n`);
+    return 0;
+  } catch (error) {
+    io.stderr(`${formatError(error)}\n`);
+    return 1;
+  }
+}
+
+async function loadDefaultTargetRegistryForRemoteWorkflows(
+  workflows: readonly CompiledWorkflowDefinition[],
+  prepared: PreparedTargetRegistryV1 | undefined
+): Promise<PreparedTargetRegistryV1 | undefined> {
+  if (prepared !== undefined || remoteTargetRequirements(workflows).length === 0) {
+    return prepared;
+  }
+  const registryPath = resolve('.woml/targets.json');
+  if (!existsSync(registryPath)) return undefined;
+  const trustPath = resolve('.woml/target-trust.json');
+  return await loadTargetRegistry(
+    registryPath,
+    existsSync(trustPath) ? trustPath : undefined
+  );
 }
 
 function typesUsage(): string {
@@ -408,7 +652,7 @@ function typesUsage(): string {
 }
 
 function usage(): string {
-  return `${runUsage()}\n${testUsage()}\n${logFollowUsage}\n${checkUsage()}\n${policyUsage()}\n${typesUsage()}\n${inspectUsage}\n${artifactsUsage()}\n${backupUsage}\n${restoreUsage}\n${pruneUsage}\n${listUsage()}\n${getUsage()}\n${cancelUsage()}\n${recoverUsage()}\n${stopUsage()}\n${emitUsage()}\n${signalUsage()}\n${secretsUsage()}\n${providerDoctorUsage()}`;
+  return `${runUsage()}\n${testUsage()}\n${logFollowUsage}\n${checkUsage()}\n${targetUsage()}\n${policyUsage()}\n${typesUsage()}\n${inspectUsage}\n${artifactsUsage()}\n${backupUsage}\n${restoreUsage}\n${pruneUsage}\n${listUsage()}\n${getUsage()}\n${cancelUsage()}\n${recoverUsage()}\n${stopUsage()}\n${emitUsage()}\n${signalUsage()}\n${secretsUsage()}\n${providerDoctorUsage()}`;
 }
 
 interface RunArguments {
@@ -425,6 +669,10 @@ interface RunArguments {
   readonly processPolicyPath?: string;
   readonly artifactPolicyPath?: string;
   readonly reviewerDirectoryPath?: string;
+  readonly targetRegistryPath?: string;
+  readonly targetTrustPath?: string;
+  readonly targetRegistry?: PreparedTargetRegistryV1;
+  readonly targetPreflight?: TargetPreflightV1;
   readonly infrastructurePolicyReference?: string;
   readonly emergencyDenyReference?: string;
   readonly infrastructurePolicyTrustPath?: string;
@@ -481,6 +729,8 @@ function parseRunArguments(args: readonly string[]): RunArguments {
   let processPolicyPath: string | undefined;
   let artifactPolicyPath: string | undefined;
   let reviewerDirectoryPath: string | undefined;
+  let targetRegistryPath: string | undefined;
+  let targetTrustPath: string | undefined;
   let infrastructurePolicyReference: string | undefined;
   let emergencyDenyReference: string | undefined;
   let infrastructurePolicyTrustPath: string | undefined;
@@ -530,6 +780,8 @@ function parseRunArguments(args: readonly string[]): RunArguments {
         option !== '--process-policy' &&
         option !== '--artifact-policy' &&
         option !== '--reviewer-directory' &&
+        option !== '--target-registry' &&
+        option !== '--target-trust' &&
         option !== '--policy' &&
         option !== '--emergency-deny' &&
         option !== '--policy-trust' &&
@@ -587,6 +839,22 @@ function parseRunArguments(args: readonly string[]): RunArguments {
         );
       }
       reviewerDirectoryPath = value;
+    } else if (option === '--target-registry') {
+      if (value.length === 0) {
+        throw new CliInputError(
+          'WOML_CLI_ARGUMENTS_INVALID',
+          '--target-registry requires a non-empty JSON file path.'
+        );
+      }
+      targetRegistryPath = value;
+    } else if (option === '--target-trust') {
+      if (value.length === 0) {
+        throw new CliInputError(
+          'WOML_CLI_ARGUMENTS_INVALID',
+          '--target-trust requires a non-empty JSON file path.'
+        );
+      }
+      targetTrustPath = value;
     } else if (option === '--policy') {
       if (value.length === 0) {
         throw new CliInputError(
@@ -689,6 +957,12 @@ function parseRunArguments(args: readonly string[]): RunArguments {
       'Use either --process-policy or --allow-process, not both.'
     );
   }
+  if (targetRegistryPath === undefined && targetTrustPath !== undefined) {
+    throw new CliInputError(
+      'WOML_TARGET_REGISTRY_REQUIRED',
+      '--target-trust requires --target-registry.'
+    );
+  }
   if (
     emergencyDenyReference !== undefined &&
     infrastructurePolicyReference === undefined
@@ -722,6 +996,8 @@ function parseRunArguments(args: readonly string[]): RunArguments {
     ...(processPolicyPath === undefined ? {} : { processPolicyPath }),
     ...(artifactPolicyPath === undefined ? {} : { artifactPolicyPath }),
     ...(reviewerDirectoryPath === undefined ? {} : { reviewerDirectoryPath }),
+    ...(targetRegistryPath === undefined ? {} : { targetRegistryPath }),
+    ...(targetTrustPath === undefined ? {} : { targetTrustPath }),
     ...(infrastructurePolicyReference === undefined
       ? {}
       : { infrastructurePolicyReference }),
@@ -779,6 +1055,16 @@ async function resolveRunArgumentsConfiguration(
     args.reviewerDirectoryPath === undefined
       ? undefined
       : await loadReviewerDirectory(args.reviewerDirectoryPath);
+  const targetRegistry =
+    args.targetRegistryPath === undefined
+      ? undefined
+      : await loadTargetRegistry(
+          args.targetRegistryPath,
+          args.targetTrustPath ??
+            (existsSync(resolve('.woml/target-trust.json'))
+              ? resolve('.woml/target-trust.json')
+              : undefined)
+        );
   const infrastructurePolicy =
     args.infrastructurePolicyReference === undefined
       ? undefined
@@ -820,6 +1106,7 @@ async function resolveRunArgumentsConfiguration(
   if (args.command !== 'run') {
     return {
       ...args,
+      ...(targetRegistry === undefined ? {} : { targetRegistry }),
       ...(runtimeCapabilities === undefined ? {} : { runtimeCapabilities }),
     };
   }
@@ -833,6 +1120,7 @@ async function resolveRunArgumentsConfiguration(
   }
   return {
     ...args,
+    ...(targetRegistry === undefined ? {} : { targetRegistry }),
     statePath: configuration.statePath,
     host: configuration.public.host,
     port: configuration.public.port,
@@ -1880,6 +2168,9 @@ function formatError(
   }
   if (error instanceof InfrastructurePolicyError) {
     return `WOML infrastructure policy error [${error.code}]: ${error.message}`;
+  }
+  if (error instanceof TargetRegistryError) {
+    return `WOML target error [${error.code}]: ${error.message}`;
   }
   if (error instanceof ReviewerDirectoryLoadError) {
     return `WOML approval authority error [${error.code}]: ${error.message}`;
@@ -3668,6 +3959,8 @@ interface CheckArguments {
   readonly configPath?: string;
   readonly processPolicyPath?: string;
   readonly artifactPolicyPath?: string;
+  readonly targetRegistryPath?: string;
+  readonly targetTrustPath?: string;
   readonly infrastructurePolicyReference?: string;
   readonly infrastructurePolicyTrustPath?: string;
   readonly requireInfrastructurePolicySignature: boolean;
@@ -3682,6 +3975,8 @@ function parseCheckArguments(args: readonly string[]): CheckArguments {
   let configPath: string | undefined;
   let processPolicyPath: string | undefined;
   let artifactPolicyPath: string | undefined;
+  let targetRegistryPath: string | undefined;
+  let targetTrustPath: string | undefined;
   let infrastructurePolicyReference: string | undefined;
   let infrastructurePolicyTrustPath: string | undefined;
   let requireInfrastructurePolicySignature = false;
@@ -3739,6 +4034,32 @@ function parseCheckArguments(args: readonly string[]): CheckArguments {
       index += 1;
       continue;
     }
+    if (argument === '--target-registry') {
+      const value = args[index + 1];
+      if (
+        targetRegistryPath !== undefined ||
+        value === undefined ||
+        value.startsWith('--')
+      ) {
+        throw new CliInputError('WOML_CLI_ARGUMENTS_INVALID', checkUsage());
+      }
+      targetRegistryPath = value;
+      index += 1;
+      continue;
+    }
+    if (argument === '--target-trust') {
+      const value = args[index + 1];
+      if (
+        targetTrustPath !== undefined ||
+        value === undefined ||
+        value.startsWith('--')
+      ) {
+        throw new CliInputError('WOML_CLI_ARGUMENTS_INVALID', checkUsage());
+      }
+      targetTrustPath = value;
+      index += 1;
+      continue;
+    }
     if (argument === '--policy') {
       const value = args[index + 1];
       if (
@@ -3783,11 +4104,19 @@ function parseCheckArguments(args: readonly string[]): CheckArguments {
       '--require-policy-signature and --policy-trust require a base --policy.'
     );
   }
+  if (targetRegistryPath === undefined && targetTrustPath !== undefined) {
+    throw new CliInputError(
+      'WOML_TARGET_REGISTRY_REQUIRED',
+      '--target-trust requires --target-registry.'
+    );
+  }
   return {
     inputPaths,
     ...(configPath === undefined ? {} : { configPath }),
     ...(processPolicyPath === undefined ? {} : { processPolicyPath }),
     ...(artifactPolicyPath === undefined ? {} : { artifactPolicyPath }),
+    ...(targetRegistryPath === undefined ? {} : { targetRegistryPath }),
+    ...(targetTrustPath === undefined ? {} : { targetTrustPath }),
     ...(infrastructurePolicyReference === undefined
       ? {}
       : { infrastructurePolicyReference }),
@@ -3841,6 +4170,7 @@ interface ProductionPreflightReport {
       typeof analyzeInfrastructurePolicySource
     >[number][];
   };
+  readonly remoteTargets?: TargetPreflightV1;
   readonly workflows: readonly {
     readonly workflowId: string;
     readonly sourcePath: string;
@@ -3887,6 +4217,25 @@ async function runDeploymentCheckCommand(
               requireSignature: parsed.requireInfrastructurePolicySignature,
             }
           );
+    const explicitlyConfiguredTargetRegistry =
+      parsed.targetRegistryPath === undefined
+        ? undefined
+        : await loadTargetRegistry(
+            parsed.targetRegistryPath,
+            parsed.targetTrustPath ??
+              (existsSync(resolve('.woml/target-trust.json'))
+                ? resolve('.woml/target-trust.json')
+                : undefined)
+          );
+    const targetRegistry = await loadDefaultTargetRegistryForRemoteWorkflows(
+      sources.map(source => source.workflow),
+      explicitlyConfiguredTargetRegistry
+    );
+    const remoteTargets = preflightRemoteTargets(
+      sources.map(source => source.workflow),
+      targetRegistry,
+      infrastructurePolicy?.prepared.bundle
+    );
     if (processUsage.length > 0 && parsed.processPolicyPath === undefined) {
       io.stderr(
         'WOML check: services.process is valid but disabled at runtime unless --allow-process or --process-policy is provided to woml run.\n'
@@ -3953,6 +4302,7 @@ async function runDeploymentCheckCommand(
               ).flat(),
             },
           }),
+      ...(remoteTargets === undefined ? {} : { remoteTargets }),
       workflows: sources.map(source => ({
         workflowId: source.workflow.workflowId,
         sourcePath: source.filePath,
@@ -3989,6 +4339,12 @@ async function runDeploymentCheckCommand(
           `  ${decision.workflowId} ${decision.capability}.${decision.operation}: ${decision.status.replaceAll('_', ' ')}.\n`
         );
       }
+    }
+    if (report.remoteTargets !== undefined) {
+      io.stdout(
+        `Remote targets: ${report.remoteTargets.targets.map(target => `${target.id} (${target.eligibleWorkers.length} trusted worker${target.eligibleWorkers.length === 1 ? '' : 's'})`).join(', ')}.\n`
+      );
+      io.stdout(`Target registry: ${report.remoteTargets.registryDigest}.\n`);
     }
     if (configuration !== undefined && environment !== undefined) {
       io.stdout(`Deployment: ${configuration.deploymentName}.\n`);
@@ -4040,6 +4396,8 @@ async function runCheckCommand(
     parsed.configPath === undefined &&
     parsed.processPolicyPath === undefined &&
     parsed.artifactPolicyPath === undefined &&
+    parsed.targetRegistryPath === undefined &&
+    parsed.targetTrustPath === undefined &&
     parsed.infrastructurePolicyReference === undefined &&
     onlyInputIsFile
   ) {
@@ -6010,6 +6368,15 @@ async function activateWorkflows(
           return requirements;
         }
       );
+      if (
+        activationRequirements.remoteExecution !== undefined &&
+        args.targetPreflight === undefined
+      ) {
+        throw new CliInputError(
+          'WOML_TARGET_UNAUTHORIZED',
+          'atomic runtime activation refused to open admission because remote target preflight was not completed.'
+        );
+      }
       const routes = productionSources.flatMap(source =>
         webhookRouteSummaries(source.workflow)
       );
@@ -7550,6 +7917,7 @@ async function runCliUnprofiled(
     'run',
     'test',
     'check',
+    'target',
     'policy',
     'types',
     'secrets',
@@ -7601,6 +7969,10 @@ async function runCliUnprofiled(
 
   if (args[0] === 'check') {
     return await runCheckCommand(args, io, dependencies);
+  }
+
+  if (args[0] === 'target') {
+    return await runTargetCommand(args, io);
   }
 
   if (args[0] === 'policy') {
@@ -8241,6 +8613,24 @@ async function runCliUnprofiled(
     );
     const activeInfrastructurePolicy =
       runArguments.runtimeCapabilities?.infrastructurePolicy;
+    const compiledWorkflows = sources.map(source => source.workflow);
+    const targetRegistry = await loadDefaultTargetRegistryForRemoteWorkflows(
+      compiledWorkflows,
+      runArguments.targetRegistry
+    );
+    const targetPreflight = preflightRemoteTargets(
+      compiledWorkflows,
+      targetRegistry,
+      activeInfrastructurePolicy?.policy
+    );
+    if (targetPreflight !== undefined) {
+      runArguments = { ...runArguments, targetRegistry, targetPreflight };
+      if (!runArguments.json) {
+        io.stdout(
+          `Remote targets ready: ${targetPreflight.targets.map(target => target.id).join(', ')} · ${targetPreflight.registryDigest}.\n`
+        );
+      }
+    }
     if (activeInfrastructurePolicy !== undefined && !runArguments.json) {
       io.stdout(
         `Policy ${activeInfrastructurePolicy.policy.id}@${activeInfrastructurePolicy.policy.version} · ${activeInfrastructurePolicy.policy.environment}` +

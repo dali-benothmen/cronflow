@@ -45,6 +45,7 @@ describe('WOML Remote Execution Targets', () => {
     for (const name of [
       'dispatch-package.v1.schema.json',
       'target-registry.v1.schema.json',
+      'target-trust.v1.schema.json',
       'worker-configuration.v1.schema.json',
       'worker-protocol.v1.schema.json',
       'remote-dispatch-inspection.v1.schema.json',
@@ -57,6 +58,7 @@ describe('WOML Remote Execution Targets', () => {
 
     const cases = [
       ['https://woml.dev/schemas/target-registry/v1', 'target-registry.v1.json'],
+      ['https://woml.dev/schemas/target-trust/v1', 'target-trust.v1.json'],
       ['https://woml.dev/schemas/worker-configuration/v1', 'worker-configuration.v1.json'],
       ['https://woml.dev/schemas/dispatch-package/v1', 'dispatch-package.v1.json'],
       ['https://woml.dev/schemas/remote-dispatch-inspection/v1', 'inspection.v1.json'],

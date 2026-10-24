@@ -1,8 +1,9 @@
 # Remote Execution Targets v1
 
 Status: frozen by RET0. Model v21 and Definition Package v16 authoring are
-implemented by RET1. Target activation, authenticated transport, durable
-dispatch, and worker execution remain disabled until RET2–RET5.
+implemented by RET1. Target Registry v1, trust preflight, and the target CLI
+are implemented by RET2. Authenticated transport, durable dispatch, and worker
+execution remain disabled until RET3–RET5.
 
 ## Purpose
 
@@ -100,6 +101,44 @@ is `target-registry.v1.schema.json` and its profile is
 
 The canonical JSON SHA-256 digest binds a dispatch to the reviewed target
 configuration.
+
+## Target Trust v1
+
+Worker certificate references live in a separate operator-owned document with
+profile `woml.target-trust/v1`. Each entry binds one allowed worker identity to
+a relative PEM certificate path. Registry and trust files must be regular,
+non-symlink files and must not be group- or world-writable on Unix. Certificate
+references must stay within the trust file directory and resolve to bounded,
+regular, non-symlink PEM files.
+
+WOML hashes certificate bytes into the trust digest but never copies PEM bytes
+into inspection output, runtime configuration, compiled models, or workflow
+state. Private keys are not accepted by the target registry or target trust
+contracts; they remain worker-local configuration.
+
+Before runtime activation, RET2 joins every Model v21 placement with its
+registry entry, trusted worker identities, declared capabilities, and the
+active infrastructure policy. Remote dispatch is modeled as an
+`unsafe-write` operation named `dispatch` for each required capability. An
+unknown target, missing capability, untrusted allowlist, absent policy, or
+policy denial stops activation before admission opens.
+
+RET2 validates each `minimumWorkerVersion` constraint syntactically. RET3 will
+apply that constraint to the version advertised by an authenticated worker;
+configuration alone is never treated as proof of a compatible live worker.
+
+Operators can inspect this boundary without starting a runtime:
+
+```bash
+woml target list --registry .woml/targets.json --trust .woml/target-trust.json
+woml target check production-private --registry .woml/targets.json --trust .woml/target-trust.json
+woml target inspect production-private --registry .woml/targets.json --trust .woml/target-trust.json --json
+```
+
+Until RET3 introduces authenticated worker sessions, target health is reported
+as `not_observed`; WOML does not infer reachability from configuration. A
+local-only workflow does not load a target registry, resolve certificates, or
+construct any remote listener or scheduler.
 
 ## Worker Configuration v1
 
