@@ -255,7 +255,9 @@ async function withinDeadline<T>(
       promise,
       new Promise<never>((_resolve, reject) => {
         timer = setTimeout(() => reject(new Error(code)), timeoutMs);
-        timer.unref?.();
+        // This timer is the authority that bounds an operation which may never
+        // settle. Keep it referenced until the race completes: Bun on Windows
+        // may otherwise leave the awaited race pending indefinitely.
       }),
     ]);
   } finally {
