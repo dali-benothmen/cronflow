@@ -194,7 +194,9 @@ export function governOpenTelemetryExporter<T extends object, TValue>(
         attemptSettled = true;
         finish({ code: EXPORT_FAILURE }, 'export_timeout');
       }, remaining);
-      if (typeof timer === 'object') timer.unref?.();
+      // Timeout and retry timers are the only authorities able to settle an
+      // exporter that never invokes its callback. They must remain referenced
+      // while the export is active, especially under Bun on Windows.
       try {
         delegate.export(value, result => {
           if (attemptSettled || settled) return;
@@ -211,8 +213,7 @@ export function governOpenTelemetryExporter<T extends object, TValue>(
               code: 'WOML_OTEL_EXPORT_RETRY',
               retryAt: new Date(retryAt).toISOString(),
             });
-            const retryTimer = schedule(() => attempt(attemptIndex + 1), delay);
-            if (typeof retryTimer === 'object') retryTimer.unref?.();
+            schedule(() => attempt(attemptIndex + 1), delay);
             return;
           }
           finish(result, 'export_failed');
